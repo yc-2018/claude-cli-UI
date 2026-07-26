@@ -1,5 +1,5 @@
 import { _electron as electron } from "playwright";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
@@ -143,7 +143,10 @@ try {
   await page.locator(".composer textarea").fill("这是首次会话名称测试内容");
   await page.locator(".composer textarea").press("Enter");
   await page.waitForSelector('.message.assistant[data-status="done"]', { timeout: 15_000 });
-  await page.waitForFunction(() => document.querySelector(".markdown")?.textContent?.includes("流式输出稳定"));
+  await page.waitForFunction(() => {
+    const responses = document.querySelectorAll(".message.assistant .message-body > .markdown");
+    return responses.item(responses.length - 1)?.textContent?.includes("流式输出稳定");
+  });
   await page.waitForTimeout(500);
   const normalizedSession = await readFile(resolve(cliSessions, "22222222-2222-4222-8222-222222222222.jsonl"), "utf8");
   if (normalizedSession.includes('"entrypoint":"sdk-cli"') || normalizedSession.includes('"promptSource":"sdk"')) {
@@ -203,6 +206,25 @@ try {
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
   const bottomDistance = await page.locator(".conversation-scroll").evaluate((container) => container.scrollHeight - container.clientHeight - container.scrollTop);
   if (bottomDistance > 2) throw new Error(`conversation did not scroll to the bottom after send: ${bottomDistance}px`);
+
+  await page.locator(".composer textarea").fill("滚动锁定测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForSelector('.message.assistant[data-status="running"] .thinking-content');
+  await page.waitForFunction(() => (document.querySelector('.message.assistant[data-status="running"] .thinking-content')?.textContent?.length ?? 0) > 120);
+  await page.locator(".conversation-scroll").evaluate((container) => {
+    container.scrollTop = 0;
+    container.dispatchEvent(new Event("scroll"));
+  });
+  await page.waitForFunction(() => (document.querySelector('.message.assistant[data-status="running"] .thinking-content')?.textContent?.length ?? 0) > 360);
+  const heldScrollTop = await page.locator(".conversation-scroll").evaluate((container) => container.scrollTop);
+  if (heldScrollTop > 2) throw new Error(`streaming output stole the user's scroll position: ${heldScrollTop}px`);
+  await page.locator(".conversation-scroll").evaluate((container) => {
+    container.scrollTop = container.scrollHeight;
+    container.dispatchEvent(new Event("scroll"));
+  });
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  const resumedBottomDistance = await page.locator(".conversation-scroll").evaluate((container) => container.scrollHeight - container.clientHeight - container.scrollTop);
+  if (resumedBottomDistance > 2) throw new Error(`bottom-follow did not resume: ${resumedBottomDistance}px`);
 
   await page.locator(".composer textarea").fill("/st");
   await page.waitForSelector(".command-menu");
@@ -292,6 +314,11 @@ try {
   );
   await electronApp.close();
   electronApp = undefined;
+  const projectStore = JSON.parse(await readFile(resolve(profile, "projects.json"), "utf8"));
+  if (!Array.isArray(projectStore) || projectStore.length !== 1 || projectStore[0]?.conversations?.length !== 5) {
+    throw new Error("main-process project store was not written");
+  }
+  await rm(resolve(profile, "Local Storage"), { recursive: true, force: true });
 
   electronApp = await launch();
   page = await electronApp.firstWindow();
@@ -347,7 +374,7 @@ try {
     };
     location.reload();
   });
-  await page.waitForSelector(".empty-view");
+  await page.waitForSelector(".project-group");
   if (await page.locator(".fatal-error").count()) throw new Error("corrupt project data reached the error boundary");
   await electronApp.close();
   electronApp = undefined;

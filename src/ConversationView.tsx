@@ -70,8 +70,14 @@ function ThinkingBlock({ content, running }: { content: string; running: boolean
 
 export default function ConversationView({ messages, loadingHistory = false }: { messages: ChatMessage[]; loadingHistory?: boolean }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+  const previousMessageCountRef = useRef(0);
   const latest = messages.at(-1);
   useLayoutEffect(() => {
+    const newMessageWasAdded = messages.length > previousMessageCountRef.current;
+    previousMessageCountRef.current = messages.length;
+    if (newMessageWasAdded) stickToBottomRef.current = true;
+    if (!stickToBottomRef.current) return;
     const scrollToBottom = () => {
       const container = scrollRef.current;
       if (container) container.scrollTop = container.scrollHeight;
@@ -100,7 +106,14 @@ export default function ConversationView({ messages, loadingHistory = false }: {
   }
 
   return (
-    <div className="conversation-scroll" ref={scrollRef}>
+    <div
+      className="conversation-scroll"
+      ref={scrollRef}
+      onScroll={(event) => {
+        const container = event.currentTarget;
+        stickToBottomRef.current = container.scrollHeight - container.clientHeight - container.scrollTop <= 48;
+      }}
+    >
       <div className="conversation">
         {messages.map((message) => (
           <article className={`message ${message.role}`} data-status={message.status} key={message.id}>

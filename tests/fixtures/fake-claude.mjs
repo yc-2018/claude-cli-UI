@@ -107,6 +107,29 @@ process.stdin.on("end", () => {
     return;
   }
 
+  if (prompt.includes("滚动锁定测试")) {
+    const thinking = "持续输出思考内容，用于验证用户上滑后页面不会跳回底部。".repeat(50);
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    let offset = 0;
+    const timer = setInterval(() => {
+      const chunk = thinking.slice(offset, offset + 12);
+      offset += chunk.length;
+      if (chunk) {
+        send({
+          type: "stream_event",
+          event: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: chunk } },
+          session_id: sessionId,
+        });
+      }
+      if (offset < thinking.length) return;
+      clearInterval(timer);
+      const response = "滚动锁定测试完成。";
+      send({ type: "assistant", message: { role: "assistant", content: [{ type: "thinking", thinking }, { type: "text", text: response }] }, session_id: sessionId });
+      send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
+    }, 20);
+    return;
+  }
+
   const response = `测试通过：${prompt.trim()}。` + "流式输出稳定。".repeat(180);
   const thinking = "先理解用户要求，再检查上下文，最后组织清晰的回答。";
 

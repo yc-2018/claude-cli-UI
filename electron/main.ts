@@ -1,8 +1,8 @@
 import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from "electron";
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
-import { appendFile, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFile, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -75,6 +75,7 @@ const ATTACHMENT_NAME_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab
 const IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES = 40 * 1024 * 1024;
+const MAX_PROJECT_STORE_BYTES = 50 * 1024 * 1024;
 
 protocol.registerSchemesAsPrivileged([{
   scheme: "claude-desk-attachment",
@@ -84,6 +85,9 @@ protocol.registerSchemesAsPrivileged([{
 if (process.env.CLAUDE_DESK_USER_DATA_DIR) {
   app.setPath("userData", process.env.CLAUDE_DESK_USER_DATA_DIR);
 }
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
 
 function createWindow() {
   const window = new BrowserWindow({
@@ -214,6 +218,61 @@ function isAttachment(value: unknown): value is Attachment {
 
 function attachmentsDirectory() {
   return join(app.getPath("userData"), "attachments");
+}
+
+function projectsStorePath() {
+  return join(app.getPath("userData"), "projects.json");
+}
+
+async function discoverClaudeWorkspaces() {
+  if (process.env.CLAUDE_DESK_DISABLE_PROJECT_DISCOVERY === "1" || process.env.CLAUDE_DESK_TEST_WORKSPACE) return [];
+  const root = join(homedir(), ".claude", "projects");
+  const directories = await readdir(root, { withFileTypes: true }).catch(() => []);
+  const workspaces = new Map<string, string>();
+
+  for (const directory of directories) {
+    if (!directory.isDirectory()) continue;
+    const sessionDirectory = join(root, directory.name);
+    const files = (await readdir(sessionDirectory).catch(() => []))
+      .filter((name) => name.toLowerCase().endsWith(".jsonl"))
+      .slice(0, 5);
+    let foundWorkspace = false;
+    for (const name of files) {
+      let handle;
+      try {
+        handle = await open(join(sessionDirectory, name), "r");
+        const buffer = Buffer.alloc(128 * 1024);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+        for (const line of buffer.toString("utf8", 0, bytesRead).split(/\r?\n/)) {
+          if (!line.trim()) continue;
+          const record: unknown = JSON.parse(line);
+          if (!record || typeof record !== "object") continue;
+          const cwd = (record as Record<string, unknown>).cwd;
+          if (typeof cwd !== "string" || !existsSync(cwd) || !statSync(cwd).isDirectory()) continue;
+          workspaces.set(normalizeWorkspace(cwd), cwd);
+          foundWorkspace = true;
+          break;
+        }
+      } catch {
+        // Malformed or inaccessible session files do not block other projects.
+      } finally {
+        await handle?.close().catch(() => undefined);
+      }
+      if (foundWorkspace) break;
+    }
+  }
+  return [...workspaces.values()];
+}
+
+function saveProjectStore(value: unknown) {
+  if (!Array.isArray(value)) return;
+  const serialized = JSON.stringify(value);
+  if (Buffer.byteLength(serialized, "utf8") > MAX_PROJECT_STORE_BYTES) return;
+  const directory = app.getPath("userData");
+  const temporaryPath = join(directory, `projects-${process.pid}.tmp`);
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(temporaryPath, serialized, "utf8");
+  renameSync(temporaryPath, projectsStorePath());
 }
 
 function attachmentPath(storedName: string) {
@@ -574,6 +633,26 @@ ipcMain.handle("claude:normalize-session", async (_event, workspace: unknown, se
   return true;
 });
 
+ipcMain.handle("projects:load", async () => {
+  try {
+    const value: unknown = JSON.parse(await readFile(projectsStorePath(), "utf8"));
+    return Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+});
+
+ipcMain.handle("projects:discover", () => discoverClaudeWorkspaces());
+
+ipcMain.on("projects:save", (_event, value: unknown) => {
+  try {
+    saveProjectStore(value);
+  } catch (error) {
+    const detail = error instanceof Error ? error.stack ?? error.message : String(error);
+    void appendFile(join(app.getPath("userData"), "renderer-errors.log"), `${new Date().toISOString()} project save failed: ${detail}\n`, "utf8");
+  }
+});
+
 ipcMain.handle("attachment:stage", async (_event, value: unknown) => {
   if (!Array.isArray(value) || value.length === 0 || value.length > 10) {
     throw new Error("一次最多添加 10 个附件");
@@ -728,7 +807,7 @@ ipcMain.handle("claude:stop", (_event, runId: string) => {
   return child.kill();
 });
 
-app.whenReady().then(() => {
+if (hasSingleInstanceLock) app.whenReady().then(() => {
   protocol.handle("claude-desk-attachment", (request) => {
     const storedName = decodeURIComponent(new URL(request.url).pathname.slice(1));
     const filePath = attachmentPath(storedName);
@@ -736,6 +815,13 @@ app.whenReady().then(() => {
     return net.fetch(pathToFileURL(filePath).toString());
   });
   createWindow();
+  app.on("second-instance", () => {
+    const window = BrowserWindow.getAllWindows()[0];
+    if (!window) return;
+    if (window.isMinimized()) window.restore();
+    window.show();
+    window.focus();
+  });
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

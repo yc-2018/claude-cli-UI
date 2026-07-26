@@ -4,7 +4,7 @@ import Composer from "./Composer";
 import ConversationView from "./ConversationView";
 import PermissionDialog from "./PermissionDialog";
 import Sidebar from "./Sidebar";
-import { loadProjects, makeId, pathName, saveProjects, shorten } from "./storage";
+import { hasLegacyProjectsToMigrate, loadProjects, makeId, parseProjects, pathName, saveProjects, shorten } from "./storage";
 import type {
   Activity,
   Attachment,
@@ -184,7 +184,9 @@ function EmptyView({ onNewProject }: { onNewProject(): void }) {
 
 export default function App() {
   const [initialProjects] = useState<Project[]>(loadProjects);
+  const [preferLegacyProjects] = useState(hasLegacyProjectsToMigrate);
   const [projects, setProjects] = useState<Project[]>(initialProjects);
+  const [storageReady, setStorageReady] = useState(false);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(
     initialProjects.flatMap((project) => project.conversations)[0]?.id ?? null,
   );
@@ -210,21 +212,59 @@ export default function App() {
   const pendingPermission = permissionQueue[0];
 
   useEffect(() => {
+    let canceled = false;
+    void window.claudeDesk.getProjectStore().then(async (stored) => {
+      if (canceled) return;
+      const storedProjects = parseProjects(stored);
+      let loaded = preferLegacyProjects || stored === null || (storedProjects.length === 0 && initialProjects.length > 0)
+        ? initialProjects
+        : storedProjects;
+      if (loaded.length === 0 && stored === null && !preferLegacyProjects) {
+        const workspaces = await window.claudeDesk.discoverProjects().catch(() => []);
+        loaded = workspaces.map((workspace) => {
+          const conversation = createConversation();
+          return {
+            id: makeId(),
+            name: pathName(workspace),
+            workspace,
+            createdAt: conversation.createdAt,
+            updatedAt: conversation.updatedAt,
+            conversations: [conversation],
+          };
+        });
+      }
+      if (canceled) return;
+      setProjects(loaded);
+      setActiveConversationId((current) => loaded.some((project) => project.conversations.some((conversation) => conversation.id === current))
+        ? current
+        : loaded.flatMap((project) => project.conversations)[0]?.id ?? null);
+      setStorageReady(true);
+      if (stored === null) window.claudeDesk.saveProjectStore(loaded);
+    }).catch(() => {
+      if (!canceled) setStorageReady(true);
+    });
+    return () => { canceled = true; };
+  }, [initialProjects, preferLegacyProjects]);
+
+  useEffect(() => {
     projectsRef.current = projects;
+    if (!storageReady) return;
     const timer = window.setTimeout(() => {
       try {
         saveProjects(projects);
+        window.claudeDesk.saveProjectStore(projects);
       } catch (error) {
         console.error("保存项目失败", error);
       }
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [projects]);
+  }, [projects, storageReady]);
 
   useEffect(() => {
     const persistNow = () => {
       try {
         saveProjects(projectsRef.current);
+        window.claudeDesk.saveProjectStore(projectsRef.current);
       } catch (error) {
         console.error("保存项目失败", error);
       }
@@ -238,6 +278,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!storageReady) return;
     for (const project of projects) {
       if (scannedProjects.current.has(project.id)) continue;
       scannedProjects.current.add(project.id);
@@ -286,7 +327,7 @@ export default function App() {
         // A missing or unreadable Claude history directory simply has no sessions to merge.
       });
     }
-  }, [projects]);
+  }, [projects, storageReady]);
 
   useEffect(() => {
     if (!activeProject) {
@@ -761,6 +802,19 @@ export default function App() {
     return false;
   };
 
+  if (!storageReady) {
+    return (
+      <div className="app-shell">
+        <main className="main-panel">
+          <div className="conversation-intro history-loading">
+            <span className="spinner" />
+            <h1>正在载入项目</h1>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
       <div className="title-drag-region" />
@@ -793,11 +847,12 @@ export default function App() {
               </div>
             </header>
             <ConversationView
+              key={`conversation-${activeConversation.id}`}
               messages={activeConversation.messages}
               loadingHistory={activeConversation.source === "claude" && !activeConversation.historyLoaded}
             />
             <Composer
-              key={activeConversation.id}
+              key={`composer-${activeConversation.id}`}
               conversation={activeConversation}
               modelConfig={modelConfig}
               running={Boolean(activeRunId)}

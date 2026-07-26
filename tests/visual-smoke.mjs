@@ -13,6 +13,7 @@ const electronApp = await electron.launch({
   env: {
     ...process.env,
     CLAUDE_DESK_USER_DATA_DIR: profile,
+    CLAUDE_DESK_DISABLE_PROJECT_DISCOVERY: "1",
   },
 });
 try {
@@ -37,7 +38,7 @@ await page.evaluate(() => {
   const now = Date.now();
   const key = "claude-desk.projects.v2";
   const originalSetItem = Storage.prototype.setItem;
-  originalSetItem.call(localStorage, key, JSON.stringify([{
+  const seededProjects = [{
     id: "visual-project",
     name: "sample-dashboard",
     workspace: "C:\\Projects\\sample-dashboard",
@@ -75,7 +76,9 @@ await page.evaluate(() => {
       permissionMode: "plan",
       messages: []
     }]
-  }]));
+  }];
+  originalSetItem.call(localStorage, key, JSON.stringify(seededProjects));
+  window.claudeDesk.saveProjectStore(seededProjects);
   Storage.prototype.setItem = function setItem(storageKey, value) {
     if (storageKey !== key) originalSetItem.call(this, storageKey, value);
   };

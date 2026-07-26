@@ -153,9 +153,7 @@ export function loadProjects(): Project[] {
   if (projectsValue !== null) {
     try {
       const parsed: unknown = JSON.parse(projectsValue);
-      return Array.isArray(parsed)
-        ? parsed.map(normalizeProject).filter((project): project is Project => project !== null)
-        : [];
+      return parseProjects(parsed);
     } catch {
       return [];
     }
@@ -167,6 +165,16 @@ export function loadProjects(): Project[] {
   } catch {
     return [];
   }
+}
+
+export function hasLegacyProjectsToMigrate() {
+  return localStorage.getItem(PROJECTS_STORAGE_KEY) === null && localStorage.getItem(LEGACY_TASKS_STORAGE_KEY) !== null;
+}
+
+export function parseProjects(value: unknown): Project[] {
+  return Array.isArray(value)
+    ? value.map(normalizeProject).filter((project): project is Project => project !== null)
+    : [];
 }
 
 export function saveProjects(projects: Project[]) {
