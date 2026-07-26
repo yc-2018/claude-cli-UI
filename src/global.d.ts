@@ -1,4 +1,4 @@
-import type { ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ModelConfig, RunRequest } from "./types";
+import type { Attachment, AttachmentUpload, ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ModelConfig, RunRequest } from "./types";
 
 declare module "*.css";
 
@@ -11,6 +11,9 @@ declare global {
       getModels(workspace: string): Promise<ModelConfig>;
       getClaudeSessions(workspace: string): Promise<ClaudeSessionSummary[]>;
       getClaudeSession(workspace: string, sessionId: string): Promise<ClaudeSessionHistory | null>;
+      normalizeClaudeSession(workspace: string, sessionId: string): Promise<boolean>;
+      stageAttachments(attachments: AttachmentUpload[]): Promise<Attachment[]>;
+      deleteAttachment(storedName: string): Promise<boolean>;
       reportError(message: string): void;
       startRun(request: RunRequest): Promise<{ started: boolean }>;
       stopRun(runId: string): Promise<boolean>;

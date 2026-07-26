@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const args = process.argv.slice(2);
@@ -35,6 +35,23 @@ process.stdin.on("end", () => {
     process.stderr.write("resumed session was renamed");
     process.exitCode = 2;
     return;
+  }
+  if (prompt.includes("附件回归测试")) {
+    const attachmentPaths = prompt.split(/\r?\n/).filter((line) => line.startsWith("- ")).map((line) => line.slice(2));
+    const imagePath = attachmentPaths.find((path) => path.endsWith(".png"));
+    const textPath = attachmentPaths.find((path) => path.endsWith(".txt"));
+    const addDirectoryIndex = args.indexOf("--add-dir");
+    if (addDirectoryIndex < 0 || !imagePath || !textPath || !existsSync(imagePath) || !existsSync(textPath)) {
+      process.stderr.write("attachments were not passed to the CLI");
+      process.exitCode = 2;
+      return;
+    }
+    const image = readFileSync(imagePath);
+    if (image.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a" || readFileSync(textPath, "utf8") !== "attachment text fixture") {
+      process.stderr.write("attachment contents were corrupted");
+      process.exitCode = 2;
+      return;
+    }
   }
   const sessionsDirectory = process.env.CLAUDE_DESK_TEST_SESSIONS_DIR;
   if (sessionsDirectory && prompt.includes("这是首次会话名称测试内容")) {

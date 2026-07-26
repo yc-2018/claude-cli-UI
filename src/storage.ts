@@ -1,8 +1,9 @@
-import type { Activity, ChatMessage, Conversation, PermissionMode, Project } from "./types";
+import type { Activity, Attachment, ChatMessage, Conversation, PermissionMode, Project } from "./types";
 
 export const PROJECTS_STORAGE_KEY = "claude-desk.projects.v2";
 export const LEGACY_TASKS_STORAGE_KEY = "claude-desk.tasks.v1";
 export const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ATTACHMENT_NAME_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:\.[a-z0-9]{1,12})?$/i;
 
 export function makeId() {
   return crypto.randomUUID();
@@ -30,6 +31,18 @@ function normalizeMessage(value: unknown): ChatMessage | null {
       activity && typeof activity.id === "string" && typeof activity.name === "string" && typeof activity.summary === "string",
     ))
     : [];
+  const attachments = Array.isArray(message.attachments)
+    ? message.attachments.filter((attachment): attachment is Attachment => Boolean(
+      attachment &&
+      typeof attachment.id === "string" && SESSION_ID_PATTERN.test(attachment.id) &&
+      typeof attachment.storedName === "string" && ATTACHMENT_NAME_PATTERN.test(attachment.storedName) &&
+      attachment.storedName.startsWith(attachment.id) &&
+      typeof attachment.name === "string" && attachment.name.length > 0 && attachment.name.length <= 255 &&
+      typeof attachment.mediaType === "string" && attachment.mediaType.length <= 100 &&
+      typeof attachment.size === "number" && Number.isInteger(attachment.size) && attachment.size > 0 && attachment.size <= 20 * 1024 * 1024 &&
+      (attachment.kind === "image" || attachment.kind === "file"),
+    ))
+    : [];
 
   return {
     id: message.id,
@@ -39,6 +52,7 @@ function normalizeMessage(value: unknown): ChatMessage | null {
     createdAt: typeof message.createdAt === "number" ? message.createdAt : Date.now(),
     status: wasInterrupted ? "stopped" : status,
     activities,
+    attachments,
     error: wasInterrupted ? "上次运行已中断，可以重新发送任务。" : (typeof message.error === "string" ? message.error : undefined),
   };
 }

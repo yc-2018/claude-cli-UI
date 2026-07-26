@@ -7,6 +7,7 @@ import Sidebar from "./Sidebar";
 import { loadProjects, makeId, pathName, saveProjects, shorten } from "./storage";
 import type {
   Activity,
+  Attachment,
   ChatMessage,
   ClaudeEvent,
   ClaudeSessionSummary,
@@ -240,7 +241,13 @@ export default function App() {
     for (const project of projects) {
       if (scannedProjects.current.has(project.id)) continue;
       scannedProjects.current.add(project.id);
-      void window.claudeDesk.getClaudeSessions(project.workspace).then((sessions) => {
+      const localSessionIds = project.conversations.flatMap((conversation) => (
+        conversation.source !== "claude" && conversation.sessionId ? [conversation.sessionId] : []
+      ));
+      const normalizeLocalSessions = Promise.all(localSessionIds.map((sessionId) => (
+        window.claudeDesk.normalizeClaudeSession(project.workspace, sessionId).catch(() => false)
+      )));
+      void normalizeLocalSessions.then(() => window.claudeDesk.getClaudeSessions(project.workspace)).then((sessions) => {
         setProjects((current) => current.map((item) => {
           if (item.id !== project.id) return item;
           const hidden = new Set(item.hiddenSessionIds ?? []);
@@ -571,18 +578,18 @@ export default function App() {
     updateConversation(conversationId, (conversation) => ({ ...conversation, title: trimmed, updatedAt: Date.now() }));
   };
 
-  const sendPrompt = async (prompt: string) => {
+  const sendPrompt = async (prompt: string, attachments: Attachment[]) => {
     if (!activeProject || !activeConversation || activeRunId || (activeConversation.source === "claude" && !activeConversation.historyLoaded)) return;
     const runId = makeId();
     const responseId = makeId();
     const now = Date.now();
-    const userMessage: ChatMessage = { id: makeId(), role: "user", content: prompt, createdAt: now };
+    const userMessage: ChatMessage = { id: makeId(), role: "user", content: prompt, attachments, createdAt: now };
     const response: ChatMessage = { id: responseId, role: "assistant", content: "", createdAt: now, status: "running", activities: [] };
     const firstPrompt = activeConversation.messages.length === 0;
 
     updateConversation(activeConversation.id, (conversation) => ({
       ...conversation,
-      title: firstPrompt && conversation.title === "新对话" ? shorten(prompt, 28) : conversation.title,
+      title: firstPrompt && conversation.title === "新对话" ? shorten(prompt || attachments[0]?.name || "附件", 28) : conversation.title,
       updatedAt: now,
       messages: [...conversation.messages, userMessage, response],
     }));
@@ -604,10 +611,11 @@ export default function App() {
       sessionId: activeConversation.sessionId,
       sessionName: activeConversation.sessionId
         ? undefined
-        : makeClaudeSessionName(activeConversation.messages.find((message) => message.role === "user")?.content ?? prompt),
+        : makeClaudeSessionName((activeConversation.messages.find((message) => message.role === "user")?.content ?? prompt) || attachments[0]?.name || "附件"),
       model: getModelArgument(activeConversation, modelConfig),
       allowedTools: activeConversation.allowedTools,
       permissionMode: activeConversation.permissionMode,
+      attachments,
     };
     try {
       await window.claudeDesk.startRun(request);

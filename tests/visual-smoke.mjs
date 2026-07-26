@@ -84,10 +84,22 @@ await page.evaluate(() => {
 await page.waitForSelector(".composer");
 await page.screenshot({ path: resolve(artifacts, "conversation.png") });
 
+await page.locator(".composer textarea").evaluate((textarea) => {
+  const transfer = new DataTransfer();
+  const binary = atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+Av7sNwAAAABJRU5ErkJggg==");
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  transfer.items.add(new File([bytes], "界面截图.png", { type: "image/png" }));
+  transfer.items.add(new File(["visual attachment"], "需求说明与接口字段记录.txt", { type: "text/plain" }));
+  textarea.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: transfer }));
+});
+await page.waitForFunction(() => document.querySelectorAll(".attachment-item").length === 2);
+await page.screenshot({ path: resolve(artifacts, "attachments.png") });
+
 const layout = await page.evaluate(() => ({
   body: { width: document.body.scrollWidth, height: document.body.scrollHeight },
   viewport: { width: window.innerWidth, height: window.innerHeight },
   composer: document.querySelector(".composer")?.getBoundingClientRect().toJSON(),
+  attachmentList: document.querySelector(".attachment-list")?.getBoundingClientRect().toJSON(),
   header: document.querySelector(".task-header")?.getBoundingClientRect().toJSON(),
 }));
 

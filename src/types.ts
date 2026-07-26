@@ -6,6 +6,21 @@ export interface Activity {
   summary: string;
 }
 
+export interface Attachment {
+  id: string;
+  storedName: string;
+  name: string;
+  mediaType: string;
+  size: number;
+  kind: "image" | "file";
+}
+
+export interface AttachmentUpload {
+  name: string;
+  mediaType: string;
+  dataBase64: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -15,6 +30,7 @@ export interface ChatMessage {
   status?: "running" | "done" | "error" | "stopped";
   activities?: Activity[];
   error?: string;
+  attachments?: Attachment[];
 }
 
 export interface Conversation {
@@ -77,6 +93,7 @@ export interface RunRequest {
   model?: string;
   allowedTools?: string[];
   permissionMode: PermissionMode;
+  attachments?: Attachment[];
 }
 
 export interface ToolPermissionRequest {

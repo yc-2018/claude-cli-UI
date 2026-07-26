@@ -8,8 +8,11 @@ const artifacts = resolve(root, "artifacts");
 const profile = resolve(artifacts, `workflow-profile-${Date.now()}`);
 const cliSessions = resolve(profile, "claude-history");
 const fakeCli = resolve(root, "tests", "fixtures", "fake-claude.mjs");
+const packagedExecutable = process.env.CLAUDE_DESK_TEST_EXECUTABLE;
 await mkdir(profile, { recursive: true });
 await mkdir(cliSessions, { recursive: true });
+const attachmentText = "attachment text fixture";
+const attachmentPngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+Av7sNwAAAABJRU5ErkJggg==";
 const importedSessionId = "44444444-4444-4444-8444-444444444444";
 const importedTime = Date.now() - 60_000;
 await writeFile(resolve(cliSessions, `${importedSessionId}.jsonl`), [
@@ -49,7 +52,8 @@ await writeFile(resolve(cliSessions, `${importedSessionId}.jsonl`), [
 ].map((entry) => JSON.stringify(entry)).join("\n"), "utf8");
 
 const launch = () => electron.launch({
-  args: [root],
+  ...(packagedExecutable ? { executablePath: packagedExecutable } : {}),
+  args: packagedExecutable ? [] : [root],
   cwd: root,
   env: {
     ...process.env,
@@ -167,6 +171,29 @@ try {
   if (!(await page.locator(".thinking-content").last().textContent())?.includes("检查上下文")) throw new Error("thinking content was not rendered");
   await page.screenshot({ path: resolve(artifacts, "thinking-expanded.png") });
 
+  await page.locator(".composer textarea").evaluate((textarea, payload) => {
+    const transfer = new DataTransfer();
+    const binary = atob(payload.pngBase64);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    transfer.items.add(new File([bytes], "clipboard-image.png", { type: "image/png" }));
+    transfer.items.add(new File([payload.text], "notes.txt", { type: "text/plain" }));
+    textarea.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: transfer }));
+  }, { pngBase64: attachmentPngBase64, text: attachmentText });
+  await page.waitForFunction(() => document.querySelectorAll(".attachment-item").length === 2);
+  await page.waitForFunction(() => (document.querySelector(".attachment-item img") instanceof HTMLImageElement) && document.querySelector(".attachment-item img").naturalWidth > 0);
+  if (!(await page.locator(".attachment-list").textContent())?.includes("notes.txt")) throw new Error("pasted file was not shown in the composer");
+  await page.locator(".composer textarea").fill("附件回归测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  if (await page.locator(".sent-image").count() !== 1 || await page.locator(".sent-file", { hasText: "notes.txt" }).count() !== 1) {
+    throw new Error("sent attachments were not rendered in the conversation");
+  }
+  await page.waitForTimeout(450);
+  const persistedAttachments = await page.evaluate(() => JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0]?.conversations?.[0]?.messages?.find((message) => message.content === "附件回归测试")?.attachments);
+  if (!Array.isArray(persistedAttachments) || persistedAttachments.length !== 2 || persistedAttachments.some((attachment) => attachment.dataBase64)) {
+    throw new Error("attachment metadata was not persisted safely");
+  }
+
   await page.evaluate(() => {
     const container = document.querySelector(".conversation-scroll");
     if (container) container.scrollTop = 0;
@@ -256,6 +283,13 @@ try {
   await page.waitForSelector('.message.assistant[data-status="stopped"]');
   await page.waitForTimeout(500);
   await page.screenshot({ path: resolve(artifacts, "workflow-complete.png") });
+  const localSessionPath = resolve(cliSessions, "22222222-2222-4222-8222-222222222222.jsonl");
+  const localSessionBeforeRestart = await readFile(localSessionPath, "utf8");
+  await writeFile(
+    localSessionPath,
+    localSessionBeforeRestart.replaceAll('"entrypoint":"cli"', '"entrypoint":"sdk-cli"').replaceAll('"promptSource":"typed"', '"promptSource":"sdk"'),
+    "utf8",
+  );
   await electronApp.close();
   electronApp = undefined;
 
@@ -263,6 +297,16 @@ try {
   page = await electronApp.firstWindow();
   watchErrors(page);
   await page.waitForSelector(".project-group");
+  await page.waitForFunction(async () => {
+    const project = JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0];
+    const conversation = project?.conversations?.find((item) => item.sessionId === "22222222-2222-4222-8222-222222222222");
+    return Boolean(conversation);
+  });
+  await page.waitForTimeout(300);
+  const localSessionAfterRestart = await readFile(localSessionPath, "utf8");
+  if (localSessionAfterRestart.includes('"entrypoint":"sdk-cli"') || localSessionAfterRestart.includes('"promptSource":"sdk"')) {
+    throw new Error("existing local UI session was not migrated for the CLI resume picker");
+  }
   if (await page.locator(".project-group").count() !== 1 || await page.locator(".project-conversations .task-row").count() !== 5) {
     throw new Error("project/conversation hierarchy did not survive restart");
   }

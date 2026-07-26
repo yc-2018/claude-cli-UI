@@ -1,10 +1,12 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from "electron";
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
-import { appendFile, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { extname, join } from "node:path";
 import { createInterface } from "node:readline";
+import { pathToFileURL } from "node:url";
 
 type PermissionMode = "default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions";
 
@@ -17,6 +19,22 @@ interface RunRequest {
   model?: string;
   allowedTools?: string[];
   permissionMode: PermissionMode;
+  attachments?: Attachment[];
+}
+
+interface Attachment {
+  id: string;
+  storedName: string;
+  name: string;
+  mediaType: string;
+  size: number;
+  kind: "image" | "file";
+}
+
+interface AttachmentUpload {
+  name: string;
+  mediaType: string;
+  dataBase64: string;
 }
 
 interface ClaudeSettings {
@@ -53,6 +71,15 @@ interface ClaudeSessionSummary {
 
 const activeRuns = new Map<string, ChildProcessWithoutNullStreams>();
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ATTACHMENT_NAME_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:\.[a-z0-9]{1,12})?$/i;
+const IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_BYTES = 40 * 1024 * 1024;
+
+protocol.registerSchemesAsPrivileged([{
+  scheme: "claude-desk-attachment",
+  privileges: { secure: true, standard: true, supportFetchAPI: true, stream: true },
+}]);
 
 if (process.env.CLAUDE_DESK_USER_DATA_DIR) {
   app.setPath("userData", process.env.CLAUDE_DESK_USER_DATA_DIR);
@@ -150,10 +177,15 @@ function isValidRunRequest(value: unknown): value is RunRequest {
     request.allowedTools.length <= 100 &&
     request.allowedTools.every((tool) => typeof tool === "string" && /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(tool))
   );
+  const hasValidAttachments = request.attachments === undefined || (
+    Array.isArray(request.attachments) &&
+    request.attachments.length <= 10 &&
+    request.attachments.every(isAttachment)
+  );
   return (
     typeof request.runId === "string" &&
     typeof request.prompt === "string" &&
-    request.prompt.trim().length > 0 &&
+    (request.prompt.trim().length > 0 || Boolean(request.attachments?.length)) &&
     typeof request.cwd === "string" &&
     request.cwd.length > 0 &&
     typeof request.permissionMode === "string" &&
@@ -161,8 +193,36 @@ function isValidRunRequest(value: unknown): value is RunRequest {
     hasValidSessionId &&
     hasValidSessionName &&
     hasValidModel &&
-    hasValidAllowedTools
+    hasValidAllowedTools &&
+    hasValidAttachments
   );
+}
+
+function isAttachment(value: unknown): value is Attachment {
+  if (!value || typeof value !== "object") return false;
+  const attachment = value as Partial<Attachment>;
+  return (
+    typeof attachment.id === "string" && SESSION_ID_PATTERN.test(attachment.id) &&
+    typeof attachment.storedName === "string" && ATTACHMENT_NAME_PATTERN.test(attachment.storedName) &&
+    attachment.storedName.startsWith(attachment.id) &&
+    typeof attachment.name === "string" && attachment.name.length > 0 && attachment.name.length <= 255 &&
+    typeof attachment.mediaType === "string" && attachment.mediaType.length <= 100 &&
+    typeof attachment.size === "number" && Number.isInteger(attachment.size) && attachment.size > 0 && attachment.size <= MAX_ATTACHMENT_BYTES &&
+    (attachment.kind === "image" || attachment.kind === "file")
+  );
+}
+
+function attachmentsDirectory() {
+  return join(app.getPath("userData"), "attachments");
+}
+
+function attachmentPath(storedName: string) {
+  return ATTACHMENT_NAME_PATTERN.test(storedName) ? join(attachmentsDirectory(), storedName) : null;
+}
+
+function normalizeAttachmentExtension(name: string) {
+  const extension = extname(name).slice(1).toLowerCase();
+  return /^[a-z0-9]{1,12}$/.test(extension) ? `.${extension}` : "";
 }
 
 async function readClaudeSettings(path: string): Promise<ClaudeSettings | null> {
@@ -502,6 +562,65 @@ ipcMain.handle("claude:session", async (_event, workspace: unknown, sessionId: u
   return (await scanClaudeSessions(workspace, true)).find((session) => session.sessionId === sessionId) ?? null;
 });
 
+ipcMain.handle("claude:normalize-session", async (_event, workspace: unknown, sessionId: unknown) => {
+  if (
+    typeof workspace !== "string" ||
+    !existsSync(workspace) ||
+    !statSync(workspace).isDirectory() ||
+    typeof sessionId !== "string" ||
+    !SESSION_ID_PATTERN.test(sessionId)
+  ) return false;
+  await normalizeClaudeDeskSession(workspace, sessionId, "");
+  return true;
+});
+
+ipcMain.handle("attachment:stage", async (_event, value: unknown) => {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 10) {
+    throw new Error("一次最多添加 10 个附件");
+  }
+
+  const uploads = value as Partial<AttachmentUpload>[];
+  const decoded = uploads.map((upload) => {
+    if (
+      typeof upload.name !== "string" || upload.name.length === 0 || upload.name.length > 255 ||
+      typeof upload.mediaType !== "string" || upload.mediaType.length > 100 ||
+      typeof upload.dataBase64 !== "string" || upload.dataBase64.length === 0 || upload.dataBase64.length > Math.ceil(MAX_ATTACHMENT_BYTES * 4 / 3) + 4 ||
+      !/^[A-Za-z0-9+/]*={0,2}$/.test(upload.dataBase64)
+    ) throw new Error("附件数据无效");
+    const data = Buffer.from(upload.dataBase64, "base64");
+    if (data.length === 0 || data.length > MAX_ATTACHMENT_BYTES) {
+      throw new Error("单个附件不能超过 20 MB");
+    }
+    return { name: upload.name, mediaType: upload.mediaType || "application/octet-stream", data };
+  });
+
+  if (decoded.reduce((total, upload) => total + upload.data.length, 0) > MAX_TOTAL_ATTACHMENT_BYTES) {
+    throw new Error("附件总大小不能超过 40 MB");
+  }
+
+  await mkdir(attachmentsDirectory(), { recursive: true });
+  return Promise.all(decoded.map(async (upload): Promise<Attachment> => {
+    const id = randomUUID();
+    const storedName = `${id}${normalizeAttachmentExtension(upload.name)}`;
+    await writeFile(join(attachmentsDirectory(), storedName), upload.data, { flag: "wx" });
+    return {
+      id,
+      storedName,
+      name: upload.name,
+      mediaType: upload.mediaType,
+      size: upload.data.length,
+      kind: IMAGE_MEDIA_TYPES.has(upload.mediaType) ? "image" : "file",
+    };
+  }));
+});
+
+ipcMain.handle("attachment:delete", async (_event, storedName: unknown) => {
+  if (typeof storedName !== "string") return false;
+  const filePath = attachmentPath(storedName);
+  if (!filePath) return false;
+  return unlink(filePath).then(() => true).catch(() => false);
+});
+
 ipcMain.handle("claude:start", async (event, value: unknown) => {
   if (!isValidRunRequest(value)) throw new Error("无效的运行参数");
   const request = value;
@@ -509,6 +628,13 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     throw new Error("工作目录不存在");
   }
   if (activeRuns.has(request.runId)) throw new Error("任务已经在运行");
+  const attachmentPaths = await Promise.all((request.attachments ?? []).map(async (attachment) => {
+    const filePath = attachmentPath(attachment.storedName);
+    if (!filePath) throw new Error("附件路径无效");
+    const details = await stat(filePath).catch(() => null);
+    if (!details?.isFile() || details.size !== attachment.size) throw new Error(`附件已丢失：${attachment.name}`);
+    return filePath;
+  }));
   let existingSessionPrefix = "";
   if (request.sessionId) {
     const existingPath = join(claudeSessionsDirectory(request.cwd), `${request.sessionId}.jsonl`);
@@ -528,6 +654,7 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
   if (request.sessionName) args.push("--name", request.sessionName);
   if (request.model) args.push("--model", request.model);
   if (request.allowedTools?.length) args.push("--allowedTools", [...new Set(request.allowedTools)].join(","));
+  if (attachmentPaths.length > 0) args.push("--add-dir", attachmentsDirectory());
 
   const owner = BrowserWindow.fromWebContents(event.sender);
   if (!owner) throw new Error("窗口已经关闭");
@@ -587,7 +714,11 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     });
   });
 
-  child.stdin.end(request.prompt, "utf8");
+  const attachmentContext = attachmentPaths.length > 0
+    ? `\n\n用户附加了以下本地文件，请根据请求读取并使用它们：\n${attachmentPaths.map((path) => `- ${path}`).join("\n")}`
+    : "";
+  const inputPrompt = `${request.prompt.trim() || "请查看并说明这些附件。"}${attachmentContext}`;
+  child.stdin.end(inputPrompt, "utf8");
   return { started: true };
 });
 
@@ -598,6 +729,12 @@ ipcMain.handle("claude:stop", (_event, runId: string) => {
 });
 
 app.whenReady().then(() => {
+  protocol.handle("claude-desk-attachment", (request) => {
+    const storedName = decodeURIComponent(new URL(request.url).pathname.slice(1));
+    const filePath = attachmentPath(storedName);
+    if (!filePath || !existsSync(filePath)) return new Response(null, { status: 404 });
+    return net.fetch(pathToFileURL(filePath).toString());
+  });
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
