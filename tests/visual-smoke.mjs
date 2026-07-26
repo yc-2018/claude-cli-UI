@@ -1,0 +1,111 @@
+import { _electron as electron } from "playwright";
+import { mkdir } from "node:fs/promises";
+import { resolve } from "node:path";
+
+const root = resolve(import.meta.dirname, "..");
+const artifacts = resolve(root, "artifacts");
+const profile = resolve(artifacts, `visual-profile-${Date.now()}`);
+await mkdir(artifacts, { recursive: true });
+
+const electronApp = await electron.launch({
+  args: [root],
+  cwd: root,
+  env: {
+    ...process.env,
+    CLAUDE_DESK_USER_DATA_DIR: profile,
+  },
+});
+try {
+const page = await electronApp.firstWindow();
+const errors = [];
+
+page.on("console", (message) => {
+  if (message.type() === "error") errors.push(message.text());
+});
+page.on("pageerror", (error) => errors.push(error.message));
+
+await page.setViewportSize({ width: 1320, height: 860 });
+await page.evaluate(() => {
+  localStorage.removeItem("claude-desk.tasks.v1");
+  localStorage.removeItem("claude-desk.projects.v2");
+});
+await page.reload();
+await page.waitForSelector(".empty-view");
+await page.screenshot({ path: resolve(artifacts, "empty-state.png") });
+
+await page.evaluate(() => {
+  const now = Date.now();
+  const key = "claude-desk.projects.v2";
+  const originalSetItem = Storage.prototype.setItem;
+  originalSetItem.call(localStorage, key, JSON.stringify([{
+    id: "visual-project",
+    name: "sample-dashboard",
+    workspace: "C:\\Projects\\sample-dashboard",
+    createdAt: now,
+    updatedAt: now,
+    conversations: [{
+      id: "visual-conversation",
+      title: "检查登录流程并修复会话恢复",
+      createdAt: now,
+      updatedAt: now,
+      sessionId: "11111111-1111-4111-8111-111111111111",
+      resolvedModel: "LongCat-2.0",
+      permissionMode: "acceptEdits",
+      slashCommands: ["/story", "/compact"],
+      messages: [
+        { id: "u1", role: "user", content: "检查登录流程，找出刷新后会退出的问题并修复。", createdAt: now - 2000 },
+        {
+          id: "a1",
+          role: "assistant",
+          content: "问题出在会话初始化顺序：页面在令牌恢复完成前就触发了未登录跳转。\n\n我调整了初始化状态，并补充了回归测试：\n\n```ts\nif (session.status === 'loading') return;\n```\n\n现在刷新页面会等待会话恢复后再判断路由。",
+          createdAt: now - 1000,
+          status: "done",
+          activities: [
+            { id: "t1", name: "Grep", summary: "session status" },
+            { id: "t2", name: "Read", summary: "src/auth/session.ts" },
+            { id: "t3", name: "Edit", summary: "src/router/guard.ts" }
+          ]
+        }
+      ]
+    }, {
+      id: "visual-conversation-2",
+      title: "添加数据导出功能",
+      createdAt: now - 5000,
+      updatedAt: now - 5000,
+      permissionMode: "plan",
+      messages: []
+    }]
+  }]));
+  Storage.prototype.setItem = function setItem(storageKey, value) {
+    if (storageKey !== key) originalSetItem.call(this, storageKey, value);
+  };
+  location.reload();
+});
+await page.waitForSelector(".composer");
+await page.screenshot({ path: resolve(artifacts, "conversation.png") });
+
+const layout = await page.evaluate(() => ({
+  body: { width: document.body.scrollWidth, height: document.body.scrollHeight },
+  viewport: { width: window.innerWidth, height: window.innerHeight },
+  composer: document.querySelector(".composer")?.getBoundingClientRect().toJSON(),
+  header: document.querySelector(".task-header")?.getBoundingClientRect().toJSON(),
+}));
+
+await page.setViewportSize({ width: 900, height: 640 });
+await page.waitForTimeout(100);
+const compactLayout = await page.evaluate(() => ({
+  body: { width: document.body.scrollWidth, height: document.body.scrollHeight },
+  viewport: { width: window.innerWidth, height: window.innerHeight },
+}));
+await page.screenshot({ path: resolve(artifacts, "compact.png") });
+if (compactLayout.body.width !== compactLayout.viewport.width || compactLayout.body.height !== compactLayout.viewport.height) {
+  throw new Error(`compact layout overflow: ${JSON.stringify(compactLayout)}`);
+}
+
+console.log(JSON.stringify({ errors, layout, compactLayout }, null, 2));
+await electronApp.close();
+
+if (errors.length > 0) process.exitCode = 1;
+} finally {
+  await electronApp.close().catch(() => undefined);
+}

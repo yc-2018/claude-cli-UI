@@ -1,0 +1,58 @@
+{
+  "name": "claude-desk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A focused desktop interface for Claude CLI",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1 --port 4317 --strictPort\" \"wait-on tcp:4317 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:4317 electron .\"",
+    "build": "tsc -p tsconfig.electron.json && vite build",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "test": "npm run typecheck && npm run build && node tests/workflow.mjs && node tests/visual-smoke.mjs",
+    "test:visual": "npm run build && node tests/visual-smoke.mjs",
+    "test:workflow": "npm run build && node tests/workflow.mjs",
+    "preview": "vite preview",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-markdown": "latest",
+    "remark-gfm": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "concurrently": "latest",
+    "cross-env": "latest",
+    "electron": "latest",
+    "electron-builder": "latest",
+    "playwright": "^1.62.0",
+    "typescript": "latest",
+    "vite": "latest",
+    "wait-on": "latest"
+  },
+  "build": {
+    "appId": "com.local.claudedesk",
+    "productName": "Claude Desk",
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
