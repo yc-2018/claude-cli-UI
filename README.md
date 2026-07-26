@@ -1,5 +1,13 @@
 # Claude Desk
 
+![cli提问UI打开看](https://img11.360buyimg.com/cxxjwimg/jfs/t1/487648/20/4789/180082/6a65ec6cF6c27e7b3/06d7a4d863980fae.webp)
+
+
+
+![](https://img11.360buyimg.com/cxxjwimg/jfs/t1/481591/6/10281/28664/6a66038bF6d494410/06d75272f925fe88.webp)![](https://img11.360buyimg.com/cxxjwimg/jfs/t1/484221/15/7928/59216/6a660360F89c26628/06d750f2eb9cd034.webp)
+
+![](https://img11.360buyimg.com/cxxjwimg/jfs/t1/483156/28/9823/116302/6a6644f9F9c33340c/06d7a4d5f1d24254.webp)
+
 Claude Desk 是一个运行在本机的 Claude CLI 桌面界面，使用 Electron、React 和 TypeScript 构建。
 
 ## 开发
@@ -29,3 +37,15 @@ npm test
 ```
 
 验证包含类型检查、旧数据迁移、项目与多对话、动态第三方模型、斜杠命令、高频流输出、异常退出、主动停止、重启持久化和桌面布局截图。
+
+
+
+
+
+## 友情链接
+
+- [linux.do](https://linux.do)
+
+## License
+
+This project is MIT — see [LICENSE](LICENSE).
