@@ -1,6 +1,6 @@
 {
   "name": "claude-desk",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "description": "A focused desktop interface for Claude CLI",
   "main": "dist-electron/main.js",
@@ -39,6 +39,7 @@
   "build": {
     "appId": "com.local.claudedesk",
     "productName": "Claude Desk",
+    "electronDist": "node_modules/electron/dist",
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
@@ -48,6 +49,7 @@
       "output": "release"
     },
     "win": {
+      "icon": "build/icon.png",
       "target": [
         "nsis",
         "portable"
