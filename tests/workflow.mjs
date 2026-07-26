@@ -1,8 +1,9 @@
 import { _electron as electron } from "playwright";
 import { mkdir, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
+const workspaceDirectoryName = basename(root);
 const artifacts = resolve(root, "artifacts");
 const profile = resolve(artifacts, `workflow-profile-${Date.now()}`);
 const cliSessions = resolve(profile, "claude-history");
@@ -120,7 +121,7 @@ try {
   await page.locator('input[aria-label="项目名称"]').fill("我的 Claude 项目");
   await page.locator('input[aria-label="项目名称"]').press("Enter");
   if (await page.locator(".project-name strong").textContent() !== "我的 Claude 项目") throw new Error("project custom name was not shown");
-  if (await page.locator(".project-name small").textContent() !== "claude cli UI") throw new Error("project real directory name was not shown");
+  if (await page.locator(".project-name small").textContent() !== workspaceDirectoryName) throw new Error("project real directory name was not shown");
 
   await page.locator(".task-row.active").hover();
   await page.locator('.task-row.active .task-rename[title="重命名对话"]').click();
@@ -260,7 +261,7 @@ try {
   if (await page.locator(".project-group").count() !== 1 || await page.locator(".project-conversations .task-row").count() !== 5) {
     throw new Error("project/conversation hierarchy did not survive restart");
   }
-  if (await page.locator(".project-name strong").textContent() !== "我的 Claude 项目" || await page.locator(".project-name small").textContent() !== "claude cli UI") {
+  if (await page.locator(".project-name strong").textContent() !== "我的 Claude 项目" || await page.locator(".project-name small").textContent() !== workspaceDirectoryName) {
     throw new Error("project name mapping did not survive restart");
   }
   if (await page.locator('.message.assistant[data-status="running"]').count()) throw new Error("running state survived restart");
