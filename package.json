@@ -1,6 +1,6 @@
 {
   "name": "claude-desk",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "description": "A focused desktop interface for Claude CLI",
   "main": "dist-electron/main.js",
@@ -48,11 +48,17 @@
       "output": "release"
     },
     "win": {
-      "target": "nsis"
+      "target": [
+        "nsis",
+        "portable"
+      ]
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
+    },
+    "portable": {
+      "artifactName": "${productName} Portable ${version}.${ext}"
     }
   }
 }

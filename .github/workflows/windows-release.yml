@@ -52,8 +52,8 @@ jobs:
       - name: Run tests
         run: npm test
 
-      - name: Build Windows installer
-        run: npm exec electron-builder -- --win nsis --publish never
+      - name: Build Windows packages
+        run: npm exec electron-builder -- --win nsis portable --publish never
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
