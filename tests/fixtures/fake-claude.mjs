@@ -9,9 +9,29 @@ if (args.includes("--version")) {
 }
 
 process.stdin.setEncoding("utf8");
-let prompt = "";
-process.stdin.on("data", (chunk) => { prompt += chunk; });
+let input = "";
+process.stdin.on("data", (chunk) => { input += chunk; });
 process.stdin.on("end", () => {
+  const usesStreamInput = args.includes("--input-format") && args[args.indexOf("--input-format") + 1] === "stream-json";
+  let streamContent = [];
+  let prompt = input;
+  if (usesStreamInput) {
+    try {
+      const message = JSON.parse(input.trim());
+      if (message.type !== "user" || message.message?.role !== "user" || !Array.isArray(message.message.content)) {
+        throw new Error("invalid user message");
+      }
+      streamContent = message.message.content;
+      prompt = streamContent
+        .filter((block) => block?.type === "text" && typeof block.text === "string")
+        .map((block) => block.text)
+        .join("\n");
+    } catch (error) {
+      process.stderr.write(`invalid stream-json input: ${error instanceof Error ? error.message : String(error)}`);
+      process.exitCode = 2;
+      return;
+    }
+  }
   const sessionId = prompt.includes("第二个")
     ? "33333333-3333-4333-8333-333333333333"
     : "22222222-2222-4222-8222-222222222222";
@@ -38,16 +58,20 @@ process.stdin.on("end", () => {
   }
   if (prompt.includes("附件回归测试")) {
     const attachmentPaths = prompt.split(/\r?\n/).filter((line) => line.startsWith("- ")).map((line) => line.slice(2));
-    const imagePath = attachmentPaths.find((path) => path.endsWith(".png"));
     const textPath = attachmentPaths.find((path) => path.endsWith(".txt"));
+    const imageBlock = streamContent.find((block) => block?.type === "image");
     const addDirectoryIndex = args.indexOf("--add-dir");
-    if (addDirectoryIndex < 0 || !imagePath || !textPath || !existsSync(imagePath) || !existsSync(textPath)) {
+    if (!usesStreamInput || addDirectoryIndex < 0 || attachmentPaths.length !== 1 || !textPath || !existsSync(textPath) || !imageBlock) {
       process.stderr.write("attachments were not passed to the CLI");
       process.exitCode = 2;
       return;
     }
-    const image = readFileSync(imagePath);
-    if (image.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a" || readFileSync(textPath, "utf8") !== "attachment text fixture") {
+    const image = Buffer.from(imageBlock.source?.data ?? "", "base64");
+    if (
+      imageBlock.source?.type !== "base64" || imageBlock.source?.media_type !== "image/png" ||
+      image.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a" ||
+      readFileSync(textPath, "utf8") !== "attachment text fixture"
+    ) {
       process.stderr.write("attachment contents were corrupted");
       process.exitCode = 2;
       return;

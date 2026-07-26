@@ -707,13 +707,25 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     throw new Error("工作目录不存在");
   }
   if (activeRuns.has(request.runId)) throw new Error("任务已经在运行");
-  const attachmentPaths = await Promise.all((request.attachments ?? []).map(async (attachment) => {
+  const resolvedAttachments = await Promise.all((request.attachments ?? []).map(async (attachment) => {
     const filePath = attachmentPath(attachment.storedName);
     if (!filePath) throw new Error("附件路径无效");
     const details = await stat(filePath).catch(() => null);
     if (!details?.isFile() || details.size !== attachment.size) throw new Error(`附件已丢失：${attachment.name}`);
-    return filePath;
+    return { attachment, filePath };
   }));
+  const imageAttachments = resolvedAttachments.filter(({ attachment }) => attachment.kind === "image");
+  const fileAttachmentPaths = resolvedAttachments
+    .filter(({ attachment }) => attachment.kind === "file")
+    .map(({ filePath }) => filePath);
+  const imageContent = await Promise.all(imageAttachments.map(async ({ attachment, filePath }) => ({
+    type: "image",
+    source: {
+      type: "base64",
+      media_type: attachment.mediaType,
+      data: (await readFile(filePath)).toString("base64"),
+    },
+  })));
   let existingSessionPrefix = "";
   if (request.sessionId) {
     const existingPath = join(claudeSessionsDirectory(request.cwd), `${request.sessionId}.jsonl`);
@@ -729,11 +741,12 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     "--permission-mode",
     request.permissionMode,
   ];
+  if (imageAttachments.length > 0) args.push("--input-format", "stream-json");
   if (request.sessionId) args.push("--resume", request.sessionId);
   if (request.sessionName) args.push("--name", request.sessionName);
   if (request.model) args.push("--model", request.model);
   if (request.allowedTools?.length) args.push("--allowedTools", [...new Set(request.allowedTools)].join(","));
-  if (attachmentPaths.length > 0) args.push("--add-dir", attachmentsDirectory());
+  if (fileAttachmentPaths.length > 0) args.push("--add-dir", attachmentsDirectory());
 
   const owner = BrowserWindow.fromWebContents(event.sender);
   if (!owner) throw new Error("窗口已经关闭");
@@ -793,11 +806,21 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     });
   });
 
-  const attachmentContext = attachmentPaths.length > 0
-    ? `\n\n用户附加了以下本地文件，请根据请求读取并使用它们：\n${attachmentPaths.map((path) => `- ${path}`).join("\n")}`
+  const attachmentContext = fileAttachmentPaths.length > 0
+    ? `\n\n用户附加了以下本地文件，请根据请求读取并使用它们：\n${fileAttachmentPaths.map((path) => `- ${path}`).join("\n")}`
     : "";
   const inputPrompt = `${request.prompt.trim() || "请查看并说明这些附件。"}${attachmentContext}`;
-  child.stdin.end(inputPrompt, "utf8");
+  if (imageAttachments.length > 0) {
+    child.stdin.end(`${JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [...imageContent, { type: "text", text: inputPrompt }],
+      },
+    })}\n`, "utf8");
+  } else {
+    child.stdin.end(inputPrompt, "utf8");
+  }
   return { started: true };
 });
 
