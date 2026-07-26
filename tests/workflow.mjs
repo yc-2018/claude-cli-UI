@@ -84,6 +84,8 @@ try {
   electronApp = await launch();
   let page = await electronApp.firstWindow();
   watchErrors(page);
+  if (await page.title() !== "claude-cli-UI") throw new Error("window title did not use the product name");
+  if ((await page.locator(".sidebar-brand").textContent())?.trim() !== "claude-cli-UI") throw new Error("sidebar did not use the product name");
 
   await page.click(".new-task-button");
   await page.waitForSelector(".composer");
@@ -150,10 +152,10 @@ try {
   await page.waitForTimeout(500);
   const normalizedSession = await readFile(resolve(cliSessions, "22222222-2222-4222-8222-222222222222.jsonl"), "utf8");
   if (normalizedSession.includes('"entrypoint":"sdk-cli"') || normalizedSession.includes('"promptSource":"sdk"')) {
-    throw new Error("Claude Desk session remained hidden from the CLI resume picker");
+    throw new Error("claude-cli-UI session remained hidden from the CLI resume picker");
   }
   if (!normalizedSession.includes('"entrypoint":"cli"') || !normalizedSession.includes('"promptSource":"typed"')) {
-    throw new Error("Claude Desk session was not normalized for the CLI resume picker");
+    throw new Error("claude-cli-UI session was not normalized for the CLI resume picker");
   }
 
   const completed = await page.evaluate(() => ({

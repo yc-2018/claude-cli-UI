@@ -84,6 +84,9 @@ protocol.registerSchemesAsPrivileged([{
 
 if (process.env.CLAUDE_DESK_USER_DATA_DIR) {
   app.setPath("userData", process.env.CLAUDE_DESK_USER_DATA_DIR);
+} else {
+  const legacyUserDataDirectory = join(app.getPath("appData"), "claude-desk");
+  if (existsSync(legacyUserDataDirectory)) app.setPath("userData", legacyUserDataDirectory);
 }
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -96,7 +99,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 640,
     backgroundColor: "#f7f7f5",
-    title: "Claude Desk",
+    title: "claude-cli-UI",
     titleBarStyle: "hidden",
     titleBarOverlay: {
       color: "#f2f2ef",

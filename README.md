@@ -1,4 +1,4 @@
-# Claude Desk
+# claude-cli-UI
 
 ![cli提问UI打开看](https://img11.360buyimg.com/cxxjwimg/jfs/t1/487648/20/4789/180082/6a65ec6cF6c27e7b3/06d7a4d863980fae.webp)
 
@@ -8,7 +8,10 @@
 
 ![](https://img11.360buyimg.com/cxxjwimg/jfs/t1/483156/28/9823/116302/6a6644f9F9c33340c/06d7a4d5f1d24254.webp)
 
-Claude Desk 是一个运行在本机的 Claude CLI 桌面界面，使用 Electron、React 和 TypeScript 构建。
+claude-cli-UI 是一个运行在本机的 Claude CLI 桌面界面，使用 Electron、React 和 TypeScript 构建。
+
+> [!IMPORTANT]
+> 本项目是第三方开源客户端，与 Anthropic 及 Claude 官方无关，也未获得其认可、授权或赞助。
 
 ## 开发
 

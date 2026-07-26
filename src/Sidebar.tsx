@@ -102,7 +102,7 @@ export default function Sidebar({
     <aside className="sidebar">
       <div className="sidebar-brand">
         <div className="brand-mark"><Sparkles size={16} /></div>
-        <span>Claude Desk</span>
+        <span>claude-cli-UI</span>
         <button className="icon-button sidebar-toggle" onClick={onToggle} title="收起侧边栏"><PanelLeftClose size={18} /></button>
       </div>
       <button className="new-task-button" onClick={onNewProject}>

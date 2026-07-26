@@ -1,8 +1,8 @@
-# Claude Desk Repository Guide
+# claude-cli-UI Repository Guide
 
 ## Product scope
 
-Claude Desk is a Windows-first Electron interface for the locally installed Claude CLI. It organizes workspaces as projects, supports multiple conversations per project, and can discover and resume the CLI's existing sessions. Keep the application local-first: do not add a hosted backend, collect telemetry, or store Claude credentials in this repository.
+claude-cli-UI is a Windows-first Electron interface for the locally installed Claude CLI. It organizes workspaces as projects, supports multiple conversations per project, and can discover and resume the CLI's existing sessions. Keep the application local-first: do not add a hosted backend, collect telemetry, or store Claude credentials in this repository.
 
 ## Repository layout
 
@@ -31,7 +31,7 @@ npm run dist
 
 - Keep Node.js and operating-system access in the Electron main process. The renderer must use the typed API exposed by `electron/preload.ts` and declared in `src/global.d.ts`.
 - When adding IPC, update the main handler, preload bridge, global declaration, and shared request/response types together. Validate renderer-provided paths and values in the main process.
-- Treat `%USERPROFILE%\.claude\projects` session JSONL files as Claude-owned data. Imported histories must retain their original session IDs. The only permitted mutation is normalizing top-level `entrypoint` and `promptSource` fields written by Claude Desk after the Claude process exits, so those sessions remain visible in the CLI `/resume` picker; never alter message content, UUIDs, tool records, or sessions that Claude Desk did not run.
+- Treat `%USERPROFILE%\.claude\projects` session JSONL files as Claude-owned data. Imported histories must retain their original session IDs. The only permitted mutation is normalizing top-level `entrypoint` and `promptSource` fields written by claude-cli-UI after the Claude process exits, so those sessions remain visible in the CLI `/resume` picker; never alter message content, UUIDs, tool records, or sessions that claude-cli-UI did not run.
 - Do not persist imported message bodies in `localStorage`; only persist the metadata needed to rediscover them. Preserve storage migrations and tolerate malformed or older saved data.
 - Keep streaming events associated with their run ID. A stopped or failed process must leave the conversation in a usable state and must not leak listeners or child processes.
 - Preserve the existing model-role mapping behavior. Model roles such as Sonnet, Opus, Fable, and Haiku may resolve to the same configured model and must still remain distinct choices in the UI.
