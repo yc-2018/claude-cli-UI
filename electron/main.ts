@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
-import { appendFile, readFile, readdir, stat } from "node:fs/promises";
+import { appendFile, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -52,6 +52,7 @@ interface ClaudeSessionSummary {
 }
 
 const activeRuns = new Map<string, ChildProcessWithoutNullStreams>();
+const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 if (process.env.CLAUDE_DESK_USER_DATA_DIR) {
   app.setPath("userData", process.env.CLAUDE_DESK_USER_DATA_DIR);
@@ -194,6 +195,57 @@ function importedTitle(text: string) {
   return title.length > 38 ? `${title.slice(0, 38)}…` : title;
 }
 
+function claudeSessionsDirectory(workspace: string) {
+  const testDirectory = process.env.CLAUDE_DESK_TEST_SESSIONS_DIR;
+  return testDirectory || join(homedir(), ".claude", "projects", workspace.replace(/[:\\/]/g, "-"));
+}
+
+async function normalizeClaudeDeskSession(workspace: string, sessionId: string, existingPrefix: string) {
+  if (!SESSION_ID_PATTERN.test(sessionId)) return;
+  const filePath = join(claudeSessionsDirectory(workspace), `${sessionId}.jsonl`);
+  let raw: string;
+  try {
+    raw = await readFile(filePath, "utf8");
+  } catch {
+    return;
+  }
+  if (existingPrefix && !raw.startsWith(existingPrefix)) return;
+
+  let changed = false;
+  const appended = raw.slice(existingPrefix.length);
+  const normalizedAppend = appended.split(/(\r?\n)/).map((part) => {
+    if (!part.trim() || part === "\n" || part === "\r\n") return part;
+    try {
+      const parsed: unknown = JSON.parse(part);
+      if (!parsed || typeof parsed !== "object") return part;
+      const record = parsed as Record<string, unknown>;
+      if (record.sessionId !== sessionId) return part;
+      if (record.entrypoint === "sdk-cli") {
+        record.entrypoint = "cli";
+        changed = true;
+      }
+      if (record.promptSource === "sdk") {
+        record.promptSource = "typed";
+        changed = true;
+      }
+      return JSON.stringify(record);
+    } catch {
+      return part;
+    }
+  }).join("");
+
+  if (!changed) return;
+  const normalized = `${existingPrefix}${normalizedAppend}`;
+  const temporaryPath = `${filePath}.claude-desk-${process.pid}-${Date.now()}.tmp`;
+  await writeFile(temporaryPath, normalized, "utf8");
+  try {
+    await rename(temporaryPath, filePath);
+  } catch (error) {
+    await unlink(temporaryPath).catch(() => undefined);
+    throw error;
+  }
+}
+
 function parseTimestamp(value: unknown) {
   if (typeof value !== "string") return undefined;
   const parsed = Date.parse(value);
@@ -211,7 +263,7 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
 
   const fileName = filePath.split(/[\\/]/).at(-1) ?? "";
   const fileSessionId = fileName.replace(/\.jsonl$/i, "");
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(fileSessionId)) return null;
+  if (!SESSION_ID_PATTERN.test(fileSessionId)) return null;
 
   let sessionId = fileSessionId;
   let sessionWorkspace = "";
@@ -313,9 +365,7 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
 }
 
 async function scanClaudeSessions(workspace: string, includeMessages = false) {
-  const testDirectory = process.env.CLAUDE_DESK_TEST_SESSIONS_DIR;
-  const encodedWorkspace = workspace.replace(/[:\\/]/g, "-");
-  const sessionsDirectory = testDirectory || join(homedir(), ".claude", "projects", encodedWorkspace);
+  const sessionsDirectory = claudeSessionsDirectory(workspace);
   let files: string[];
   try {
     files = (await readdir(sessionsDirectory)).filter((file) => file.toLowerCase().endsWith(".jsonl"));
@@ -459,6 +509,11 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     throw new Error("工作目录不存在");
   }
   if (activeRuns.has(request.runId)) throw new Error("任务已经在运行");
+  let existingSessionPrefix = "";
+  if (request.sessionId) {
+    const existingPath = join(claudeSessionsDirectory(request.cwd), `${request.sessionId}.jsonl`);
+    existingSessionPrefix = await readFile(existingPath, "utf8").catch(() => "");
+  }
 
   const args = [
     "-p",
@@ -488,10 +543,16 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
   activeRuns.set(request.runId, child);
 
   const output = createInterface({ input: child.stdout });
+  let observedSessionId = request.sessionId;
   output.on("line", (line) => {
     if (!line.trim()) return;
     try {
-      emit(owner, { runId: request.runId, type: "message", data: JSON.parse(line) });
+      const data: unknown = JSON.parse(line);
+      if (data && typeof data === "object") {
+        const sessionId = (data as Record<string, unknown>).session_id;
+        if (typeof sessionId === "string" && SESSION_ID_PATTERN.test(sessionId)) observedSessionId = sessionId;
+      }
+      emit(owner, { runId: request.runId, type: "message", data });
     } catch {
       emit(owner, { runId: request.runId, type: "raw", text: line });
     }
@@ -508,8 +569,16 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     emit(owner, { runId: request.runId, type: "error", message: error.message });
   });
 
-  child.on("close", (code) => {
+  child.on("close", async (code) => {
     activeRuns.delete(request.runId);
+    if (observedSessionId) {
+      try {
+        await normalizeClaudeDeskSession(request.cwd, observedSessionId, existingSessionPrefix);
+      } catch (error) {
+        const detail = error instanceof Error ? error.stack ?? error.message : String(error);
+        await appendFile(join(app.getPath("userData"), "renderer-errors.log"), `${new Date().toISOString()} session normalization failed: ${detail}\n`, "utf8").catch(() => undefined);
+      }
+    }
     emit(owner, {
       runId: request.runId,
       type: "exit",

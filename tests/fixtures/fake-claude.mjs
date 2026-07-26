@@ -1,3 +1,6 @@
+import { appendFileSync, mkdirSync } from "node:fs";
+import { resolve } from "node:path";
+
 const args = process.argv.slice(2);
 
 if (args.includes("--version")) {
@@ -32,6 +35,25 @@ process.stdin.on("end", () => {
     process.stderr.write("resumed session was renamed");
     process.exitCode = 2;
     return;
+  }
+  const sessionsDirectory = process.env.CLAUDE_DESK_TEST_SESSIONS_DIR;
+  if (sessionsDirectory && prompt.includes("这是首次会话名称测试内容")) {
+    mkdirSync(sessionsDirectory, { recursive: true });
+    const records = [
+      ...(sessionName ? [{ type: "custom-title", customTitle: sessionName, sessionId }] : []),
+      {
+        type: "user",
+        uuid: `${sessionId}-${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        cwd: process.cwd(),
+        sessionId,
+        permissionMode: "acceptEdits",
+        promptSource: "sdk",
+        entrypoint: "sdk-cli",
+        message: { role: "user", content: prompt.trim() },
+      },
+    ];
+    appendFileSync(resolve(sessionsDirectory, `${sessionId}.jsonl`), `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
   }
   if (prompt.includes("模拟失败")) {
     process.stderr.write("模拟 CLI 错误");

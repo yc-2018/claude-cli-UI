@@ -1,5 +1,5 @@
 import { _electron as electron } from "playwright";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
@@ -116,15 +116,13 @@ try {
   await page.keyboard.press("Escape");
   await page.locator(".model-select").selectOption("fable");
 
-  await page.locator(".project-row").hover();
-  await page.locator('.project-action[title="重命名项目"]').click();
+  await page.locator('.project-action[title="重命名项目"]').evaluate((button) => button.click());
   await page.locator('input[aria-label="项目名称"]').fill("我的 Claude 项目");
   await page.locator('input[aria-label="项目名称"]').press("Enter");
   if (await page.locator(".project-name strong").textContent() !== "我的 Claude 项目") throw new Error("project custom name was not shown");
   if (await page.locator(".project-name small").textContent() !== workspaceDirectoryName) throw new Error("project real directory name was not shown");
 
-  await page.locator(".task-row.active").hover();
-  await page.locator('.task-row.active .task-rename[title="重命名对话"]').click();
+  await page.locator('.task-row.active .task-rename[title="重命名对话"]').evaluate((button) => button.click());
   await page.locator('input[aria-label="对话名称"]').fill("手动会话名");
   await page.locator('input[aria-label="对话名称"]').press("Enter");
   if (await page.locator(".task-heading h2").textContent() !== "手动会话名") throw new Error("conversation rename was not reflected in the header");
@@ -143,6 +141,13 @@ try {
   await page.waitForSelector('.message.assistant[data-status="done"]', { timeout: 15_000 });
   await page.waitForFunction(() => document.querySelector(".markdown")?.textContent?.includes("流式输出稳定"));
   await page.waitForTimeout(500);
+  const normalizedSession = await readFile(resolve(cliSessions, "22222222-2222-4222-8222-222222222222.jsonl"), "utf8");
+  if (normalizedSession.includes('"entrypoint":"sdk-cli"') || normalizedSession.includes('"promptSource":"sdk"')) {
+    throw new Error("Claude Desk session remained hidden from the CLI resume picker");
+  }
+  if (!normalizedSession.includes('"entrypoint":"cli"') || !normalizedSession.includes('"promptSource":"typed"')) {
+    throw new Error("Claude Desk session was not normalized for the CLI resume picker");
+  }
 
   const completed = await page.evaluate(() => ({
     bodySize: document.body.innerText.length,
