@@ -1,6 +1,6 @@
 {
   "name": "claude-desk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "A focused desktop interface for Claude CLI",
   "main": "dist-electron/main.js",

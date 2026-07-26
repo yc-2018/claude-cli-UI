@@ -59,6 +59,12 @@ function summarizeToolInput(input: unknown) {
   return typeof preferred === "string" ? shorten(preferred, 90) : "";
 }
 
+function makeClaudeSessionName(prompt: string) {
+  const normalized = prompt.trim().replace(/\s+/g, " ");
+  const firstTenCharacters = Array.from(normalized).slice(0, 10).join("");
+  return firstTenCharacters.replace(/[&|<>^%"!()]/g, "").trim() || undefined;
+}
+
 function getPermissionRequests(data: Record<string, unknown>): ToolPermissionRequest[] {
   if (data.type !== "result" || !Array.isArray(data.permission_denials)) return [];
   return data.permission_denials.flatMap((denial) => {
@@ -596,6 +602,9 @@ export default function App() {
       prompt,
       cwd: activeProject.workspace,
       sessionId: activeConversation.sessionId,
+      sessionName: activeConversation.sessionId
+        ? undefined
+        : makeClaudeSessionName(activeConversation.messages.find((message) => message.role === "user")?.content ?? prompt),
       model: getModelArgument(activeConversation, modelConfig),
       allowedTools: activeConversation.allowedTools,
       permissionMode: activeConversation.permissionMode,

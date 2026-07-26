@@ -138,7 +138,7 @@ try {
   await page.locator(".composer textarea").fill("/edit");
   await page.locator(".composer textarea").press("Enter");
 
-  await page.locator(".composer textarea").fill("压力测试");
+  await page.locator(".composer textarea").fill("这是首次会话名称测试内容");
   await page.locator(".composer textarea").press("Enter");
   await page.waitForSelector('.message.assistant[data-status="done"]', { timeout: 15_000 });
   await page.waitForFunction(() => document.querySelector(".markdown")?.textContent?.includes("流式输出稳定"));
@@ -225,7 +225,7 @@ try {
   await page.waitForSelector(".conversation-intro");
   if (await page.locator(".message").count()) throw new Error("/clear did not clear only the active conversation");
   await page.locator(".task-select", { hasText: "手动会话名" }).click();
-  await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "压力测试");
+  await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "这是首次会话名称测试内容");
 
   await page.locator(".composer textarea").fill("/new");
   await page.locator(".composer textarea").press("Enter");

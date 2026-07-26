@@ -13,6 +13,7 @@ interface RunRequest {
   prompt: string;
   cwd: string;
   sessionId?: string;
+  sessionName?: string;
   model?: string;
   allowedTools?: string[];
   permissionMode: PermissionMode;
@@ -137,6 +138,12 @@ function isValidRunRequest(value: unknown): value is RunRequest {
     request.model.length <= 200 &&
     !/[\r\n&|<>^%"]/.test(request.model)
   );
+  const hasValidSessionName = request.sessionName === undefined || (
+    typeof request.sessionName === "string" &&
+    request.sessionName.length > 0 &&
+    request.sessionName.length <= 40 &&
+    !/[\r\n&|<>^%"!()]/.test(request.sessionName)
+  );
   const hasValidAllowedTools = request.allowedTools === undefined || (
     Array.isArray(request.allowedTools) &&
     request.allowedTools.length <= 100 &&
@@ -151,6 +158,7 @@ function isValidRunRequest(value: unknown): value is RunRequest {
     typeof request.permissionMode === "string" &&
     validPermissionModes.includes(request.permissionMode as PermissionMode) &&
     hasValidSessionId &&
+    hasValidSessionName &&
     hasValidModel &&
     hasValidAllowedTools
   );
@@ -462,6 +470,7 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     request.permissionMode,
   ];
   if (request.sessionId) args.push("--resume", request.sessionId);
+  if (request.sessionName) args.push("--name", request.sessionName);
   if (request.model) args.push("--model", request.model);
   if (request.allowedTools?.length) args.push("--allowedTools", [...new Set(request.allowedTools)].join(","));
 

@@ -73,6 +73,7 @@ export interface RunRequest {
   prompt: string;
   cwd: string;
   sessionId?: string;
+  sessionName?: string;
   model?: string;
   allowedTools?: string[];
   permissionMode: PermissionMode;

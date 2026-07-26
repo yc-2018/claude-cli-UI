@@ -19,7 +19,20 @@ process.stdin.on("end", () => {
   const model = testModels[roleName] ?? modelRole;
   const allowedToolsIndex = args.indexOf("--allowedTools");
   const allowedTools = allowedToolsIndex >= 0 ? args[allowedToolsIndex + 1].split(",") : [];
+  const sessionNameIndex = args.indexOf("--name");
+  const sessionName = sessionNameIndex >= 0 ? args[sessionNameIndex + 1] : undefined;
+  const isResume = args.includes("--resume");
   const send = (data) => process.stdout.write(`${JSON.stringify(data)}\n`);
+  if (prompt.includes("这是首次会话名称测试内容") && sessionName !== "这是首次会话名称测试") {
+    process.stderr.write(`unexpected session name: ${sessionName ?? "missing"}`);
+    process.exitCode = 2;
+    return;
+  }
+  if (isResume && sessionName) {
+    process.stderr.write("resumed session was renamed");
+    process.exitCode = 2;
+    return;
+  }
   if (prompt.includes("模拟失败")) {
     process.stderr.write("模拟 CLI 错误");
     process.exitCode = 2;
