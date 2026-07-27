@@ -89,6 +89,18 @@ await page.evaluate(() => {
 await page.waitForSelector(".composer");
 await page.screenshot({ path: resolve(artifacts, "conversation.png") });
 
+const branchAction = page.locator('[aria-label="从这里分叉"]');
+if (await branchAction.count() !== 1) throw new Error("completed user message did not expose a branch action");
+if (await branchAction.evaluate((element) => getComputedStyle(element.parentElement).opacity) !== "0") {
+  throw new Error("message branch action was visible before hover");
+}
+await page.locator(".message.user").hover();
+await page.waitForTimeout(150);
+if (Number(await branchAction.evaluate((element) => getComputedStyle(element.parentElement).opacity)) < 0.9) {
+  throw new Error("message branch action was not visible on hover");
+}
+await page.screenshot({ path: resolve(artifacts, "message-branch-action.png") });
+
 const initialSidebarWidth = await page.locator(".sidebar").evaluate((element) => element.getBoundingClientRect().width);
 const resizeHandle = page.locator(".sidebar-resizer");
 const resizeBox = await resizeHandle.boundingBox();

@@ -523,6 +523,103 @@ async function scanClaudeSessions(workspace: string, includeMessages = false) {
   return sessions.filter((session): session is ClaudeSessionSummary => session !== null).sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
+function isConversationUserRecord(record: Record<string, unknown>) {
+  if (record.type !== "user" || !record.message || typeof record.message !== "object") return false;
+  return Boolean(importedUserText((record.message as Record<string, unknown>).content));
+}
+
+function replaceBranchIdentifiers(
+  value: unknown,
+  identifiers: ReadonlyMap<string, string>,
+  sourceSessionId: string,
+  branchSessionId: string,
+  fieldName = "",
+): unknown {
+  if (typeof value === "string") {
+    if (fieldName === "sessionId" && value === sourceSessionId) return branchSessionId;
+    if (/uuid$/i.test(fieldName) || fieldName === "promptId") return identifiers.get(value) ?? value;
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => replaceBranchIdentifiers(item, identifiers, sourceSessionId, branchSessionId, fieldName));
+  }
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+    key,
+    replaceBranchIdentifiers(item, identifiers, sourceSessionId, branchSessionId, key),
+  ]));
+}
+
+async function createClaudeSessionBranch(workspace: string, sourceSessionId: string, userTurn: number, title: string) {
+  const sessionsDirectory = claudeSessionsDirectory(workspace);
+  const sourcePath = join(sessionsDirectory, `${sourceSessionId}.jsonl`);
+  let raw: string;
+  try {
+    raw = await readFile(sourcePath, "utf8");
+  } catch {
+    return { branched: false, error: "找不到对应的 Claude CLI 会话文件" };
+  }
+
+  const selectedRecords: Record<string, unknown>[] = [];
+  let currentUserTurn = 0;
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let record: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (!parsed || typeof parsed !== "object") continue;
+      record = parsed as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (typeof record.sessionId === "string" && record.sessionId !== sourceSessionId) {
+      return { branched: false, error: "Claude CLI 会话文件包含不一致的 session ID" };
+    }
+    if (isConversationUserRecord(record)) {
+      currentUserTurn += 1;
+      if (currentUserTurn > userTurn) break;
+    }
+    if (record.type !== "custom-title") selectedRecords.push(record);
+  }
+  if (currentUserTurn < userTurn || selectedRecords.length === 0) {
+    return { branched: false, error: "找不到选中的消息位置，请刷新会话后重试" };
+  }
+
+  const branchSessionId = randomUUID();
+  const identifiers = new Map<string, string>();
+  for (const record of selectedRecords) {
+    for (const key of ["uuid", "promptId"] as const) {
+      const identifier = record[key];
+      if (typeof identifier === "string" && identifier && !identifiers.has(identifier)) {
+        identifiers.set(identifier, randomUUID());
+      }
+    }
+  }
+  const branchedRecords = selectedRecords.map((record) => (
+    replaceBranchIdentifiers(record, identifiers, sourceSessionId, branchSessionId) as Record<string, unknown>
+  ));
+  branchedRecords.push({
+    type: "custom-title",
+    customTitle: title,
+    sessionId: branchSessionId,
+    timestamp: new Date().toISOString(),
+  });
+
+  const branchPath = join(sessionsDirectory, `${branchSessionId}.jsonl`);
+  try {
+    await writeFile(branchPath, `${branchedRecords.map((record) => JSON.stringify(record)).join("\n")}\n`, { encoding: "utf8", flag: "wx" });
+    const session = await parseClaudeSession(branchPath, workspace, true);
+    if (!session?.messages) throw new Error("新分支无法被 Claude CLI 解析");
+    return { branched: true, session };
+  } catch (error) {
+    await unlink(branchPath).catch(() => undefined);
+    return {
+      branched: false,
+      error: error instanceof Error ? error.message : "无法创建 Claude CLI 会话分支",
+    };
+  }
+}
+
 async function getModelConfig(workspace: string) {
   const roles = [
     { role: "Sonnet", value: "sonnet", envKey: "ANTHROPIC_DEFAULT_SONNET_MODEL" },
@@ -699,6 +796,24 @@ ipcMain.handle("claude:rename-session", async (_event, workspace: unknown, sessi
       error: error instanceof Error ? error.message : "无法写入 Claude CLI 会话名称",
     };
   }
+});
+
+ipcMain.handle("claude:branch-session", async (_event, workspace: unknown, sessionId: unknown, userTurn: unknown, title: unknown) => {
+  if (
+    typeof workspace !== "string" ||
+    !existsSync(workspace) ||
+    !statSync(workspace).isDirectory() ||
+    typeof sessionId !== "string" ||
+    !SESSION_ID_PATTERN.test(sessionId) ||
+    typeof userTurn !== "number" ||
+    !Number.isSafeInteger(userTurn) ||
+    userTurn < 1 ||
+    userTurn > 10_000 ||
+    typeof title !== "string" ||
+    !title.trim() ||
+    title.trim().length > 100
+  ) return { branched: false, error: "会话分支参数无效" };
+  return createClaudeSessionBranch(workspace, sessionId, userTurn, title.trim());
 });
 
 ipcMain.handle("claude:delete-session", async (_event, workspace: unknown, sessionId: unknown) => {

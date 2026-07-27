@@ -192,6 +192,17 @@ function importedConversation(summary: ClaudeSessionSummary): Conversation {
   };
 }
 
+function nextBranchTitle(title: string, conversations: Conversation[]) {
+  const base = title.replace(/ \(\d+\)$/, "").trim() || "新对话";
+  const existingTitles = new Set(conversations.map((conversation) => conversation.title));
+  for (let number = 2; number < 10_000; number += 1) {
+    const suffix = ` (${number})`;
+    const candidate = `${Array.from(base).slice(0, 100 - suffix.length).join("")}${suffix}`;
+    if (!existingTitles.has(candidate)) return candidate;
+  }
+  return `${Array.from(base).slice(0, 93).join("")} (${Date.now().toString().slice(-4)})`;
+}
+
 function EmptyView({ onNewProject }: { onNewProject(): void }) {
   return (
     <div className="empty-view">
@@ -216,11 +227,13 @@ export default function App() {
   const [cliInfo, setCliInfo] = useState<{ available: boolean; version?: string } | null>(null);
   const [modelConfig, setModelConfig] = useState<ModelConfig>({ options: [] });
   const [permissionQueue, setPermissionQueue] = useState<PendingPermission[]>([]);
+  const [branchingConversationId, setBranchingConversationId] = useState<string | null>(null);
   const projectsRef = useRef(projects);
   const runMeta = useRef(new Map<string, RunMeta>());
   const scannedProjects = useRef(new Set<string>());
   const loadingHistories = useRef(new Set<string>());
   const sidebarResize = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+  const branchingConversation = useRef(false);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.conversations.some((item) => item.id === activeConversationId)) ?? null,
@@ -706,6 +719,60 @@ export default function App() {
     updateConversation(conversationId, (conversation) => ({ ...conversation, title: trimmed, updatedAt: Date.now() }));
   };
 
+  const branchConversation = async (userTurn: number) => {
+    if (
+      !activeProject ||
+      !activeConversation?.sessionId ||
+      activeRunId ||
+      branchingConversation.current ||
+      (activeConversation.source === "claude" && !activeConversation.historyLoaded)
+    ) return;
+    const sourceConversation = activeConversation;
+    const sourceProject = activeProject;
+    const sourceSessionId = activeConversation.sessionId;
+    const title = nextBranchTitle(sourceConversation.title, sourceProject.conversations);
+    branchingConversation.current = true;
+    setBranchingConversationId(sourceConversation.id);
+    try {
+      const result = await window.claudeDesk.branchClaudeSession(
+        sourceProject.workspace,
+        sourceSessionId,
+        userTurn,
+        title,
+      );
+      if (!result.branched || !result.session) {
+        window.alert(result.error ?? "无法创建 Claude CLI 会话分支");
+        return;
+      }
+      const session = result.session;
+      const branch: Conversation = {
+        id: `claude-${session.sessionId}`,
+        title: session.title,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+        sessionId: session.sessionId,
+        gitBranch: session.gitBranch,
+        messages: session.messages,
+        selectedModel: sourceConversation.selectedModel,
+        resolvedModel: session.resolvedModel ?? sourceConversation.resolvedModel,
+        slashCommands: sourceConversation.slashCommands,
+        allowedTools: sourceConversation.allowedTools,
+        permissionMode: session.permissionMode,
+        source: "claude",
+        historyLoaded: true,
+      };
+      setProjects((current) => current.map((project) => project.id === sourceProject.id
+        ? { ...project, updatedAt: Date.now(), conversations: [branch, ...project.conversations] }
+        : project));
+      setActiveConversationId(branch.id);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "无法创建 Claude CLI 会话分支");
+    } finally {
+      branchingConversation.current = false;
+      setBranchingConversationId(null);
+    }
+  };
+
   const sendPrompt = async (prompt: string, attachments: Attachment[]) => {
     if (!activeProject || !activeConversation || activeRunId || (activeConversation.source === "claude" && !activeConversation.historyLoaded)) return;
     const runId = makeId();
@@ -984,6 +1051,8 @@ export default function App() {
               key={`conversation-${activeConversation.id}`}
               messages={activeConversation.messages}
               loadingHistory={activeConversation.source === "claude" && !activeConversation.historyLoaded}
+              onBranch={activeConversation.sessionId ? branchConversation : undefined}
+              branchDisabled={Boolean(activeRunId) || branchingConversationId === activeConversation.id}
             />
             <Composer
               key={`composer-${activeConversation.id}`}

@@ -296,6 +296,61 @@ try {
   await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((item) => item.textContent === "从 CLI 追加到 UI 会话"));
   if (await page.locator(".task-heading h2").textContent() !== "CLI 外部改名") throw new Error("refresh overwrote the synchronized conversation title");
 
+  const sourceBeforeBranch = await readFile(resolve(cliSessions, "22222222-2222-4222-8222-222222222222.jsonl"), "utf8");
+  const firstUserMessage = page.locator(".message.user").first();
+  await firstUserMessage.hover();
+  await firstUserMessage.locator('[aria-label="从这里分叉"]').click();
+  await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "CLI 外部改名 (2)");
+  await page.waitForFunction(() => {
+    const project = JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0];
+    return typeof project?.conversations?.find((conversation) => conversation.title === "CLI 外部改名 (2)")?.sessionId === "string";
+  });
+  const branchSessionId = await page.evaluate(() => {
+    const project = JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0];
+    return project?.conversations?.find((conversation) => conversation.title === "CLI 外部改名 (2)")?.sessionId;
+  });
+  if (typeof branchSessionId !== "string" || branchSessionId === "22222222-2222-4222-8222-222222222222") {
+    throw new Error("message branch did not receive an independent session ID");
+  }
+  const branchPath = resolve(cliSessions, `${branchSessionId}.jsonl`);
+  const branchHistory = await readFile(branchPath, "utf8");
+  const sourceAfterBranch = await readFile(resolve(cliSessions, "22222222-2222-4222-8222-222222222222.jsonl"), "utf8");
+  if (sourceAfterBranch !== sourceBeforeBranch) throw new Error("branching modified the source Claude CLI session");
+  if (!branchHistory.includes("这是首次会话名称测试内容") || branchHistory.includes("从 CLI 追加到 UI 会话")) {
+    throw new Error("message branch did not stop after the selected conversation turn");
+  }
+  const branchRecords = branchHistory.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  if (!branchRecords.some((record) => record.type === "custom-title" && record.customTitle === "CLI 外部改名 (2)")) {
+    throw new Error("message branch title was not written to Claude CLI history");
+  }
+  if (branchRecords.some((record) => typeof record.sessionId === "string" && record.sessionId !== branchSessionId)) {
+    throw new Error("message branch retained the source session ID");
+  }
+  const sourceUuids = new Set(sourceBeforeBranch.trim().split(/\r?\n/).flatMap((line) => {
+    const uuid = JSON.parse(line).uuid;
+    return typeof uuid === "string" ? [uuid] : [];
+  }));
+  if (branchRecords.some((record) => typeof record.uuid === "string" && sourceUuids.has(record.uuid))) {
+    throw new Error("message branch reused source transcript UUIDs");
+  }
+  await refreshProjectSessions(page);
+  if (await page.locator(".task-row strong").filter({ hasText: /^CLI 外部改名 \(2\)$/ }).count() !== 1) {
+    throw new Error("message branch disappeared after refreshing CLI sessions");
+  }
+  await page.locator(".composer textarea").fill("分支继续测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  await page.waitForTimeout(200);
+  const continuedBranchHistory = await readFile(branchPath, "utf8");
+  if (!continuedBranchHistory.includes("分支继续测试")) throw new Error("new messages were not written to the branched CLI session");
+  const activeBranchSessionId = await page.evaluate(() => {
+    const project = JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0];
+    return project?.conversations?.find((conversation) => conversation.title === "CLI 外部改名 (2)")?.sessionId;
+  });
+  if (activeBranchSessionId !== branchSessionId) throw new Error("continuing a branch switched back to the source session");
+  await page.locator(".task-row strong").filter({ hasText: /^CLI 外部改名$/ }).click();
+  await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "CLI 外部改名");
+
   await page.locator(".composer textarea").evaluate((textarea, payload) => {
     const transfer = new DataTransfer();
     const binary = atob(payload.pngBase64);
@@ -391,7 +446,7 @@ try {
 
   await page.locator(".project-row").first().hover();
   await page.locator('.project-action[title="新建对话"]').click();
-  await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 3);
+  await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 4);
   if (await page.locator(".conversation-intro").count() !== 1) throw new Error("new conversation did not open independently");
 
   await page.locator(".composer textarea").fill("第二个对话");
@@ -401,15 +456,15 @@ try {
   await page.locator(".composer textarea").press("Enter");
   await page.waitForSelector(".conversation-intro");
   if (await page.locator(".message").count()) throw new Error("/clear did not clear only the active conversation");
-  await page.locator(".task-select", { hasText: "CLI 外部改名" }).click();
+  await page.locator(".task-row strong").filter({ hasText: /^CLI 外部改名$/ }).click();
   await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "这是首次会话名称测试内容");
 
   await page.locator(".composer textarea").fill("/new");
   await page.locator(".composer textarea").press("Enter");
-  await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 4);
+  await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 5);
   await page.locator(".composer textarea").fill("/project");
   await page.locator(".composer textarea").press("Enter");
-  await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 5);
+  await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 6);
   if (await page.locator(".project-group").count() !== 1) throw new Error("same workspace created a duplicate project");
 
   await page.locator(".composer textarea").fill("模拟失败");
@@ -438,7 +493,7 @@ try {
   await electronApp.close();
   electronApp = undefined;
   const projectStore = JSON.parse(await readFile(resolve(profile, "projects.json"), "utf8"));
-  if (!Array.isArray(projectStore) || projectStore.length !== 1 || projectStore[0]?.conversations?.length !== 5) {
+  if (!Array.isArray(projectStore) || projectStore.length !== 1 || projectStore[0]?.conversations?.length !== 6) {
     throw new Error("main-process project store was not written");
   }
   await rm(resolve(profile, "Local Storage"), { recursive: true, force: true });
@@ -457,7 +512,7 @@ try {
   if (localSessionAfterRestart.includes('"entrypoint":"sdk-cli"') || localSessionAfterRestart.includes('"promptSource":"sdk"')) {
     throw new Error("existing local UI session was not migrated for the CLI resume picker");
   }
-  if (await page.locator(".project-group").count() !== 1 || await page.locator(".project-conversations .task-row").count() !== 5) {
+  if (await page.locator(".project-group").count() !== 1 || await page.locator(".project-conversations .task-row").count() !== 6) {
     throw new Error("project/conversation hierarchy did not survive restart");
   }
   if (await page.locator(".project-name strong").textContent() !== "我的 Claude 项目" || await page.locator(".project-name small").textContent() !== workspaceDirectoryName) {
@@ -468,13 +523,13 @@ try {
   await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "来自终端的历史对话");
   if (await page.locator(".markdown", { hasText: "恢复的回答" }).count() === 0) throw new Error("CLI session was not reloaded after restart");
 
-  const localConversationRow = page.locator(".task-row", { hasText: "CLI 外部改名" });
+  const localConversationRow = page.locator(".task-row").filter({ has: page.getByText("CLI 外部改名", { exact: true }) });
   page.once("dialog", (dialog) => dialog.accept());
   await localConversationRow.hover();
   await localConversationRow.locator(".task-delete").click();
   await localConversationRow.waitFor({ state: "detached" });
   await refreshProjectSessions(page);
-  if (await page.locator(".task-row", { hasText: "CLI 外部改名" }).count()) throw new Error("deleted UI-created session returned after refresh");
+  if (await page.locator(".task-row strong").filter({ hasText: /^CLI 外部改名$/ }).count()) throw new Error("deleted UI-created session returned after refresh");
   const deletedLocalSessionStillExists = await readFile(localSessionPath, "utf8").then(() => true, () => false);
   if (deletedLocalSessionStillExists) throw new Error("deleted UI-created session remained in Claude CLI history");
 
@@ -517,7 +572,7 @@ try {
     selectedModel: firstConversation.selectedModel,
     cliModel: firstConversation.resolvedModel,
     projects: 1,
-    conversations: 5,
+    conversations: 6,
     importedCliHistory: true,
     slashCommands: true,
     legacyMigration: true,

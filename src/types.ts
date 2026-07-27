@@ -76,6 +76,12 @@ export interface ClaudeSessionHistory extends ClaudeSessionSummary {
   messages: ChatMessage[];
 }
 
+export interface BranchClaudeSessionResult {
+  branched: boolean;
+  session?: ClaudeSessionHistory;
+  error?: string;
+}
+
 export interface ModelOption {
   role: "Sonnet" | "Opus" | "Fable" | "Haiku";
   value: "sonnet" | "opus" | "fable" | "haiku";

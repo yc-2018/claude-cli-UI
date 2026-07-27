@@ -32,9 +32,11 @@ process.stdin.on("end", () => {
       return;
     }
   }
-  const sessionId = prompt.includes("第二个")
+  const resumeIndex = args.indexOf("--resume");
+  const resumedSessionId = resumeIndex >= 0 ? args[resumeIndex + 1] : undefined;
+  const sessionId = resumedSessionId ?? (prompt.includes("第二个")
     ? "33333333-3333-4333-8333-333333333333"
-    : "22222222-2222-4222-8222-222222222222";
+    : "22222222-2222-4222-8222-222222222222");
   const modelIndex = args.indexOf("--model");
   const modelRole = modelIndex >= 0 ? args[modelIndex + 1] : "sonnet";
   const roleName = modelRole.charAt(0).toUpperCase() + modelRole.slice(1).toLowerCase();
@@ -78,7 +80,8 @@ process.stdin.on("end", () => {
     }
   }
   const sessionsDirectory = process.env.CLAUDE_DESK_FAKE_SESSIONS_DIR ?? process.env.CLAUDE_DESK_TEST_SESSIONS_DIR;
-  if (sessionsDirectory && prompt.includes("这是首次会话名称测试内容")) {
+  const persistTestPrompt = prompt.includes("这是首次会话名称测试内容") || prompt.includes("分支继续测试");
+  if (sessionsDirectory && persistTestPrompt) {
     mkdirSync(sessionsDirectory, { recursive: true });
     const records = [
       ...(sessionName ? [{ type: "custom-title", customTitle: sessionName, sessionId }] : []),
@@ -187,7 +190,7 @@ process.stdin.on("end", () => {
     message: { role: "assistant", content: [{ type: "thinking", thinking }, { type: "text", text: response }] },
     session_id: sessionId,
   });
-  if (sessionsDirectory && prompt.includes("这是首次会话名称测试内容")) {
+  if (sessionsDirectory && persistTestPrompt) {
     appendFileSync(resolve(sessionsDirectory, `${sessionId}.jsonl`), `${JSON.stringify({
       type: "assistant",
       uuid: `${sessionId}-assistant-${Date.now()}`,
