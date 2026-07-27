@@ -77,7 +77,7 @@ process.stdin.on("end", () => {
       return;
     }
   }
-  const sessionsDirectory = process.env.CLAUDE_DESK_TEST_SESSIONS_DIR;
+  const sessionsDirectory = process.env.CLAUDE_DESK_FAKE_SESSIONS_DIR ?? process.env.CLAUDE_DESK_TEST_SESSIONS_DIR;
   if (sessionsDirectory && prompt.includes("这是首次会话名称测试内容")) {
     mkdirSync(sessionsDirectory, { recursive: true });
     const records = [

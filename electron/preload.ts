@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld("claudeDesk", {
   getModels: (workspace: string) => ipcRenderer.invoke("claude:models", workspace),
   getClaudeSessions: (workspace: string) => ipcRenderer.invoke("claude:sessions", workspace),
   getClaudeSession: (workspace: string, sessionId: string) => ipcRenderer.invoke("claude:session", workspace, sessionId),
+  getClaudeSessionHistories: (workspace: string) => ipcRenderer.invoke("claude:session-histories", workspace),
   normalizeClaudeSession: (workspace: string, sessionId: string) => ipcRenderer.invoke("claude:normalize-session", workspace, sessionId),
   stageAttachments: (attachments: unknown) => ipcRenderer.invoke("attachment:stage", attachments),
   deleteAttachment: (storedName: string) => ipcRenderer.invoke("attachment:delete", storedName),

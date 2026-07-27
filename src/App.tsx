@@ -10,6 +10,7 @@ import type {
   Attachment,
   ChatMessage,
   ClaudeEvent,
+  ClaudeSessionHistory,
   ClaudeSessionSummary,
   Conversation,
   ModelConfig,
@@ -277,57 +278,72 @@ export default function App() {
     void window.claudeDesk.getClaudeInfo().then(setCliInfo).catch(() => setCliInfo({ available: false }));
   }, []);
 
+  const syncProjectSessions = useCallback(async (projectId: string, reloadMessages: boolean) => {
+    const project = projectsRef.current.find((item) => item.id === projectId);
+    if (!project) return;
+
+    const localSessionIds = project.conversations.flatMap((conversation) => (
+      conversation.source !== "claude" && conversation.sessionId ? [conversation.sessionId] : []
+    ));
+    await Promise.all(localSessionIds.map((sessionId) => (
+      window.claudeDesk.normalizeClaudeSession(project.workspace, sessionId).catch(() => false)
+    )));
+
+    const sessions = await window.claudeDesk.getClaudeSessions(project.workspace);
+    const sessionById = new Map(sessions.map((session) => [session.sessionId, session] as const));
+    const histories = new Map<string, ClaudeSessionHistory>();
+    if (reloadMessages) {
+      const runningConversationIds = new Set([...runMeta.current.values()].map((meta) => meta.conversationId));
+      const runningSessionIds = new Set(project.conversations.flatMap((conversation) => (
+        conversation.sessionId && runningConversationIds.has(conversation.id) ? [conversation.sessionId] : []
+      )));
+      const loadedHistories = await window.claudeDesk.getClaudeSessionHistories(project.workspace);
+      for (const history of loadedHistories) {
+        if (!runningSessionIds.has(history.sessionId)) histories.set(history.sessionId, history);
+      }
+    }
+
+    setProjects((current) => current.map((item) => {
+      if (item.id !== projectId) return item;
+      const hidden = new Set(item.hiddenSessionIds ?? []);
+      const refreshed = item.conversations.map((conversation) => {
+        const session = conversation.sessionId ? sessionById.get(conversation.sessionId) : undefined;
+        const history = conversation.sessionId ? histories.get(conversation.sessionId) : undefined;
+        if (!session) return conversation;
+        return {
+          ...conversation,
+          messages: history?.messages ?? conversation.messages,
+          updatedAt: Math.max(conversation.updatedAt, session.updatedAt),
+          resolvedModel: session.resolvedModel ?? conversation.resolvedModel,
+          permissionMode: history?.permissionMode ?? conversation.permissionMode,
+          historyLoaded: conversation.source === "claude" && history ? true : conversation.historyLoaded,
+        };
+      });
+      const knownSessionIds = new Set(refreshed.flatMap((conversation) => conversation.sessionId ? [conversation.sessionId] : []));
+      const additions = sessions
+        .filter((session) => !hidden.has(session.sessionId) && !knownSessionIds.has(session.sessionId))
+        .map(importedConversation);
+      return {
+        ...item,
+        updatedAt: sessions.length > 0
+          ? Math.max(item.updatedAt, ...sessions.map((session) => session.updatedAt))
+          : item.updatedAt,
+        conversations: [...refreshed, ...additions].sort((a, b) => b.updatedAt - a.updatedAt),
+      };
+    }));
+    setActiveConversationId((current) => current ?? (sessions[0] ? `claude-${sessions[0].sessionId}` : null));
+  }, []);
+
   useEffect(() => {
     if (!storageReady) return;
     for (const project of projects) {
       if (scannedProjects.current.has(project.id)) continue;
       scannedProjects.current.add(project.id);
-      const localSessionIds = project.conversations.flatMap((conversation) => (
-        conversation.source !== "claude" && conversation.sessionId ? [conversation.sessionId] : []
-      ));
-      const normalizeLocalSessions = Promise.all(localSessionIds.map((sessionId) => (
-        window.claudeDesk.normalizeClaudeSession(project.workspace, sessionId).catch(() => false)
-      )));
-      void normalizeLocalSessions.then(() => window.claudeDesk.getClaudeSessions(project.workspace)).then((sessions) => {
-        setProjects((current) => current.map((item) => {
-          if (item.id !== project.id) return item;
-          const hidden = new Set(item.hiddenSessionIds ?? []);
-          const sessionById = new Map(sessions.map((session) => [session.sessionId, session] as const));
-          const refreshed = item.conversations.map((conversation) => {
-            const session = conversation.sessionId ? sessionById.get(conversation.sessionId) : undefined;
-            return conversation.source === "claude" && session
-              ? {
-                ...conversation,
-                updatedAt: Math.max(conversation.updatedAt, session.updatedAt),
-                resolvedModel: session.resolvedModel ?? conversation.resolvedModel,
-              }
-              : conversation;
-          });
-          const known = new Map(refreshed.flatMap((conversation) => conversation.sessionId
-            ? [[conversation.sessionId, conversation] as const]
-            : []));
-          const additions: Conversation[] = [];
-          for (const session of sessions) {
-            if (hidden.has(session.sessionId)) continue;
-            const existing = known.get(session.sessionId);
-            if (!existing) {
-              additions.push(importedConversation(session));
-              continue;
-            }
-          }
-          if (additions.length === 0) return { ...item, conversations: refreshed.sort((a, b) => b.updatedAt - a.updatedAt) };
-          return {
-            ...item,
-            updatedAt: Math.max(item.updatedAt, ...additions.map((conversation) => conversation.updatedAt)),
-            conversations: [...refreshed, ...additions].sort((a, b) => b.updatedAt - a.updatedAt),
-          };
-        }));
-        setActiveConversationId((current) => current ?? (sessions[0] ? `claude-${sessions[0].sessionId}` : null));
-      }).catch(() => {
+      void syncProjectSessions(project.id, false).catch(() => {
         // A missing or unreadable Claude history directory simply has no sessions to merge.
       });
     }
-  }, [projects, storageReady]);
+  }, [projects, storageReady, syncProjectSessions]);
 
   useEffect(() => {
     if (!activeProject) {
@@ -572,9 +588,22 @@ export default function App() {
     }
   };
 
+  const refreshProject = async (projectId: string) => {
+    try {
+      await syncProjectSessions(projectId, true);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "刷新 Claude CLI 会话失败");
+    }
+  };
+
   const deleteConversation = (projectId: string, conversationId: string) => {
     if (activeRuns[conversationId]) return;
     const deleted = projects.find((project) => project.id === projectId)?.conversations.find((conversation) => conversation.id === conversationId);
+    if (!deleted) return;
+    const confirmation = deleted.sessionId
+      ? `仅从 claude-cli-UI 中移除对话“${deleted.title}”？\n\nClaude CLI 的 /resume 历史会保留，不会删除原始会话文件。`
+      : `删除对话“${deleted.title}”？`;
+    if (!window.confirm(confirmation)) return;
     const remaining = projects.flatMap((project) => project.id === projectId
       ? project.conversations.filter((item) => item.id !== conversationId)
       : project.conversations);
@@ -582,7 +611,7 @@ export default function App() {
       ? {
         ...project,
         conversations: project.conversations.filter((item) => item.id !== conversationId),
-        hiddenSessionIds: deleted?.source === "claude" && deleted.sessionId
+        hiddenSessionIds: deleted.sessionId
           ? [...new Set([...(project.hiddenSessionIds ?? []), deleted.sessionId])]
           : project.hiddenSessionIds,
       }
@@ -826,6 +855,7 @@ export default function App() {
         onSelectConversation={setActiveConversationId}
         onNewProject={addProject}
         onNewConversation={addConversation}
+        onRefreshProject={refreshProject}
         onOpenProject={(workspace) => { void openProject(workspace); }}
         onDeleteConversation={deleteConversation}
         onDeleteProject={deleteProject}

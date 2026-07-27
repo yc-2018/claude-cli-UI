@@ -175,8 +175,10 @@ button, select, textarea { -webkit-app-region: no-drag; }
 }
 
 .project-action:hover { background: #dcdcd6; color: #343430; }
+.project-action:disabled { cursor: default; opacity: .55; }
 .project-action.rename, .project-action.delete { display: none; }
 .project-row:hover .project-action.rename, .project-row:hover .project-action.delete { display: grid; }
+.project-action .spinning { animation: spin .85s linear infinite; }
 .project-conversations { padding-left: 18px; }
 .project-conversations .task-row { min-height: 34px; }
 .project-conversations .task-select { align-items: center; padding-block: 5px; }

@@ -8,6 +8,7 @@ import {
   PanelLeftOpen,
   Pencil,
   Plus,
+  RefreshCw,
   Sparkles,
   Trash2,
 } from "lucide-react";
@@ -21,6 +22,7 @@ interface Props {
   onSelectConversation(id: string): void;
   onNewProject(): void;
   onNewConversation(projectId: string): void;
+  onRefreshProject(projectId: string): Promise<void>;
   onOpenProject(workspace: string): void;
   onDeleteConversation(projectId: string, conversationId: string): void;
   onDeleteProject(projectId: string): void;
@@ -43,6 +45,7 @@ export default function Sidebar({
   onSelectConversation,
   onNewProject,
   onNewConversation,
+  onRefreshProject,
   onOpenProject,
   onDeleteConversation,
   onDeleteProject,
@@ -52,6 +55,7 @@ export default function Sidebar({
 }: Props) {
   const [closedProjects, setClosedProjects] = useState<Set<string>>(() => new Set());
   const [editingName, setEditingName] = useState<EditingName | null>(null);
+  const [refreshingProjects, setRefreshingProjects] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     const activeProject = projects.find((project) => project.conversations.some((item) => item.id === activeConversationId));
@@ -77,6 +81,20 @@ export default function Sidebar({
     if (editing.kind === "project") onRenameProject(editing.id, editing.value);
     else onRenameConversation(editing.id, editing.value);
     setEditingName(null);
+  };
+
+  const refreshProject = async (projectId: string) => {
+    if (refreshingProjects.has(projectId)) return;
+    setRefreshingProjects((current) => new Set(current).add(projectId));
+    try {
+      await onRefreshProject(projectId);
+    } finally {
+      setRefreshingProjects((current) => {
+        const next = new Set(current);
+        next.delete(projectId);
+        return next;
+      });
+    }
   };
 
   const renameKeyDown = (event: React.KeyboardEvent<HTMLInputElement>, editing: EditingName) => {
@@ -150,6 +168,15 @@ export default function Sidebar({
                   <>
                     <button className="project-action" onClick={() => onNewConversation(project.id)} title="新建对话"><Plus size={14} /></button>
                     <button
+                      aria-label={`刷新 ${project.customName ?? project.name} 的 Claude CLI 会话`}
+                      className="project-action refresh"
+                      disabled={refreshingProjects.has(project.id)}
+                      onClick={() => { void refreshProject(project.id); }}
+                      title="刷新 Claude CLI 会话"
+                    >
+                      <RefreshCw className={refreshingProjects.has(project.id) ? "spinning" : undefined} size={13} />
+                    </button>
+                    <button
                       className="project-action rename"
                       onClick={() => setEditingName({ kind: "project", id: project.id, value: project.customName ?? project.name })}
                       title="重命名项目"
@@ -195,7 +222,7 @@ export default function Sidebar({
                           <button
                             className="task-delete"
                             onClick={() => onDeleteConversation(project.id, conversation.id)}
-                            title="删除对话"
+                            title={conversation.sessionId ? "从此 UI 移除（保留 CLI /resume 历史）" : "删除对话"}
                           >
                             <Trash2 size={13} />
                           </button>

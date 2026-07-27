@@ -29,7 +29,11 @@ npm run dist
 
 应用直接调用系统中已安装并完成登录的 `claude` 命令。每个项目绑定一个工作目录，项目下可以建立多个互相独立的对话，每个对话使用自己的 Claude CLI session。
 
-模型下拉框动态读取全局及项目 `.claude/settings*.json` 中的模型配置。选择“跟随 CLI”时不传模型参数；选择具体模型时使用 `--model`，不包含硬编码的官方模型列表。
+项目行右侧的刷新按钮会重新扫描 Claude CLI 会话，并载入 CLI 在应用外追加的消息，不需要关闭并重开应用。历史来自当前电脑的 Claude 配置目录（默认 `%USERPROFILE%\.claude\projects`，也支持 `CLAUDE_CONFIG_DIR`）；Portable 程序本身不携带、上传或跨电脑同步这些历史文件。
+
+从 claude-cli-UI 删除带 CLI session 的对话时，只会把它从本应用的项目列表中隐藏。Claude CLI 的原始 JSONL 不会被改动或删除，因此它仍会出现在 CLI 的 `/resume` 中。
+
+模型下拉框动态读取全局及项目 `.claude/settings*.json` 中的模型配置，并分别显示 Sonnet、Opus、Fable 和 Haiku 角色及其实际映射名称。即使多个角色映射到同一个模型，它们也仍是独立选项。
 
 输入 `/` 会打开命令菜单。本地支持 `/model`、`/new`、`/project`、`/clear`、`/plan` 和 `/edit`；Claude CLI 初始化后返回的技能与命令也会加入补全列表。
 

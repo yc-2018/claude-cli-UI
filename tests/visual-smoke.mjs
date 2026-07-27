@@ -108,13 +108,24 @@ const layout = await page.evaluate(() => ({
 
 await page.setViewportSize({ width: 900, height: 640 });
 await page.waitForTimeout(100);
+await page.locator(".project-row").hover();
 const compactLayout = await page.evaluate(() => ({
   body: { width: document.body.scrollWidth, height: document.body.scrollHeight },
   viewport: { width: window.innerWidth, height: window.innerHeight },
+  projectRow: document.querySelector(".project-row")?.getBoundingClientRect().toJSON(),
+  projectActions: [...document.querySelectorAll(".project-row .project-action")]
+    .filter((element) => getComputedStyle(element).display !== "none")
+    .map((element) => element.getBoundingClientRect().toJSON()),
 }));
 await page.screenshot({ path: resolve(artifacts, "compact.png") });
 if (compactLayout.body.width !== compactLayout.viewport.width || compactLayout.body.height !== compactLayout.viewport.height) {
   throw new Error(`compact layout overflow: ${JSON.stringify(compactLayout)}`);
+}
+if (compactLayout.projectActions.length !== 4) throw new Error("project actions were not all available on hover");
+for (let index = 1; index < compactLayout.projectActions.length; index += 1) {
+  if (compactLayout.projectActions[index].left < compactLayout.projectActions[index - 1].right) {
+    throw new Error(`project actions overlap: ${JSON.stringify(compactLayout.projectActions)}`);
+  }
 }
 
 console.log(JSON.stringify({ errors, layout, compactLayout }, null, 2));

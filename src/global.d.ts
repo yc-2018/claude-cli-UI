@@ -11,6 +11,7 @@ declare global {
       getModels(workspace: string): Promise<ModelConfig>;
       getClaudeSessions(workspace: string): Promise<ClaudeSessionSummary[]>;
       getClaudeSession(workspace: string, sessionId: string): Promise<ClaudeSessionHistory | null>;
+      getClaudeSessionHistories(workspace: string): Promise<ClaudeSessionHistory[]>;
       normalizeClaudeSession(workspace: string, sessionId: string): Promise<boolean>;
       stageAttachments(attachments: AttachmentUpload[]): Promise<Attachment[]>;
       deleteAttachment(storedName: string): Promise<boolean>;

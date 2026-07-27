@@ -1,12 +1,13 @@
 import { _electron as electron } from "playwright";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const workspaceDirectoryName = basename(root);
 const artifacts = resolve(root, "artifacts");
 const profile = resolve(artifacts, `workflow-profile-${Date.now()}`);
-const cliSessions = resolve(profile, "claude-history");
+const claudeConfig = resolve(profile, "claude-config");
+const cliSessions = resolve(claudeConfig, "projects", root.replace(/[^A-Za-z0-9]/g, "-"));
 const fakeCli = resolve(root, "tests", "fixtures", "fake-claude.mjs");
 const packagedExecutable = process.env.CLAUDE_DESK_TEST_EXECUTABLE;
 await mkdir(profile, { recursive: true });
@@ -23,7 +24,13 @@ await writeFile(resolve(cliSessions, `${importedSessionId}.jsonl`), [
     cwd: root,
     sessionId: importedSessionId,
     permissionMode: "acceptEdits",
-    message: { role: "user", content: "来自终端的历史对话" },
+    message: {
+      role: "user",
+      content: [
+        { type: "image", source: { type: "base64", media_type: "image/png", data: attachmentPngBase64 } },
+        { type: "text", text: "来自终端的历史对话" },
+      ],
+    },
   },
   {
     type: "assistant",
@@ -57,9 +64,10 @@ const launch = () => electron.launch({
   cwd: root,
   env: {
     ...process.env,
+    CLAUDE_CONFIG_DIR: claudeConfig,
     CLAUDE_DESK_USER_DATA_DIR: profile,
     CLAUDE_DESK_TEST_WORKSPACE: root,
-    CLAUDE_DESK_TEST_SESSIONS_DIR: cliSessions,
+    CLAUDE_DESK_FAKE_SESSIONS_DIR: cliSessions,
     CLAUDE_DESK_TEST_MODELS: JSON.stringify({
       Sonnet: "ThirdParty-A",
       Opus: "ThirdParty-A",
@@ -97,9 +105,66 @@ try {
   await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "来自终端的历史对话");
   if (!(await page.locator(".markdown").last().textContent())?.includes("恢复的回答")) throw new Error("CLI session response was not loaded");
   if (!(await page.locator(".thinking-toggle").last().textContent())?.includes("思考过程")) throw new Error("CLI session thinking was not loaded");
+  await appendFile(resolve(cliSessions, `${importedSessionId}.jsonl`), `\n${[
+    {
+      type: "user",
+      uuid: "refreshed-history-user",
+      timestamp: new Date().toISOString(),
+      cwd: root,
+      sessionId: importedSessionId,
+      message: { role: "user", content: "从 CLI 刷新进来的新消息" },
+    },
+    {
+      type: "assistant",
+      uuid: "refreshed-history-assistant",
+      timestamp: new Date(Date.now() + 10).toISOString(),
+      cwd: root,
+      sessionId: importedSessionId,
+      message: { id: "refreshed-history-response", role: "assistant", model: "ThirdParty-B", content: [{ type: "text", text: "刷新后无需重启即可看到。" }] },
+    },
+  ].map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
+  await page.locator('.project-action[title="刷新 Claude CLI 会话"]').click();
+  await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((item) => item.textContent === "从 CLI 刷新进来的新消息"));
+  if (!(await page.locator(".markdown").last().textContent())?.includes("无需重启")) throw new Error("manual project refresh did not reload CLI responses");
   await page.waitForTimeout(450);
   const persistedImport = await page.evaluate(() => JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0]?.conversations?.find((conversation) => conversation.source === "claude"));
   if (!persistedImport || persistedImport.messages.length !== 0) throw new Error("imported CLI history was duplicated into local storage");
+
+  const hiddenSessionId = "55555555-5555-4555-8555-555555555555";
+  const hiddenSessionPath = resolve(cliSessions, `${hiddenSessionId}.jsonl`);
+  await writeFile(hiddenSessionPath, [
+    {
+      type: "user",
+      uuid: "hidden-user",
+      timestamp: new Date().toISOString(),
+      cwd: root,
+      sessionId: hiddenSessionId,
+      message: { role: "user", content: "准备从 UI 移除的 CLI 会话" },
+    },
+    {
+      type: "assistant",
+      uuid: "hidden-assistant",
+      timestamp: new Date(Date.now() + 10).toISOString(),
+      cwd: root,
+      sessionId: hiddenSessionId,
+      message: { id: "hidden-response", role: "assistant", model: "ThirdParty-A", content: [{ type: "text", text: "CLI 历史应继续保留。" }] },
+    },
+  ].map((entry) => JSON.stringify(entry)).join("\n"), "utf8");
+  await page.locator('.project-action[title="刷新 Claude CLI 会话"]').click();
+  const hiddenRow = page.locator(".task-row", { hasText: "准备从 UI 移除的 CLI 会话" });
+  await hiddenRow.waitFor();
+  let deleteConfirmation = "";
+  page.once("dialog", async (dialog) => {
+    deleteConfirmation = dialog.message();
+    await dialog.accept();
+  });
+  await hiddenRow.hover();
+  await hiddenRow.locator(".task-delete").click();
+  await hiddenRow.waitFor({ state: "detached" });
+  if (!deleteConfirmation.includes("/resume 历史会保留")) throw new Error("session deletion did not explain that CLI history is retained");
+  if (!(await readFile(hiddenSessionPath, "utf8")).includes("CLI 历史应继续保留")) throw new Error("UI deletion unexpectedly changed the Claude CLI session file");
+  await page.locator('.project-action[title="刷新 Claude CLI 会话"]').click();
+  if (await page.locator(".task-row", { hasText: "准备从 UI 移除的 CLI 会话" }).count()) throw new Error("hidden CLI session returned after refresh");
   await page.locator(".task-select", { hasText: "新对话" }).click();
 
   const workspaceOpenResult = await page.evaluate((workspace) => window.claudeDesk.openWorkspace(workspace), root);
@@ -157,12 +222,11 @@ try {
   if (!normalizedSession.includes('"entrypoint":"cli"') || !normalizedSession.includes('"promptSource":"typed"')) {
     throw new Error("claude-cli-UI session was not normalized for the CLI resume picker");
   }
-
   const completed = await page.evaluate(() => ({
     bodySize: document.body.innerText.length,
     projects: JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]"),
   }));
-  const firstConversation = completed.projects[0]?.conversations?.[0];
+  const firstConversation = completed.projects[0]?.conversations?.find((conversation) => conversation.sessionId === "22222222-2222-4222-8222-222222222222");
   if (completed.bodySize < 500) throw new Error("rendered conversation is unexpectedly blank");
   if (firstConversation?.messages?.at(-1)?.status !== "done") throw new Error("completed response was not persisted");
   if (!firstConversation?.messages?.at(-1)?.thinking?.includes("检查上下文")) throw new Error("thinking content was not persisted");
@@ -175,6 +239,28 @@ try {
   await thinkingToggle.click();
   if (!(await page.locator(".thinking-content").last().textContent())?.includes("检查上下文")) throw new Error("thinking content was not rendered");
   await page.screenshot({ path: resolve(artifacts, "thinking-expanded.png") });
+
+  await appendFile(resolve(cliSessions, "22222222-2222-4222-8222-222222222222.jsonl"), `${[
+    {
+      type: "user",
+      uuid: "local-refresh-user",
+      timestamp: new Date().toISOString(),
+      cwd: root,
+      sessionId: "22222222-2222-4222-8222-222222222222",
+      message: { role: "user", content: "从 CLI 追加到 UI 会话" },
+    },
+    {
+      type: "assistant",
+      uuid: "local-refresh-assistant",
+      timestamp: new Date(Date.now() + 10).toISOString(),
+      cwd: root,
+      sessionId: "22222222-2222-4222-8222-222222222222",
+      message: { id: "local-refresh-response", role: "assistant", model: "ThirdParty-B", content: [{ type: "text", text: "UI 创建的会话也已同步。" }] },
+    },
+  ].map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
+  await page.locator('.project-action[title="刷新 Claude CLI 会话"]').click();
+  await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((item) => item.textContent === "从 CLI 追加到 UI 会话"));
+  if (await page.locator(".task-heading h2").textContent() !== "手动会话名") throw new Error("refresh overwrote the manual conversation title");
 
   await page.locator(".composer textarea").evaluate((textarea, payload) => {
     const transfer = new DataTransfer();
@@ -194,7 +280,7 @@ try {
     throw new Error("sent attachments were not rendered in the conversation");
   }
   await page.waitForTimeout(450);
-  const persistedAttachments = await page.evaluate(() => JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0]?.conversations?.[0]?.messages?.find((message) => message.content === "附件回归测试")?.attachments);
+  const persistedAttachments = await page.evaluate(() => JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0]?.conversations?.find((conversation) => conversation.sessionId === "22222222-2222-4222-8222-222222222222")?.messages?.find((message) => message.content === "附件回归测试")?.attachments);
   if (!Array.isArray(persistedAttachments) || persistedAttachments.length !== 2 || persistedAttachments.some((attachment) => attachment.dataBase64)) {
     throw new Error("attachment metadata was not persisted safely");
   }
@@ -251,7 +337,7 @@ try {
   await page.locator(".permission-allow-once").click();
   await page.waitForSelector(".permission-dialog", { state: "detached" });
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
-  let permissionConversation = await page.evaluate(() => JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0]?.conversations?.[0]);
+  let permissionConversation = await page.evaluate(() => JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0]?.conversations?.find((conversation) => conversation.sessionId === "22222222-2222-4222-8222-222222222222"));
   if (permissionConversation.allowedTools?.includes("WebSearch")) throw new Error("allow once persisted the tool permission");
 
   await page.locator(".composer textarea").fill("权限测试");
@@ -261,7 +347,7 @@ try {
   await page.waitForSelector(".permission-dialog", { state: "detached" });
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
   await page.waitForTimeout(450);
-  permissionConversation = await page.evaluate(() => JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0]?.conversations?.[0]);
+  permissionConversation = await page.evaluate(() => JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0]?.conversations?.find((conversation) => conversation.sessionId === "22222222-2222-4222-8222-222222222222"));
   if (!permissionConversation.allowedTools?.includes("WebSearch")) throw new Error("conversation permission was not persisted");
 
   await page.locator(".composer textarea").fill("权限测试");
@@ -345,7 +431,18 @@ try {
   if (await page.locator('.message.assistant[data-status="running"]').count()) throw new Error("running state survived restart");
   await page.locator(".task-select", { hasText: "来自终端的历史对话" }).click();
   await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "来自终端的历史对话");
-  if (!(await page.locator(".markdown").last().textContent())?.includes("恢复的回答")) throw new Error("CLI session was not reloaded after restart");
+  if (await page.locator(".markdown", { hasText: "恢复的回答" }).count() === 0) throw new Error("CLI session was not reloaded after restart");
+
+  const localConversationRow = page.locator(".task-row", { hasText: "手动会话名" });
+  page.once("dialog", (dialog) => dialog.accept());
+  await localConversationRow.hover();
+  await localConversationRow.locator(".task-delete").click();
+  await localConversationRow.waitFor({ state: "detached" });
+  await page.locator('.project-action[title="刷新 Claude CLI 会话"]').click();
+  if (await page.locator(".task-row", { hasText: "手动会话名" }).count()) throw new Error("deleted UI-created session returned after refresh");
+  await page.waitForTimeout(450);
+  const hiddenLocalSessions = await page.evaluate(() => JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0]?.hiddenSessionIds ?? []);
+  if (!hiddenLocalSessions.includes("22222222-2222-4222-8222-222222222222")) throw new Error("deleted UI-created session was not added to the hidden list");
 
   await page.evaluate(() => {
     const projectKey = "claude-desk.projects.v2";

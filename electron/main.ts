@@ -229,7 +229,7 @@ function projectsStorePath() {
 
 async function discoverClaudeWorkspaces() {
   if (process.env.CLAUDE_DESK_DISABLE_PROJECT_DISCOVERY === "1" || process.env.CLAUDE_DESK_TEST_WORKSPACE) return [];
-  const root = join(homedir(), ".claude", "projects");
+  const root = join(claudeConfigDirectory(), "projects");
   const directories = await readdir(root, { withFileTypes: true }).catch(() => []);
   const workspaces = new Map<string, string>();
 
@@ -317,9 +317,24 @@ function importedTitle(text: string) {
   return title.length > 38 ? `${title.slice(0, 38)}…` : title;
 }
 
+function claudeConfigDirectory() {
+  return process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+}
+
 function claudeSessionsDirectory(workspace: string) {
   const testDirectory = process.env.CLAUDE_DESK_TEST_SESSIONS_DIR;
-  return testDirectory || join(homedir(), ".claude", "projects", workspace.replace(/[:\\/]/g, "-"));
+  const projectKey = workspace.replace(/[^A-Za-z0-9]/g, "-");
+  return testDirectory || join(claudeConfigDirectory(), "projects", projectKey);
+}
+
+function importedUserText(content: unknown) {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content.flatMap((block) => {
+    if (!block || typeof block !== "object") return [];
+    const item = block as Record<string, unknown>;
+    return item.type === "text" && typeof item.text === "string" ? [item.text] : [];
+  }).join("\n").trim();
 }
 
 async function normalizeClaudeDeskSession(workspace: string, sessionId: string, existingPrefix: string) {
@@ -421,8 +436,8 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
 
     if (record.type === "user" && record.message && typeof record.message === "object") {
       const message = record.message as Record<string, unknown>;
-      if (typeof message.content !== "string" || !message.content.trim()) continue;
-      const prompt = message.content.trim();
+      const prompt = importedUserText(message.content);
+      if (!prompt) continue;
       if (!firstPrompt) firstPrompt = prompt;
       if (typeof record.permissionMode === "string" && validModes.includes(record.permissionMode as PermissionMode)) {
         permissionMode = record.permissionMode as PermissionMode;
@@ -622,6 +637,11 @@ ipcMain.handle("claude:session", async (_event, workspace: unknown, sessionId: u
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)
   ) return null;
   return (await scanClaudeSessions(workspace, true)).find((session) => session.sessionId === sessionId) ?? null;
+});
+
+ipcMain.handle("claude:session-histories", async (_event, workspace: unknown) => {
+  if (typeof workspace !== "string" || !existsSync(workspace) || !statSync(workspace).isDirectory()) return [];
+  return scanClaudeSessions(workspace, true);
 });
 
 ipcMain.handle("claude:normalize-session", async (_event, workspace: unknown, sessionId: unknown) => {
