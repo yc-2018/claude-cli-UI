@@ -91,11 +91,22 @@ await page.screenshot({ path: resolve(artifacts, "conversation.png") });
 
 const branchAction = page.locator('[aria-label="从这里分叉"]');
 if (await branchAction.count() !== 1) throw new Error("completed assistant message did not expose a branch action");
-if (await branchAction.evaluate((element) => getComputedStyle(element.parentElement).opacity) !== "0") {
+await page.evaluate(() => {
+  if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+});
+await page.locator(".composer").hover({ position: { x: 12, y: 12 } });
+await page.waitForFunction(() => {
+  const action = document.querySelector('[aria-label="从这里分叉"]');
+  return action?.parentElement && Number(getComputedStyle(action.parentElement).opacity) < 0.05;
+});
+if (Number(await branchAction.evaluate((element) => getComputedStyle(element.parentElement).opacity)) >= 0.05) {
   throw new Error("message branch action was visible before hover");
 }
 await page.locator(".message.assistant").hover();
-await page.waitForTimeout(150);
+await page.waitForFunction(() => {
+  const action = document.querySelector('[aria-label="从这里分叉"]');
+  return action?.parentElement && Number(getComputedStyle(action.parentElement).opacity) > 0.9;
+});
 if (Number(await branchAction.evaluate((element) => getComputedStyle(element.parentElement).opacity)) < 0.9) {
   throw new Error("message branch action was not visible on hover");
 }
