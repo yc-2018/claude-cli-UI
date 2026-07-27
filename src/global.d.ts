@@ -12,6 +12,7 @@ declare global {
       getClaudeSessions(workspace: string): Promise<ClaudeSessionSummary[]>;
       getClaudeSession(workspace: string, sessionId: string): Promise<ClaudeSessionHistory | null>;
       getClaudeSessionHistories(workspace: string): Promise<ClaudeSessionHistory[]>;
+      deleteClaudeSession(workspace: string, sessionId: string): Promise<{ deleted: boolean; error?: string }>;
       normalizeClaudeSession(workspace: string, sessionId: string): Promise<boolean>;
       stageAttachments(attachments: AttachmentUpload[]): Promise<Attachment[]>;
       deleteAttachment(storedName: string): Promise<boolean>;

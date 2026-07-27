@@ -39,6 +39,7 @@ export interface Conversation {
   createdAt: number;
   updatedAt: number;
   sessionId?: string;
+  gitBranch?: string;
   messages: ChatMessage[];
   selectedModel?: string;
   resolvedModel?: string;
@@ -57,7 +58,6 @@ export interface Project {
   createdAt: number;
   updatedAt: number;
   conversations: Conversation[];
-  hiddenSessionIds?: string[];
 }
 
 export interface ClaudeSessionSummary {
@@ -66,6 +66,7 @@ export interface ClaudeSessionSummary {
   workspace: string;
   createdAt: number;
   updatedAt: number;
+  gitBranch?: string;
   resolvedModel?: string;
   permissionMode: PermissionMode;
 }

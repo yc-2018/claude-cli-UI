@@ -74,6 +74,9 @@ function normalizeConversation(value: unknown): Conversation | null {
     sessionId: typeof conversation.sessionId === "string" && SESSION_ID_PATTERN.test(conversation.sessionId)
       ? conversation.sessionId
       : undefined,
+    gitBranch: typeof conversation.gitBranch === "string" && conversation.gitBranch.length <= 200
+      ? conversation.gitBranch
+      : undefined,
     messages,
     selectedModel: typeof conversation.selectedModel === "string" && conversation.selectedModel
       ? conversation.selectedModel
@@ -111,9 +114,6 @@ function normalizeProject(value: unknown): Project | null {
     createdAt: typeof project.createdAt === "number" ? project.createdAt : Date.now(),
     updatedAt: typeof project.updatedAt === "number" ? project.updatedAt : Date.now(),
     conversations,
-    hiddenSessionIds: Array.isArray(project.hiddenSessionIds)
-      ? [...new Set(project.hiddenSessionIds.filter((id): id is string => typeof id === "string" && SESSION_ID_PATTERN.test(id)))]
-      : [],
   };
 }
 

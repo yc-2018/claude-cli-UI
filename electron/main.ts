@@ -64,6 +64,7 @@ interface ClaudeSessionSummary {
   workspace: string;
   createdAt: number;
   updatedAt: number;
+  gitBranch?: string;
   resolvedModel?: string;
   permissionMode: PermissionMode;
   messages?: ImportedMessage[];
@@ -406,6 +407,7 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
   let sessionWorkspace = "";
   let firstPrompt = "";
   let lastPrompt = "";
+  let gitBranch: string | undefined;
   let resolvedModel: string | undefined;
   let permissionMode: PermissionMode = "acceptEdits";
   let createdAt = Number.POSITIVE_INFINITY;
@@ -428,6 +430,7 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
     if (typeof record.cwd === "string") sessionWorkspace = record.cwd;
     if (typeof record.sessionId === "string") sessionId = record.sessionId;
     if (typeof record.lastPrompt === "string") lastPrompt = record.lastPrompt;
+    if (typeof record.gitBranch === "string" && record.gitBranch.length <= 200) gitBranch = record.gitBranch;
     const timestamp = parseTimestamp(record.timestamp);
     if (timestamp !== undefined) {
       createdAt = Math.min(createdAt, timestamp);
@@ -495,6 +498,7 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
     workspace: sessionWorkspace,
     createdAt,
     updatedAt,
+    gitBranch,
     resolvedModel,
     permissionMode,
     ...(includeMessages ? { messages } : {}),
@@ -642,6 +646,30 @@ ipcMain.handle("claude:session", async (_event, workspace: unknown, sessionId: u
 ipcMain.handle("claude:session-histories", async (_event, workspace: unknown) => {
   if (typeof workspace !== "string" || !existsSync(workspace) || !statSync(workspace).isDirectory()) return [];
   return scanClaudeSessions(workspace, true);
+});
+
+ipcMain.handle("claude:delete-session", async (_event, workspace: unknown, sessionId: unknown) => {
+  if (
+    typeof workspace !== "string" ||
+    !existsSync(workspace) ||
+    !statSync(workspace).isDirectory() ||
+    typeof sessionId !== "string" ||
+    !SESSION_ID_PATTERN.test(sessionId)
+  ) return { deleted: false, error: "会话参数无效" };
+
+  const sessionsDirectory = claudeSessionsDirectory(workspace);
+  const sessionFile = join(sessionsDirectory, `${sessionId}.jsonl`);
+  const sessionDirectory = join(sessionsDirectory, sessionId);
+  const targets = [sessionDirectory, sessionFile].filter((path) => existsSync(path));
+  try {
+    for (const path of targets) await shell.trashItem(path);
+    return { deleted: true };
+  } catch (error) {
+    return {
+      deleted: false,
+      error: error instanceof Error ? error.message : "无法将 Claude CLI 会话移入回收站",
+    };
+  }
 });
 
 ipcMain.handle("claude:normalize-session", async (_event, workspace: unknown, sessionId: unknown) => {

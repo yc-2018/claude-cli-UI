@@ -50,6 +50,7 @@ await page.evaluate(() => {
       createdAt: now,
       updatedAt: now,
       sessionId: "11111111-1111-4111-8111-111111111111",
+      gitBranch: "feature/auth-session-refresh",
       resolvedModel: "LongCat-2.0",
       permissionMode: "acceptEdits",
       slashCommands: ["/story", "/compact"],
@@ -108,6 +109,10 @@ const layout = await page.evaluate(() => ({
 
 await page.setViewportSize({ width: 900, height: 640 });
 await page.waitForTimeout(100);
+const restingProjectActions = await page.locator(".project-row .project-action").evaluateAll((elements) => (
+  elements.filter((element) => getComputedStyle(element).display !== "none").length
+));
+if (restingProjectActions !== 0) throw new Error("project actions were visible before hover");
 await page.locator(".project-row").hover();
 const compactLayout = await page.evaluate(() => ({
   body: { width: document.body.scrollWidth, height: document.body.scrollHeight },

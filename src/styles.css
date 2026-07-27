@@ -161,7 +161,7 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .project-name small { min-width: 0; overflow: hidden; color: #92928a; font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
 
 .project-action {
-  display: grid;
+  display: none;
   width: 26px;
   height: 26px;
   flex: 0 0 auto;
@@ -176,8 +176,7 @@ button, select, textarea { -webkit-app-region: no-drag; }
 
 .project-action:hover { background: #dcdcd6; color: #343430; }
 .project-action:disabled { cursor: default; opacity: .55; }
-.project-action.rename, .project-action.delete { display: none; }
-.project-row:hover .project-action.rename, .project-row:hover .project-action.delete { display: grid; }
+.project-row:hover .project-action { display: grid; }
 .project-action .spinning { animation: spin .85s linear infinite; }
 .project-conversations { padding-left: 18px; }
 .project-conversations .task-row { min-height: 34px; }
@@ -225,6 +224,10 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .task-select > span { display: grid; min-width: 0; gap: 2px; }
 .task-select strong { overflow: hidden; font-size: 12.5px; font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }
 .task-select small { overflow: hidden; color: #91918a; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-meta { display: flex; min-width: 0; align-items: center; gap: 0; }
+.conversation-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.conversation-meta span + span::before, .conversation-meta span + time::before { margin: 0 4px; content: "·"; }
+.conversation-meta time { flex: 0 0 auto; }
 
 .task-rename, .task-delete {
   position: absolute;

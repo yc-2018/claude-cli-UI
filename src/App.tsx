@@ -164,6 +164,7 @@ function importedConversation(summary: ClaudeSessionSummary): Conversation {
     createdAt: summary.createdAt,
     updatedAt: summary.updatedAt,
     sessionId: summary.sessionId,
+    gitBranch: summary.gitBranch,
     messages: [],
     resolvedModel: summary.resolvedModel,
     slashCommands: [],
@@ -305,7 +306,6 @@ export default function App() {
 
     setProjects((current) => current.map((item) => {
       if (item.id !== projectId) return item;
-      const hidden = new Set(item.hiddenSessionIds ?? []);
       const refreshed = item.conversations.map((conversation) => {
         const session = conversation.sessionId ? sessionById.get(conversation.sessionId) : undefined;
         const history = conversation.sessionId ? histories.get(conversation.sessionId) : undefined;
@@ -314,6 +314,7 @@ export default function App() {
           ...conversation,
           messages: history?.messages ?? conversation.messages,
           updatedAt: Math.max(conversation.updatedAt, session.updatedAt),
+          gitBranch: session.gitBranch ?? conversation.gitBranch,
           resolvedModel: session.resolvedModel ?? conversation.resolvedModel,
           permissionMode: history?.permissionMode ?? conversation.permissionMode,
           historyLoaded: conversation.source === "claude" && history ? true : conversation.historyLoaded,
@@ -321,7 +322,7 @@ export default function App() {
       });
       const knownSessionIds = new Set(refreshed.flatMap((conversation) => conversation.sessionId ? [conversation.sessionId] : []));
       const additions = sessions
-        .filter((session) => !hidden.has(session.sessionId) && !knownSessionIds.has(session.sessionId))
+        .filter((session) => !knownSessionIds.has(session.sessionId))
         .map(importedConversation);
       return {
         ...item,
@@ -460,6 +461,7 @@ export default function App() {
         updateConversation(meta.conversationId, (conversation) => ({
           ...conversation,
           sessionId: data.session_id as string,
+          gitBranch: typeof data.git_branch === "string" ? data.git_branch : conversation.gitBranch,
           resolvedModel: typeof data.model === "string" ? data.model : conversation.resolvedModel,
           slashCommands: slashCommands ?? conversation.slashCommands,
         }));
@@ -596,14 +598,27 @@ export default function App() {
     }
   };
 
-  const deleteConversation = (projectId: string, conversationId: string) => {
+  const deleteConversation = async (projectId: string, conversationId: string) => {
     if (activeRuns[conversationId]) return;
-    const deleted = projects.find((project) => project.id === projectId)?.conversations.find((conversation) => conversation.id === conversationId);
-    if (!deleted) return;
+    const project = projects.find((item) => item.id === projectId);
+    const deleted = project?.conversations.find((conversation) => conversation.id === conversationId);
+    if (!project || !deleted) return;
     const confirmation = deleted.sessionId
-      ? `仅从 claude-cli-UI 中移除对话“${deleted.title}”？\n\nClaude CLI 的 /resume 历史会保留，不会删除原始会话文件。`
+      ? `删除对话“${deleted.title}”？\n\n对应的 Claude CLI 会话将移入 Windows 回收站，并从 /resume 中消失。`
       : `删除对话“${deleted.title}”？`;
     if (!window.confirm(confirmation)) return;
+    if (deleted.sessionId) {
+      try {
+        const result = await window.claudeDesk.deleteClaudeSession(project.workspace, deleted.sessionId);
+        if (!result.deleted) {
+          window.alert(result.error ?? "无法删除 Claude CLI 会话");
+          return;
+        }
+      } catch (error) {
+        window.alert(error instanceof Error ? error.message : "无法删除 Claude CLI 会话");
+        return;
+      }
+    }
     const remaining = projects.flatMap((project) => project.id === projectId
       ? project.conversations.filter((item) => item.id !== conversationId)
       : project.conversations);
@@ -611,9 +626,6 @@ export default function App() {
       ? {
         ...project,
         conversations: project.conversations.filter((item) => item.id !== conversationId),
-        hiddenSessionIds: deleted.sessionId
-          ? [...new Set([...(project.hiddenSessionIds ?? []), deleted.sessionId])]
-          : project.hiddenSessionIds,
       }
       : project));
     setPermissionQueue((current) => current.filter((item) => item.conversationId !== conversationId));
@@ -811,6 +823,7 @@ export default function App() {
         ...conversation,
         title: "新对话",
         sessionId: undefined,
+        gitBranch: undefined,
         resolvedModel: undefined,
         allowedTools: [],
         source: undefined,

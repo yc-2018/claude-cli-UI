@@ -37,6 +37,24 @@ interface EditingName {
   value: string;
 }
 
+function formatConversationTime(timestamp: number) {
+  const value = new Date(timestamp);
+  const now = new Date();
+  const sameDay = value.getFullYear() === now.getFullYear() &&
+    value.getMonth() === now.getMonth() &&
+    value.getDate() === now.getDate();
+  return new Intl.DateTimeFormat("zh-CN", sameDay
+    ? { hour: "2-digit", minute: "2-digit", hour12: false }
+    : {
+      ...(value.getFullYear() === now.getFullYear() ? {} : { year: "numeric" as const }),
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(value);
+}
+
 export default function Sidebar({
   projects,
   activeConversationId,
@@ -209,7 +227,11 @@ export default function Sidebar({
                             <MessageSquareText size={14} />
                             <span>
                               <strong>{conversation.title}</strong>
-                              {conversation.source === "claude" ? <small>Claude CLI</small> : null}
+                              <small className="conversation-meta">
+                                {conversation.source === "claude" ? <span>Claude CLI</span> : null}
+                                {conversation.gitBranch ? <span title={conversation.gitBranch}>{conversation.gitBranch}</span> : null}
+                                <time dateTime={new Date(conversation.updatedAt).toISOString()}>{formatConversationTime(conversation.updatedAt)}</time>
+                              </small>
                             </span>
                           </button>
                           <button
@@ -222,7 +244,7 @@ export default function Sidebar({
                           <button
                             className="task-delete"
                             onClick={() => onDeleteConversation(project.id, conversation.id)}
-                            title={conversation.sessionId ? "从此 UI 移除（保留 CLI /resume 历史）" : "删除对话"}
+                            title={conversation.sessionId ? "删除对话和 CLI /resume 历史" : "删除对话"}
                           >
                             <Trash2 size={13} />
                           </button>

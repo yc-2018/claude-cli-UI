@@ -23,6 +23,7 @@ await writeFile(resolve(cliSessions, `${importedSessionId}.jsonl`), [
     timestamp: new Date(importedTime).toISOString(),
     cwd: root,
     sessionId: importedSessionId,
+    gitBranch: "feature/cli-sync",
     permissionMode: "acceptEdits",
     message: {
       role: "user",
@@ -87,6 +88,12 @@ const watchErrors = (page) => {
   page.on("pageerror", (error) => errors.push(error.stack ?? error.message));
 };
 
+const refreshProjectSessions = async (page) => {
+  const projectRow = page.locator(".project-row").first();
+  await projectRow.hover();
+  await projectRow.locator('[title="刷新 Claude CLI 会话"]').click();
+};
+
 let electronApp;
 try {
   electronApp = await launch();
@@ -101,6 +108,9 @@ try {
   await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 2);
   const importedRow = page.locator(".task-row", { hasText: "来自终端的历史对话" });
   if (!(await importedRow.textContent())?.includes("Claude CLI")) throw new Error("imported CLI session was not identified in the sidebar");
+  if (!(await importedRow.textContent())?.includes("feature/cli-sync") || await importedRow.locator("time").count() !== 1) {
+    throw new Error("CLI session branch or updated time was not shown in the sidebar");
+  }
   await importedRow.locator(".task-select").click();
   await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "来自终端的历史对话");
   if (!(await page.locator(".markdown").last().textContent())?.includes("恢复的回答")) throw new Error("CLI session response was not loaded");
@@ -123,7 +133,7 @@ try {
       message: { id: "refreshed-history-response", role: "assistant", model: "ThirdParty-B", content: [{ type: "text", text: "刷新后无需重启即可看到。" }] },
     },
   ].map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
-  await page.locator('.project-action[title="刷新 Claude CLI 会话"]').click();
+  await refreshProjectSessions(page);
   await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((item) => item.textContent === "从 CLI 刷新进来的新消息"));
   if (!(await page.locator(".markdown").last().textContent())?.includes("无需重启")) throw new Error("manual project refresh did not reload CLI responses");
   await page.waitForTimeout(450);
@@ -150,7 +160,7 @@ try {
       message: { id: "hidden-response", role: "assistant", model: "ThirdParty-A", content: [{ type: "text", text: "CLI 历史应继续保留。" }] },
     },
   ].map((entry) => JSON.stringify(entry)).join("\n"), "utf8");
-  await page.locator('.project-action[title="刷新 Claude CLI 会话"]').click();
+  await refreshProjectSessions(page);
   const hiddenRow = page.locator(".task-row", { hasText: "准备从 UI 移除的 CLI 会话" });
   await hiddenRow.waitFor();
   let deleteConfirmation = "";
@@ -161,10 +171,13 @@ try {
   await hiddenRow.hover();
   await hiddenRow.locator(".task-delete").click();
   await hiddenRow.waitFor({ state: "detached" });
-  if (!deleteConfirmation.includes("/resume 历史会保留")) throw new Error("session deletion did not explain that CLI history is retained");
-  if (!(await readFile(hiddenSessionPath, "utf8")).includes("CLI 历史应继续保留")) throw new Error("UI deletion unexpectedly changed the Claude CLI session file");
-  await page.locator('.project-action[title="刷新 Claude CLI 会话"]').click();
-  if (await page.locator(".task-row", { hasText: "准备从 UI 移除的 CLI 会话" }).count()) throw new Error("hidden CLI session returned after refresh");
+  if (!deleteConfirmation.includes("移入 Windows 回收站") || !deleteConfirmation.includes("从 /resume 中消失")) {
+    throw new Error("session deletion did not explain its effect on CLI history");
+  }
+  const deletedSessionStillExists = await readFile(hiddenSessionPath, "utf8").then(() => true, () => false);
+  if (deletedSessionStillExists) throw new Error("deleted Claude CLI session remained at its original path");
+  await refreshProjectSessions(page);
+  if (await page.locator(".task-row", { hasText: "准备从 UI 移除的 CLI 会话" }).count()) throw new Error("deleted CLI session returned after refresh");
   await page.locator(".task-select", { hasText: "新对话" }).click();
 
   const workspaceOpenResult = await page.evaluate((workspace) => window.claudeDesk.openWorkspace(workspace), root);
@@ -258,7 +271,7 @@ try {
       message: { id: "local-refresh-response", role: "assistant", model: "ThirdParty-B", content: [{ type: "text", text: "UI 创建的会话也已同步。" }] },
     },
   ].map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
-  await page.locator('.project-action[title="刷新 Claude CLI 会话"]').click();
+  await refreshProjectSessions(page);
   await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((item) => item.textContent === "从 CLI 追加到 UI 会话"));
   if (await page.locator(".task-heading h2").textContent() !== "手动会话名") throw new Error("refresh overwrote the manual conversation title");
 
@@ -355,6 +368,7 @@ try {
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
   if (await page.locator(".permission-dialog").count()) throw new Error("persisted conversation permission prompted again");
 
+  await page.locator(".project-row").first().hover();
   await page.locator('.project-action[title="新建对话"]').click();
   await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 3);
   if (await page.locator(".conversation-intro").count() !== 1) throw new Error("new conversation did not open independently");
@@ -438,11 +452,10 @@ try {
   await localConversationRow.hover();
   await localConversationRow.locator(".task-delete").click();
   await localConversationRow.waitFor({ state: "detached" });
-  await page.locator('.project-action[title="刷新 Claude CLI 会话"]').click();
+  await refreshProjectSessions(page);
   if (await page.locator(".task-row", { hasText: "手动会话名" }).count()) throw new Error("deleted UI-created session returned after refresh");
-  await page.waitForTimeout(450);
-  const hiddenLocalSessions = await page.evaluate(() => JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0]?.hiddenSessionIds ?? []);
-  if (!hiddenLocalSessions.includes("22222222-2222-4222-8222-222222222222")) throw new Error("deleted UI-created session was not added to the hidden list");
+  const deletedLocalSessionStillExists = await readFile(localSessionPath, "utf8").then(() => true, () => false);
+  if (deletedLocalSessionStillExists) throw new Error("deleted UI-created session remained in Claude CLI history");
 
   await page.evaluate(() => {
     const projectKey = "claude-desk.projects.v2";
