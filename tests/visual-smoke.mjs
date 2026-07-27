@@ -90,11 +90,11 @@ await page.waitForSelector(".composer");
 await page.screenshot({ path: resolve(artifacts, "conversation.png") });
 
 const branchAction = page.locator('[aria-label="从这里分叉"]');
-if (await branchAction.count() !== 1) throw new Error("completed user message did not expose a branch action");
+if (await branchAction.count() !== 1) throw new Error("completed assistant message did not expose a branch action");
 if (await branchAction.evaluate((element) => getComputedStyle(element.parentElement).opacity) !== "0") {
   throw new Error("message branch action was visible before hover");
 }
-await page.locator(".message.user").hover();
+await page.locator(".message.assistant").hover();
 await page.waitForTimeout(150);
 if (Number(await branchAction.evaluate((element) => getComputedStyle(element.parentElement).opacity)) < 0.9) {
   throw new Error("message branch action was not visible on hover");

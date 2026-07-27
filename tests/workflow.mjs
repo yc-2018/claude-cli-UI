@@ -297,9 +297,9 @@ try {
   if (await page.locator(".task-heading h2").textContent() !== "CLI 外部改名") throw new Error("refresh overwrote the synchronized conversation title");
 
   const sourceBeforeBranch = await readFile(resolve(cliSessions, "22222222-2222-4222-8222-222222222222.jsonl"), "utf8");
-  const firstUserMessage = page.locator(".message.user").first();
-  await firstUserMessage.hover();
-  await firstUserMessage.locator('[aria-label="从这里分叉"]').click();
+  const firstAssistantMessage = page.locator(".message.assistant").first();
+  await firstAssistantMessage.hover();
+  await firstAssistantMessage.locator('[aria-label="从这里分叉"]').click();
   await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "CLI 外部改名 (2)");
   await page.waitForFunction(() => {
     const project = JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0];

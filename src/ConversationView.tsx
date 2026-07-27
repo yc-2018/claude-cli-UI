@@ -123,35 +123,42 @@ export default function ConversationView({ messages, loadingHistory = false, bra
       }}
     >
       <div className="conversation">
-        {messages.map((message, messageIndex) => {
+        {messages.map((message) => {
           if (message.role === "user") userTurn += 1;
           const messageUserTurn = userTurn;
-          const nextMessage = messages[messageIndex + 1];
-          const canBranch = message.role === "user" && nextMessage?.role === "assistant" && (nextMessage.status === "done" || nextMessage.status === undefined);
+          const canBranch = message.role === "assistant" && messageUserTurn > 0 && (message.status === "done" || message.status === undefined);
           return (
-            <article className={`message ${message.role}`} data-status={message.status} key={message.id}>
+            <article className={`message ${message.role} ${canBranch && onBranch ? "branchable" : ""}`} data-status={message.status} key={message.id}>
               {message.role === "assistant" ? <div className="assistant-avatar"><Sparkles size={14} /></div> : null}
               <div className="message-body">
                 {message.role === "user" ? (
-                  <div className="user-message-wrap">
-                    <div className="user-bubble">
-                      {(message.attachments?.length ?? 0) > 0 ? (
-                        <div className="sent-attachments">
-                          {message.attachments?.map((attachment) => attachment.kind === "image" ? (
-                            <figure className="sent-image" key={attachment.id}>
-                              <img src={`claude-desk-attachment://local/${encodeURIComponent(attachment.storedName)}`} alt={attachment.name} />
-                              <figcaption title={attachment.name}>{attachment.name}</figcaption>
-                            </figure>
-                          ) : (
-                            <div className="sent-file" key={attachment.id} title={attachment.name}>
-                              <FileCode2 size={16} />
-                              <span>{attachment.name}</span>
-                            </div>
-                          ))}
-                        </div>
-                      ) : null}
-                      {message.content ? <div className="user-message-text">{message.content}</div> : null}
-                    </div>
+                  <div className="user-bubble">
+                    {(message.attachments?.length ?? 0) > 0 ? (
+                      <div className="sent-attachments">
+                        {message.attachments?.map((attachment) => attachment.kind === "image" ? (
+                          <figure className="sent-image" key={attachment.id}>
+                            <img src={`claude-desk-attachment://local/${encodeURIComponent(attachment.storedName)}`} alt={attachment.name} />
+                            <figcaption title={attachment.name}>{attachment.name}</figcaption>
+                          </figure>
+                        ) : (
+                          <div className="sent-file" key={attachment.id} title={attachment.name}>
+                            <FileCode2 size={16} />
+                            <span>{attachment.name}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                    {message.content ? <div className="user-message-text">{message.content}</div> : null}
+                  </div>
+                ) : (
+                  <>
+                    {message.thinking ? <ThinkingBlock content={message.thinking} running={message.status === "running"} /> : null}
+                    <ActivityList activities={message.activities ?? []} running={message.status === "running"} />
+                    {message.content ? <div className="markdown"><MarkdownMessage content={message.content} /></div> : null}
+                    {message.status === "running" && !message.content && !message.thinking && (message.activities?.length ?? 0) === 0
+                      ? <div className="thinking"><span className="spinner" />Claude 正在思考</div>
+                      : null}
+                    {message.error ? <div className="message-error">{message.error}</div> : null}
                     {canBranch && onBranch ? (
                       <div className="message-actions">
                         <button
@@ -165,16 +172,6 @@ export default function ConversationView({ messages, loadingHistory = false, bra
                         </button>
                       </div>
                     ) : null}
-                  </div>
-                ) : (
-                  <>
-                    {message.thinking ? <ThinkingBlock content={message.thinking} running={message.status === "running"} /> : null}
-                    <ActivityList activities={message.activities ?? []} running={message.status === "running"} />
-                    {message.content ? <div className="markdown"><MarkdownMessage content={message.content} /></div> : null}
-                    {message.status === "running" && !message.content && !message.thinking && (message.activities?.length ?? 0) === 0
-                      ? <div className="thinking"><span className="spinner" />Claude 正在思考</div>
-                      : null}
-                    {message.error ? <div className="message-error">{message.error}</div> : null}
                   </>
                 )}
               </div>
