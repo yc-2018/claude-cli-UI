@@ -29,7 +29,7 @@ npm run dist
 
 应用直接调用系统中已安装并完成登录的 `claude` 命令。每个项目绑定一个工作目录，项目下可以建立多个互相独立的对话，每个对话使用自己的 Claude CLI session。
 
-项目行右侧的刷新按钮会重新扫描 Claude CLI 会话，并载入 CLI 在应用外追加的消息，不需要关闭并重开应用。会话列表同时显示最后更新时间和 Git 分支。历史来自当前电脑的 Claude 配置目录（默认 `%USERPROFILE%\.claude\projects`，也支持 `CLAUDE_CONFIG_DIR`）；Portable 程序本身不携带、上传或跨电脑同步这些历史文件。
+项目行右侧的刷新按钮会重新扫描 Claude CLI 会话，并载入 CLI 在应用外追加的消息，不需要关闭并重开应用。会话名称会与 Claude CLI 的自定义标题双向同步，列表同时显示最后更新时间和 Git 分支。侧边栏右缘可拖动调整宽度。历史来自当前电脑的 Claude 配置目录（默认 `%USERPROFILE%\.claude\projects`，也支持 `CLAUDE_CONFIG_DIR`）；Portable 程序本身不携带、上传或跨电脑同步这些历史文件。
 
 从 claude-cli-UI 删除带 CLI session 的对话时，对应的 Claude CLI 会话文件会移入 Windows 回收站，并从 CLI 的 `/resume` 中消失。
 

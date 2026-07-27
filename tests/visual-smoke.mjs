@@ -29,6 +29,7 @@ await page.setViewportSize({ width: 1320, height: 860 });
 await page.evaluate(() => {
   localStorage.removeItem("claude-desk.tasks.v1");
   localStorage.removeItem("claude-desk.projects.v2");
+  localStorage.removeItem("claude-desk.sidebar-width.v1");
 });
 await page.reload();
 await page.waitForSelector(".empty-view");
@@ -87,6 +88,18 @@ await page.evaluate(() => {
 });
 await page.waitForSelector(".composer");
 await page.screenshot({ path: resolve(artifacts, "conversation.png") });
+
+const initialSidebarWidth = await page.locator(".sidebar").evaluate((element) => element.getBoundingClientRect().width);
+const resizeHandle = page.locator(".sidebar-resizer");
+const resizeBox = await resizeHandle.boundingBox();
+if (!resizeBox) throw new Error("sidebar resize handle was not rendered");
+await page.mouse.move(resizeBox.x + resizeBox.width / 2, resizeBox.y + 100);
+await page.mouse.down();
+await page.mouse.move(resizeBox.x + resizeBox.width / 2 + 120, resizeBox.y + 100, { steps: 8 });
+await page.mouse.up();
+const resizedSidebarWidth = await page.locator(".sidebar").evaluate((element) => element.getBoundingClientRect().width);
+if (resizedSidebarWidth < initialSidebarWidth + 110) throw new Error("sidebar drag did not increase its width");
+await page.waitForFunction((expectedWidth) => Number(localStorage.getItem("claude-desk.sidebar-width.v1")) === expectedWidth, resizedSidebarWidth);
 
 await page.locator(".composer textarea").evaluate((textarea) => {
   const transfer = new DataTransfer();

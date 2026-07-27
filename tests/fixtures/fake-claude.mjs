@@ -46,7 +46,7 @@ process.stdin.on("end", () => {
   const sessionName = sessionNameIndex >= 0 ? args[sessionNameIndex + 1] : undefined;
   const isResume = args.includes("--resume");
   const send = (data) => process.stdout.write(`${JSON.stringify(data)}\n`);
-  if (prompt.includes("这是首次会话名称测试内容") && sessionName !== "这是首次会话名称测试") {
+  if (prompt.includes("这是首次会话名称测试内容") && sessionName !== "手动会话名") {
     process.stderr.write(`unexpected session name: ${sessionName ?? "missing"}`);
     process.exitCode = 2;
     return;
@@ -187,5 +187,20 @@ process.stdin.on("end", () => {
     message: { role: "assistant", content: [{ type: "thinking", thinking }, { type: "text", text: response }] },
     session_id: sessionId,
   });
+  if (sessionsDirectory && prompt.includes("这是首次会话名称测试内容")) {
+    appendFileSync(resolve(sessionsDirectory, `${sessionId}.jsonl`), `${JSON.stringify({
+      type: "assistant",
+      uuid: `${sessionId}-assistant-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      cwd: process.cwd(),
+      sessionId,
+      message: {
+        id: `${sessionId}-response`,
+        role: "assistant",
+        model,
+        content: [{ type: "thinking", thinking }, { type: "text", text: response }],
+      },
+    })}\n`, "utf8");
+  }
   send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
 });

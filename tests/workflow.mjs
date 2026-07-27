@@ -235,6 +235,27 @@ try {
   if (!normalizedSession.includes('"entrypoint":"cli"') || !normalizedSession.includes('"promptSource":"typed"')) {
     throw new Error("claude-cli-UI session was not normalized for the CLI resume picker");
   }
+  await page.locator('.task-row.active .task-rename[title="重命名对话"]').evaluate((button) => button.click());
+  await page.locator('input[aria-label="对话名称"]').fill("UI 同步会话名");
+  await page.locator('input[aria-label="对话名称"]').press("Enter");
+  await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "UI 同步会话名");
+  await page.waitForFunction(async () => {
+    const project = JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0];
+    return project?.conversations?.some((conversation) => conversation.title === "UI 同步会话名");
+  });
+  const renamedSession = await readFile(resolve(cliSessions, "22222222-2222-4222-8222-222222222222.jsonl"), "utf8");
+  if (!renamedSession.includes('"type":"custom-title","customTitle":"UI 同步会话名"')) {
+    throw new Error("UI conversation rename was not written to Claude CLI history");
+  }
+  await appendFile(resolve(cliSessions, "22222222-2222-4222-8222-222222222222.jsonl"), `${JSON.stringify({
+    type: "custom-title",
+    customTitle: "CLI 外部改名",
+    sessionId: "22222222-2222-4222-8222-222222222222",
+    timestamp: new Date().toISOString(),
+  })}\n`, "utf8");
+  await refreshProjectSessions(page);
+  await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "CLI 外部改名");
+  await page.waitForTimeout(450);
   const completed = await page.evaluate(() => ({
     bodySize: document.body.innerText.length,
     projects: JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]"),
@@ -246,7 +267,7 @@ try {
   if (firstConversation?.selectedModel !== "fable" || firstConversation?.resolvedModel !== "ThirdParty-B") {
     throw new Error("selected model role was not mapped through CLI");
   }
-  if (firstConversation?.title !== "手动会话名") throw new Error("the first prompt overwrote a manual conversation name");
+  if (firstConversation?.title !== "CLI 外部改名") throw new Error("CLI custom title was not synchronized back to the UI");
   const thinkingToggle = page.locator(".thinking-toggle").last();
   if (await thinkingToggle.getAttribute("aria-expanded") !== "false") throw new Error("completed thinking was not collapsed");
   await thinkingToggle.click();
@@ -273,7 +294,7 @@ try {
   ].map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
   await refreshProjectSessions(page);
   await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((item) => item.textContent === "从 CLI 追加到 UI 会话"));
-  if (await page.locator(".task-heading h2").textContent() !== "手动会话名") throw new Error("refresh overwrote the manual conversation title");
+  if (await page.locator(".task-heading h2").textContent() !== "CLI 外部改名") throw new Error("refresh overwrote the synchronized conversation title");
 
   await page.locator(".composer textarea").evaluate((textarea, payload) => {
     const transfer = new DataTransfer();
@@ -380,7 +401,7 @@ try {
   await page.locator(".composer textarea").press("Enter");
   await page.waitForSelector(".conversation-intro");
   if (await page.locator(".message").count()) throw new Error("/clear did not clear only the active conversation");
-  await page.locator(".task-select", { hasText: "手动会话名" }).click();
+  await page.locator(".task-select", { hasText: "CLI 外部改名" }).click();
   await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "这是首次会话名称测试内容");
 
   await page.locator(".composer textarea").fill("/new");
@@ -447,13 +468,13 @@ try {
   await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "来自终端的历史对话");
   if (await page.locator(".markdown", { hasText: "恢复的回答" }).count() === 0) throw new Error("CLI session was not reloaded after restart");
 
-  const localConversationRow = page.locator(".task-row", { hasText: "手动会话名" });
+  const localConversationRow = page.locator(".task-row", { hasText: "CLI 外部改名" });
   page.once("dialog", (dialog) => dialog.accept());
   await localConversationRow.hover();
   await localConversationRow.locator(".task-delete").click();
   await localConversationRow.waitFor({ state: "detached" });
   await refreshProjectSessions(page);
-  if (await page.locator(".task-row", { hasText: "手动会话名" }).count()) throw new Error("deleted UI-created session returned after refresh");
+  if (await page.locator(".task-row", { hasText: "CLI 外部改名" }).count()) throw new Error("deleted UI-created session returned after refresh");
   const deletedLocalSessionStillExists = await readFile(localSessionPath, "utf8").then(() => true, () => false);
   if (deletedLocalSessionStillExists) throw new Error("deleted UI-created session remained in Claude CLI history");
 

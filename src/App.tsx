@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { Folder, FolderOpen, Sparkles, TerminalSquare } from "lucide-react";
 import Composer from "./Composer";
 import ConversationView from "./ConversationView";
@@ -36,6 +36,24 @@ interface PendingPermission {
   responseId: string;
   sessionId?: string;
   requests: ToolPermissionRequest[];
+}
+
+const DEFAULT_SIDEBAR_WIDTH = 280;
+const MIN_SIDEBAR_WIDTH = 220;
+const MAX_SIDEBAR_WIDTH = 520;
+const SIDEBAR_WIDTH_STORAGE_KEY = "claude-desk.sidebar-width.v1";
+
+function maxSidebarWidth() {
+  return Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, window.innerWidth - 420));
+}
+
+function clampSidebarWidth(width: number) {
+  return Math.min(maxSidebarWidth(), Math.max(MIN_SIDEBAR_WIDTH, width));
+}
+
+function loadSidebarWidth() {
+  const stored = Number(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY));
+  return clampSidebarWidth(Number.isFinite(stored) && stored > 0 ? stored : DEFAULT_SIDEBAR_WIDTH);
 }
 
 function getTextDelta(data: Record<string, unknown>) {
@@ -193,6 +211,7 @@ export default function App() {
     initialProjects.flatMap((project) => project.conversations)[0]?.id ?? null,
   );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [activeRuns, setActiveRuns] = useState<Record<string, string>>({});
   const [cliInfo, setCliInfo] = useState<{ available: boolean; version?: string } | null>(null);
   const [modelConfig, setModelConfig] = useState<ModelConfig>({ options: [] });
@@ -201,6 +220,7 @@ export default function App() {
   const runMeta = useRef(new Map<string, RunMeta>());
   const scannedProjects = useRef(new Set<string>());
   const loadingHistories = useRef(new Set<string>());
+  const sidebarResize = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.conversations.some((item) => item.id === activeConversationId)) ?? null,
@@ -279,6 +299,16 @@ export default function App() {
     void window.claudeDesk.getClaudeInfo().then(setCliInfo).catch(() => setCliInfo({ available: false }));
   }, []);
 
+  useEffect(() => {
+    localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    const resize = () => setSidebarWidth((current) => clampSidebarWidth(current));
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, []);
+
   const syncProjectSessions = useCallback(async (projectId: string, reloadMessages: boolean) => {
     const project = projectsRef.current.find((item) => item.id === projectId);
     if (!project) return;
@@ -312,6 +342,7 @@ export default function App() {
         if (!session) return conversation;
         return {
           ...conversation,
+          title: session.customTitle ?? conversation.title,
           messages: history?.messages ?? conversation.messages,
           updatedAt: Math.max(conversation.updatedAt, session.updatedAt),
           gitBranch: session.gitBranch ?? conversation.gitBranch,
@@ -654,9 +685,24 @@ export default function App() {
       : project));
   };
 
-  const renameConversation = (conversationId: string, title: string) => {
+  const renameConversation = async (conversationId: string, title: string) => {
     const trimmed = title.trim();
-    if (!trimmed) return;
+    if (!trimmed || trimmed.length > 100 || activeRuns[conversationId]) return;
+    const project = projects.find((item) => item.conversations.some((conversation) => conversation.id === conversationId));
+    const conversation = project?.conversations.find((item) => item.id === conversationId);
+    if (!project || !conversation) return;
+    if (conversation.sessionId) {
+      try {
+        const result = await window.claudeDesk.renameClaudeSession(project.workspace, conversation.sessionId, trimmed);
+        if (!result.renamed) {
+          window.alert(result.error ?? "无法同步 Claude CLI 会话名称");
+          return;
+        }
+      } catch (error) {
+        window.alert(error instanceof Error ? error.message : "无法同步 Claude CLI 会话名称");
+        return;
+      }
+    }
     updateConversation(conversationId, (conversation) => ({ ...conversation, title: trimmed, updatedAt: Date.now() }));
   };
 
@@ -693,7 +739,9 @@ export default function App() {
       sessionId: activeConversation.sessionId,
       sessionName: activeConversation.sessionId
         ? undefined
-        : makeClaudeSessionName((activeConversation.messages.find((message) => message.role === "user")?.content ?? prompt) || attachments[0]?.name || "附件"),
+        : (activeConversation.title !== "新对话"
+          ? activeConversation.title.slice(0, 100)
+          : makeClaudeSessionName((activeConversation.messages.find((message) => message.role === "user")?.content ?? prompt) || attachments[0]?.name || "附件")),
       model: getModelArgument(activeConversation, modelConfig),
       allowedTools: activeConversation.allowedTools,
       permissionMode: activeConversation.permissionMode,
@@ -844,6 +892,25 @@ export default function App() {
     return false;
   };
 
+  const startSidebarResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    sidebarResize.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: sidebarWidth };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    document.body.classList.add("resizing-sidebar");
+  };
+
+  const moveSidebarResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const resize = sidebarResize.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    setSidebarWidth(clampSidebarWidth(resize.startWidth + event.clientX - resize.startX));
+  };
+
+  const stopSidebarResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (sidebarResize.current?.pointerId !== event.pointerId) return;
+    sidebarResize.current = null;
+    document.body.classList.remove("resizing-sidebar");
+  };
+
   if (!storageReady) {
     return (
       <div className="app-shell">
@@ -858,7 +925,7 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}>
       <div className="title-drag-region" />
       <Sidebar
         projects={projects}
@@ -876,6 +943,30 @@ export default function App() {
         onRenameProject={renameProject}
         onToggle={() => setSidebarCollapsed((value) => !value)}
       />
+      {!sidebarCollapsed ? (
+        <div
+          aria-label="调整侧边栏宽度"
+          aria-orientation="vertical"
+          aria-valuemax={maxSidebarWidth()}
+          aria-valuemin={MIN_SIDEBAR_WIDTH}
+          aria-valuenow={sidebarWidth}
+          className="sidebar-resizer"
+          role="separator"
+          tabIndex={0}
+          title="拖动调整侧边栏宽度，双击恢复默认宽度"
+          onDoubleClick={() => setSidebarWidth(clampSidebarWidth(DEFAULT_SIDEBAR_WIDTH))}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            event.preventDefault();
+            setSidebarWidth((current) => clampSidebarWidth(current + (event.key === "ArrowLeft" ? -16 : 16)));
+          }}
+          onLostPointerCapture={stopSidebarResize}
+          onPointerCancel={stopSidebarResize}
+          onPointerDown={startSidebarResize}
+          onPointerMove={moveSidebarResize}
+          onPointerUp={stopSidebarResize}
+        />
+      ) : null}
       <main className="main-panel">
         {activeProject && activeConversation ? (
           <>

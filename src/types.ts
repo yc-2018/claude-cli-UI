@@ -66,6 +66,7 @@ export interface ClaudeSessionSummary {
   workspace: string;
   createdAt: number;
   updatedAt: number;
+  customTitle?: string;
   gitBranch?: string;
   resolvedModel?: string;
   permissionMode: PermissionMode;

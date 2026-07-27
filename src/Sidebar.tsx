@@ -215,6 +215,7 @@ export default function Sidebar({
                           <input
                             aria-label="对话名称"
                             autoFocus
+                            maxLength={100}
                             value={editingName.value}
                             onChange={(event) => setEditingName({ ...editingName, value: event.target.value })}
                             onKeyDown={(event) => renameKeyDown(event, editingName)}

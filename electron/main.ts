@@ -64,6 +64,7 @@ interface ClaudeSessionSummary {
   workspace: string;
   createdAt: number;
   updatedAt: number;
+  customTitle?: string;
   gitBranch?: string;
   resolvedModel?: string;
   permissionMode: PermissionMode;
@@ -407,6 +408,7 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
   let sessionWorkspace = "";
   let firstPrompt = "";
   let lastPrompt = "";
+  let customTitle: string | undefined;
   let gitBranch: string | undefined;
   let resolvedModel: string | undefined;
   let permissionMode: PermissionMode = "acceptEdits";
@@ -430,6 +432,9 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
     if (typeof record.cwd === "string") sessionWorkspace = record.cwd;
     if (typeof record.sessionId === "string") sessionId = record.sessionId;
     if (typeof record.lastPrompt === "string") lastPrompt = record.lastPrompt;
+    if (record.type === "custom-title" && typeof record.customTitle === "string" && record.customTitle.trim()) {
+      customTitle = record.customTitle.trim();
+    }
     if (typeof record.gitBranch === "string" && record.gitBranch.length <= 200) gitBranch = record.gitBranch;
     const timestamp = parseTimestamp(record.timestamp);
     if (timestamp !== undefined) {
@@ -491,13 +496,14 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
   if (!sessionWorkspace || normalizeWorkspace(sessionWorkspace) !== normalizeWorkspace(workspace)) return null;
   if (!Number.isFinite(createdAt)) createdAt = fileInfo.birthtimeMs || fileInfo.mtimeMs;
   updatedAt = Math.max(updatedAt, fileInfo.mtimeMs);
-  const title = importedTitle(firstPrompt || lastPrompt || "Claude CLI 对话");
+  const title = customTitle || importedTitle(firstPrompt || lastPrompt || "Claude CLI 对话");
   return {
     sessionId,
     title,
     workspace: sessionWorkspace,
     createdAt,
     updatedAt,
+    customTitle,
     gitBranch,
     resolvedModel,
     permissionMode,
@@ -646,6 +652,53 @@ ipcMain.handle("claude:session", async (_event, workspace: unknown, sessionId: u
 ipcMain.handle("claude:session-histories", async (_event, workspace: unknown) => {
   if (typeof workspace !== "string" || !existsSync(workspace) || !statSync(workspace).isDirectory()) return [];
   return scanClaudeSessions(workspace, true);
+});
+
+ipcMain.handle("claude:rename-session", async (_event, workspace: unknown, sessionId: unknown, title: unknown) => {
+  if (
+    typeof workspace !== "string" ||
+    !existsSync(workspace) ||
+    !statSync(workspace).isDirectory() ||
+    typeof sessionId !== "string" ||
+    !SESSION_ID_PATTERN.test(sessionId) ||
+    typeof title !== "string" ||
+    !title.trim() ||
+    title.trim().length > 100
+  ) return { renamed: false, error: "会话名称无效" };
+
+  const sessionFile = join(claudeSessionsDirectory(workspace), `${sessionId}.jsonl`);
+  let needsLeadingNewline = false;
+  try {
+    const details = await stat(sessionFile);
+    if (!details.isFile()) return { renamed: false, error: "找不到对应的 Claude CLI 会话文件" };
+    if (details.size > 0) {
+      const handle = await open(sessionFile, "r");
+      try {
+        const lastByte = Buffer.alloc(1);
+        await handle.read(lastByte, 0, 1, details.size - 1);
+        needsLeadingNewline = lastByte[0] !== 10 && lastByte[0] !== 13;
+      } finally {
+        await handle.close().catch(() => undefined);
+      }
+    }
+  } catch {
+    return { renamed: false, error: "找不到对应的 Claude CLI 会话文件" };
+  }
+  const record = JSON.stringify({
+    type: "custom-title",
+    customTitle: title.trim(),
+    sessionId,
+    timestamp: new Date().toISOString(),
+  });
+  try {
+    await appendFile(sessionFile, `${needsLeadingNewline ? "\n" : ""}${record}\n`, "utf8");
+    return { renamed: true };
+  } catch (error) {
+    return {
+      renamed: false,
+      error: error instanceof Error ? error.message : "无法写入 Claude CLI 会话名称",
+    };
+  }
 });
 
 ipcMain.handle("claude:delete-session", async (_event, workspace: unknown, sessionId: unknown) => {
