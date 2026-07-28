@@ -17,6 +17,9 @@ contextBridge.exposeInMainWorld("claudeDesk", {
   getProjectStore: () => ipcRenderer.invoke("projects:load"),
   discoverProjects: () => ipcRenderer.invoke("projects:discover"),
   saveProjectStore: (projects: unknown) => ipcRenderer.send("projects:save", projects),
+  getAppSettings: () => ipcRenderer.invoke("app:settings:get"),
+  setAppSettings: (settings: unknown) => ipcRenderer.invoke("app:settings:set", settings),
+  notifyCompletion: (conversationId: string, title: string) => ipcRenderer.invoke("app:notify-completion", { conversationId, title }),
   reportError: (message: string) => ipcRenderer.send("app:renderer-error", message),
   startRun: (request: unknown) => ipcRenderer.invoke("claude:start", request),
   stopRun: (runId: string) => ipcRenderer.invoke("claude:stop", runId),
@@ -24,5 +27,12 @@ contextBridge.exposeInMainWorld("claudeDesk", {
     const listener = (_ipcEvent: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
     ipcRenderer.on("claude:event", listener);
     return () => ipcRenderer.removeListener("claude:event", listener);
+  },
+  onNavigateToConversation: (callback: (conversationId: string) => void) => {
+    const listener = (_ipcEvent: Electron.IpcRendererEvent, conversationId: unknown) => {
+      if (typeof conversationId === "string") callback(conversationId);
+    };
+    ipcRenderer.on("app:navigate-conversation", listener);
+    return () => ipcRenderer.removeListener("app:navigate-conversation", listener);
   },
 });

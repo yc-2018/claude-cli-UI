@@ -89,6 +89,22 @@ await page.evaluate(() => {
 await page.waitForSelector(".composer");
 await page.screenshot({ path: resolve(artifacts, "conversation.png") });
 
+await page.locator(".settings-trigger").click();
+await page.waitForSelector(".settings-popover");
+const settingsLayout = await page.evaluate(() => ({
+  sidebar: document.querySelector(".sidebar")?.getBoundingClientRect().toJSON(),
+  popover: document.querySelector(".settings-popover")?.getBoundingClientRect().toJSON(),
+}));
+if (
+  !settingsLayout.sidebar ||
+  !settingsLayout.popover ||
+  settingsLayout.popover.left < settingsLayout.sidebar.left ||
+  settingsLayout.popover.right > settingsLayout.sidebar.right ||
+  settingsLayout.popover.top < settingsLayout.sidebar.top
+) throw new Error(`settings popover escaped the sidebar: ${JSON.stringify(settingsLayout)}`);
+await page.screenshot({ path: resolve(artifacts, "settings-popover.png") });
+await page.locator(".settings-trigger").click();
+
 const branchAction = page.locator('[aria-label="从这里分叉"]');
 if (await branchAction.count() !== 1) throw new Error("completed assistant message did not expose a branch action");
 await page.evaluate(() => {
@@ -169,7 +185,7 @@ for (let index = 1; index < compactLayout.projectActions.length; index += 1) {
   }
 }
 
-console.log(JSON.stringify({ errors, layout, compactLayout }, null, 2));
+console.log(JSON.stringify({ errors, settingsLayout, layout, compactLayout }, null, 2));
 await electronApp.close();
 
 if (errors.length > 0) process.exitCode = 1;

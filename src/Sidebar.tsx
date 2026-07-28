@@ -3,22 +3,26 @@ import {
   ChevronDown,
   ChevronRight,
   Folder,
+  LoaderCircle,
   MessageSquareText,
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
   Plus,
   RefreshCw,
+  Settings,
   Sparkles,
   Trash2,
 } from "lucide-react";
-import type { Project } from "./types";
+import type { AppSettings, Project } from "./types";
 
 interface Props {
   projects: Project[];
   activeConversationId: string | null;
   collapsed: boolean;
   cliInfo: { available: boolean; version?: string } | null;
+  runningConversationIds: ReadonlySet<string>;
+  appSettings: AppSettings;
   onSelectConversation(id: string): void;
   onNewProject(): void;
   onNewConversation(projectId: string): void;
@@ -28,6 +32,7 @@ interface Props {
   onDeleteProject(projectId: string): void;
   onRenameConversation(conversationId: string, title: string): void;
   onRenameProject(projectId: string, name: string): void;
+  onSettingsChange(settings: AppSettings): void;
   onToggle(): void;
 }
 
@@ -60,6 +65,8 @@ export default function Sidebar({
   activeConversationId,
   collapsed,
   cliInfo,
+  runningConversationIds,
+  appSettings,
   onSelectConversation,
   onNewProject,
   onNewConversation,
@@ -69,11 +76,22 @@ export default function Sidebar({
   onDeleteProject,
   onRenameConversation,
   onRenameProject,
+  onSettingsChange,
   onToggle,
 }: Props) {
   const [closedProjects, setClosedProjects] = useState<Set<string>>(() => new Set());
   const [editingName, setEditingName] = useState<EditingName | null>(null);
   const [refreshingProjects, setRefreshingProjects] = useState<Set<string>>(() => new Set());
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSettingsOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [settingsOpen]);
 
   useEffect(() => {
     const activeProject = projects.find((project) => project.conversations.some((item) => item.id === activeConversationId));
@@ -130,6 +148,17 @@ export default function Sidebar({
       <aside className="sidebar sidebar-collapsed">
         <button className="icon-button" onClick={onToggle} title="展开侧边栏"><PanelLeftOpen size={18} /></button>
         <button className="icon-button new-icon" onClick={onNewProject} title="新建项目"><Plus size={18} /></button>
+        <div className="sidebar-collapsed-spacer" />
+        <button
+          className="icon-button"
+          onClick={() => {
+            setSettingsOpen(true);
+            onToggle();
+          }}
+          title="设置"
+        >
+          <Settings size={17} />
+        </button>
       </aside>
     );
   }
@@ -150,6 +179,7 @@ export default function Sidebar({
         {projects.length === 0 ? <div className="task-list-empty">还没有项目</div> : null}
         {projects.map((project) => {
           const closed = closedProjects.has(project.id);
+          const projectRunning = project.conversations.some((conversation) => runningConversationIds.has(conversation.id));
           return (
             <section className="project-group" key={project.id}>
               <div
@@ -180,6 +210,7 @@ export default function Sidebar({
                       <strong>{project.customName ?? project.name}</strong>
                       {project.customName ? <small>{project.name}</small> : null}
                     </span>
+                    {projectRunning ? <LoaderCircle className="project-running-icon" size={13} aria-label="项目中有会话正在运行" /> : null}
                   </button>
                 )}
                 {editingName?.kind === "project" && editingName.id === project.id ? null : (
@@ -208,7 +239,7 @@ export default function Sidebar({
               {!closed ? (
                 <div className="project-conversations">
                   {project.conversations.map((conversation) => (
-                    <div className={`task-row ${activeConversationId === conversation.id ? "active" : ""}`} key={conversation.id}>
+                    <div className={`task-row ${activeConversationId === conversation.id ? "active" : ""} ${runningConversationIds.has(conversation.id) ? "running" : ""}`} key={conversation.id}>
                       {editingName?.kind === "conversation" && editingName.id === conversation.id ? (
                         <div className="rename-editor conversation-rename-editor">
                           <MessageSquareText size={14} />
@@ -225,7 +256,9 @@ export default function Sidebar({
                       ) : (
                         <>
                           <button className="task-select" onClick={() => onSelectConversation(conversation.id)}>
-                            <MessageSquareText size={14} />
+                            {runningConversationIds.has(conversation.id)
+                              ? <LoaderCircle className="conversation-running-icon" size={14} aria-label="会话正在运行" />
+                              : <MessageSquareText size={14} />}
                             <span>
                               <strong>{conversation.title}</strong>
                               <small className="conversation-meta">
@@ -262,9 +295,48 @@ export default function Sidebar({
           );
         })}
       </nav>
-      <div className="sidebar-footer">
-        <span className={`status-dot ${cliInfo && !cliInfo.available ? "off" : ""}`} />
-        {cliInfo ? (cliInfo.available ? `Claude CLI ${cliInfo.version ?? ""}` : "未找到 Claude CLI") : "正在检测 Claude CLI"}
+      <div className="sidebar-bottom">
+        {settingsOpen ? (
+          <section className="settings-popover" aria-label="设置">
+            <div className="settings-heading">设置</div>
+            <div className="setting-group">
+              <span className="setting-label">关闭窗口</span>
+              <div className="segmented-control" role="group" aria-label="关闭窗口行为">
+                <button
+                  className={appSettings.closeBehavior === "tray" ? "active" : ""}
+                  onClick={() => onSettingsChange({ ...appSettings, closeBehavior: "tray" })}
+                  type="button"
+                >
+                  托盘后台
+                </button>
+                <button
+                  className={appSettings.closeBehavior === "quit" ? "active" : ""}
+                  onClick={() => onSettingsChange({ ...appSettings, closeBehavior: "quit" })}
+                  type="button"
+                >
+                  退出应用
+                </button>
+              </div>
+            </div>
+            <label className="setting-toggle-row">
+              <span>后台会话完成提醒</span>
+              <input
+                checked={appSettings.notifyOnCompletion}
+                onChange={(event) => onSettingsChange({ ...appSettings, notifyOnCompletion: event.target.checked })}
+                type="checkbox"
+              />
+              <span className="toggle-track" aria-hidden="true"><span /></span>
+            </label>
+          </section>
+        ) : null}
+        <button className={`settings-trigger ${settingsOpen ? "active" : ""}`} onClick={() => setSettingsOpen((value) => !value)} type="button">
+          <Settings size={15} />
+          <span>设置</span>
+        </button>
+        <div className="sidebar-footer">
+          <span className={`status-dot ${cliInfo && !cliInfo.available ? "off" : ""}`} />
+          {cliInfo ? (cliInfo.available ? `Claude CLI ${cliInfo.version ?? ""}` : "未找到 Claude CLI") : "正在检测 Claude CLI"}
+        </div>
       </div>
     </aside>
   );

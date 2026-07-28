@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
-import { Folder, FolderOpen, Sparkles, TerminalSquare } from "lucide-react";
+import { CheckCircle2, Folder, FolderOpen, TerminalSquare } from "lucide-react";
 import Composer from "./Composer";
 import ConversationView from "./ConversationView";
 import PermissionDialog from "./PermissionDialog";
@@ -7,6 +7,7 @@ import Sidebar from "./Sidebar";
 import { hasLegacyProjectsToMigrate, loadProjects, makeId, parseProjects, pathName, saveProjects, shorten } from "./storage";
 import type {
   Activity,
+  AppSettings,
   Attachment,
   ChatMessage,
   ClaudeEvent,
@@ -24,6 +25,7 @@ interface RunMeta {
   conversationId: string;
   responseId: string;
   completed: boolean;
+  successful: boolean;
   receivedText: boolean;
   receivedThinking: boolean;
   pendingText: string;
@@ -42,6 +44,7 @@ const DEFAULT_SIDEBAR_WIDTH = 280;
 const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 520;
 const SIDEBAR_WIDTH_STORAGE_KEY = "claude-desk.sidebar-width.v1";
+const DEFAULT_APP_SETTINGS: AppSettings = { closeBehavior: "tray", notifyOnCompletion: true };
 
 function maxSidebarWidth() {
   return Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, window.innerWidth - 420));
@@ -224,11 +227,15 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [activeRuns, setActiveRuns] = useState<Record<string, string>>({});
+  const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
+  const [completionNotice, setCompletionNotice] = useState<{ conversationId: string; title: string } | null>(null);
   const [cliInfo, setCliInfo] = useState<{ available: boolean; version?: string } | null>(null);
   const [modelConfig, setModelConfig] = useState<ModelConfig>({ options: [] });
   const [permissionQueue, setPermissionQueue] = useState<PendingPermission[]>([]);
   const [branchingConversationId, setBranchingConversationId] = useState<string | null>(null);
   const projectsRef = useRef(projects);
+  const activeConversationIdRef = useRef(activeConversationId);
+  const appSettingsRef = useRef(appSettings);
   const runMeta = useRef(new Map<string, RunMeta>());
   const scannedProjects = useRef(new Set<string>());
   const loadingHistories = useRef(new Set<string>());
@@ -311,6 +318,38 @@ export default function App() {
   useEffect(() => {
     void window.claudeDesk.getClaudeInfo().then(setCliInfo).catch(() => setCliInfo({ available: false }));
   }, []);
+
+  useEffect(() => {
+    void window.claudeDesk.getAppSettings()
+      .then((settings) => {
+        appSettingsRef.current = settings;
+        setAppSettings(settings);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    appSettingsRef.current = appSettings;
+  }, [appSettings]);
+
+  useEffect(() => window.claudeDesk.onNavigateToConversation((conversationId) => {
+    const exists = projectsRef.current.some((project) => project.conversations.some((conversation) => conversation.id === conversationId));
+    if (!exists) return;
+    setActiveConversationId(conversationId);
+    setCompletionNotice(null);
+  }), []);
+
+  useEffect(() => {
+    if (!completionNotice) return;
+    const timer = window.setTimeout(() => setCompletionNotice((current) => (
+      current?.conversationId === completionNotice.conversationId ? null : current
+    )), 8_000);
+    return () => window.clearTimeout(timer);
+  }, [completionNotice]);
 
   useEffect(() => {
     localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
@@ -420,6 +459,37 @@ export default function App() {
       messages: conversation.messages.map((message) => message.id === meta.responseId ? updater(message) : message),
     }));
   }, [updateConversation]);
+
+  const notifyConversationCompleted = useCallback((conversationId: string) => {
+    if (!appSettingsRef.current.notifyOnCompletion) return;
+    const conversation = projectsRef.current
+      .flatMap((project) => project.conversations)
+      .find((item) => item.id === conversationId);
+    if (!conversation) return;
+    if (document.visibilityState === "visible") {
+      if (activeConversationIdRef.current !== conversationId) {
+        setCompletionNotice({ conversationId, title: conversation.title });
+      }
+      return;
+    }
+    void window.claudeDesk.notifyCompletion(conversationId, conversation.title).catch(() => false);
+  }, []);
+
+  const changeAppSettings = (settings: AppSettings) => {
+    const previous = appSettingsRef.current;
+    appSettingsRef.current = settings;
+    setAppSettings(settings);
+    void window.claudeDesk.setAppSettings(settings)
+      .then((saved) => {
+        appSettingsRef.current = saved;
+        setAppSettings(saved);
+      })
+      .catch(() => {
+        appSettingsRef.current = previous;
+        setAppSettings(previous);
+        window.alert("无法保存设置");
+      });
+  };
 
   useEffect(() => {
     if (
@@ -550,6 +620,7 @@ export default function App() {
         meta.completed = true;
         const permissionRequests = getPermissionRequests(data);
         const isError = data.is_error === true;
+        meta.successful = !isError && permissionRequests.length === 0;
         const resultText = typeof data.result === "string" ? data.result : "";
         updateResponse(meta, (message) => ({
           ...message,
@@ -577,6 +648,7 @@ export default function App() {
     if (event.type === "error") {
       flushPendingText(meta);
       meta.completed = true;
+      meta.successful = false;
       updateResponse(meta, (message) => ({ ...message, status: "error", error: event.message ?? "无法启动 Claude CLI" }));
     }
     if (event.type === "exit") {
@@ -590,9 +662,10 @@ export default function App() {
         delete next[meta.conversationId];
         return next;
       });
+      if (meta.successful) notifyConversationCompleted(meta.conversationId);
       runMeta.current.delete(event.runId);
     }
-  }), [flushPendingText, updateConversation, updateResponse]);
+  }), [flushPendingText, notifyConversationCompleted, updateConversation, updateResponse]);
 
   const addConversation = (projectId: string) => {
     const conversation = createConversation();
@@ -792,6 +865,7 @@ export default function App() {
       conversationId: activeConversation.id,
       responseId,
       completed: false,
+      successful: false,
       receivedText: false,
       receivedThinking: false,
       pendingText: "",
@@ -838,6 +912,7 @@ export default function App() {
         conversationId: pendingPermission.conversationId,
         responseId: pendingPermission.responseId,
         completed: true,
+        successful: false,
         receivedText: false,
         receivedThinking: false,
         pendingText: "",
@@ -865,6 +940,7 @@ export default function App() {
       conversationId: conversation.id,
       responseId: pendingPermission.responseId,
       completed: false,
+      successful: false,
       receivedText: false,
       receivedThinking: false,
       pendingText: "",
@@ -999,6 +1075,8 @@ export default function App() {
         activeConversationId={activeConversationId}
         collapsed={sidebarCollapsed}
         cliInfo={cliInfo}
+        runningConversationIds={new Set(Object.keys(activeRuns))}
+        appSettings={appSettings}
         onSelectConversation={setActiveConversationId}
         onNewProject={addProject}
         onNewConversation={addConversation}
@@ -1008,6 +1086,7 @@ export default function App() {
         onDeleteProject={deleteProject}
         onRenameConversation={renameConversation}
         onRenameProject={renameProject}
+        onSettingsChange={changeAppSettings}
         onToggle={() => setSidebarCollapsed((value) => !value)}
       />
       {!sidebarCollapsed ? (
@@ -1069,6 +1148,22 @@ export default function App() {
           </>
         ) : <EmptyView onNewProject={addProject} />}
       </main>
+      {completionNotice ? (
+        <button
+          className="completion-toast"
+          onClick={() => {
+            setActiveConversationId(completionNotice.conversationId);
+            setCompletionNotice(null);
+          }}
+          type="button"
+        >
+          <CheckCircle2 size={18} />
+          <span>
+            <strong>会话已完成</strong>
+            <small>{completionNotice.title}</small>
+          </span>
+        </button>
+      ) : null}
       {pendingPermission ? (
         <PermissionDialog
           requests={pendingPermission.requests}

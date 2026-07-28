@@ -64,6 +64,8 @@ button, select, textarea { -webkit-app-region: no-drag; }
   padding-inline: 7px;
 }
 
+.sidebar-collapsed-spacer { min-height: 0; flex: 1; }
+
 .sidebar-resizer {
   position: absolute;
   z-index: 8;
@@ -182,7 +184,8 @@ button, select, textarea { -webkit-app-region: no-drag; }
 }
 
 .project-toggle > svg { flex: 0 0 auto; }
-.project-name { display: flex; min-width: 0; align-items: baseline; gap: 6px; overflow: hidden; }
+.project-running-icon { margin-left: auto; color: var(--accent); animation: spin .85s linear infinite; }
+.project-name { display: flex; min-width: 0; flex: 1; align-items: baseline; gap: 6px; overflow: hidden; }
 .project-name strong { min-width: 0; overflow: hidden; color: #353531; font-size: 12.5px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
 .project-name small { min-width: 0; overflow: hidden; color: #92928a; font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -247,6 +250,8 @@ button, select, textarea { -webkit-app-region: no-drag; }
 }
 
 .task-select > svg { flex: 0 0 auto; margin-top: 2px; color: #73736d; }
+.task-select > .conversation-running-icon { color: var(--accent); animation: spin .85s linear infinite; }
+.task-row.running .task-select strong { color: #343430; }
 .task-select > span { display: grid; min-width: 0; gap: 2px; }
 .task-select strong { overflow: hidden; font-size: 12.5px; font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }
 .task-select small { overflow: hidden; color: #91918a; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
@@ -282,6 +287,86 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .project-rename-editor { height: 32px; }
 .conversation-rename-editor { height: 34px; padding-left: 9px; }
 
+.sidebar-bottom { position: relative; flex: 0 0 auto; }
+
+.settings-trigger {
+  display: flex;
+  width: 100%;
+  height: 30px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #696963;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.settings-trigger:hover, .settings-trigger.active { background: var(--hover); color: #30302d; }
+
+.settings-popover {
+  position: absolute;
+  z-index: 15;
+  right: 0;
+  bottom: 66px;
+  left: 0;
+  padding: 12px;
+  border: 1px solid #d4d4cd;
+  border-radius: 7px;
+  background: #fbfbf9;
+  box-shadow: 0 10px 28px rgb(34 34 30 / 14%);
+}
+
+.settings-heading { margin-bottom: 12px; color: #363632; font-size: 12.5px; font-weight: 650; }
+.setting-group { display: grid; gap: 7px; }
+.setting-label { color: #6e6e68; font-size: 11px; }
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid #d8d8d2;
+  border-radius: 6px;
+  background: #eeeeea;
+}
+
+.segmented-control button {
+  min-width: 0;
+  height: 27px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #74746d;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.segmented-control button.active { background: #fff; color: #30302d; box-shadow: 0 1px 2px rgb(30 30 27 / 10%); }
+
+.setting-toggle-row {
+  display: flex;
+  min-height: 31px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  color: #50504b;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.setting-toggle-row input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.toggle-track { position: relative; width: 30px; height: 17px; flex: 0 0 auto; border-radius: 9px; background: #c9c9c3; transition: background .15s ease; }
+.toggle-track span { position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(30 30 27 / 20%); transition: transform .15s ease; }
+.setting-toggle-row input:checked + .toggle-track { background: #5d7f67; }
+.setting-toggle-row input:checked + .toggle-track span { transform: translateX(13px); }
+.setting-toggle-row input:focus-visible + .toggle-track { outline: 2px solid #9c9c94; outline-offset: 2px; }
+
 .sidebar-footer {
   display: flex;
   align-items: center;
@@ -294,6 +379,33 @@ button, select, textarea { -webkit-app-region: no-drag; }
 
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 2px #dbe6de; }
 .status-dot.off { background: var(--danger); box-shadow: 0 0 0 2px #eddada; }
+
+.completion-toast {
+  position: fixed;
+  z-index: 24;
+  right: 22px;
+  bottom: 88px;
+  display: flex;
+  width: min(320px, calc(100vw - 44px));
+  min-height: 58px;
+  align-items: center;
+  gap: 11px;
+  padding: 10px 13px;
+  border: 1px solid #d1d6d0;
+  border-radius: 7px;
+  background: #fbfcfa;
+  color: #55705d;
+  text-align: left;
+  box-shadow: 0 12px 34px rgb(31 35 30 / 17%);
+  cursor: pointer;
+  animation: toast-in .18s ease-out;
+}
+
+.completion-toast:hover { border-color: #bfc8bf; background: #fff; }
+.completion-toast > svg { flex: 0 0 auto; }
+.completion-toast > span { display: grid; min-width: 0; gap: 3px; }
+.completion-toast strong { color: #30362f; font-size: 12.5px; font-weight: 650; }
+.completion-toast small { overflow: hidden; color: #777d75; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 
 .main-panel { position: relative; display: flex; min-width: 0; flex: 1; flex-direction: column; background: var(--canvas); }
 
@@ -452,6 +564,7 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .spinner, .mini-spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid #d1d1cb; border-top-color: var(--accent); border-radius: 50%; animation: spin .85s linear infinite; }
 .mini-spinner { width: 12px; height: 12px; border-width: 1.5px; }
 @keyframes spin { to { transform: rotate(360deg); } }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
 
 .thinking-block { margin: 0 0 13px; border-left: 2px solid #d7d7d0; }
 .thinking-toggle { display: flex; height: 28px; align-items: center; gap: 7px; padding: 0 8px; border: 0; background: transparent; color: #74746d; font-size: 11.5px; font-weight: 570; cursor: pointer; }

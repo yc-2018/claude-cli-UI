@@ -1,4 +1,4 @@
-import type { Attachment, AttachmentUpload, BranchClaudeSessionResult, ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ModelConfig, Project, RunRequest } from "./types";
+import type { AppSettings, Attachment, AttachmentUpload, BranchClaudeSessionResult, ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ModelConfig, Project, RunRequest } from "./types";
 
 declare module "*.css";
 
@@ -21,10 +21,14 @@ declare global {
       getProjectStore(): Promise<unknown[] | null>;
       discoverProjects(): Promise<string[]>;
       saveProjectStore(projects: Project[]): void;
+      getAppSettings(): Promise<AppSettings>;
+      setAppSettings(settings: AppSettings): Promise<AppSettings>;
+      notifyCompletion(conversationId: string, title: string): Promise<boolean>;
       reportError(message: string): void;
       startRun(request: RunRequest): Promise<{ started: boolean }>;
       stopRun(runId: string): Promise<boolean>;
       onEvent(callback: (event: ClaudeEvent) => void): () => void;
+      onNavigateToConversation(callback: (conversationId: string) => void): () => void;
     };
   }
 }

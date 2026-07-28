@@ -1,5 +1,10 @@
 export type PermissionMode = "default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions";
 
+export interface AppSettings {
+  closeBehavior: "tray" | "quit";
+  notifyOnCompletion: boolean;
+}
+
 export interface Activity {
   id: string;
   name: string;

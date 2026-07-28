@@ -105,6 +105,15 @@ process.stdin.on("end", () => {
     return;
   }
   if (prompt.includes("空响应")) return;
+  if (prompt.includes("后台提醒测试") || prompt.includes("后台托盘测试")) {
+    const response = prompt.includes("后台提醒测试") ? "后台会话提醒测试完成。" : "托盘后台运行测试完成。";
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    setTimeout(() => {
+      send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: response }] }, session_id: sessionId });
+      send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
+    }, 450);
+    return;
+  }
   if (prompt.includes("慢任务")) {
     send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
     setTimeout(() => undefined, 10_000);

@@ -48,6 +48,12 @@
     "directories": {
       "output": "release"
     },
+    "extraResources": [
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
+      }
+    ],
     "win": {
       "icon": "build/icon.png",
       "target": [

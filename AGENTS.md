@@ -1,21 +1,21 @@
-# claude-cli-UI Repository Guide
+# claude-cli-UI 仓库指南
 
-## Product scope
+## 产品范围
 
-claude-cli-UI is a Windows-first Electron interface for the locally installed Claude CLI. It organizes workspaces as projects, supports multiple conversations per project, and can discover and resume the CLI's existing sessions. Keep the application local-first: do not add a hosted backend, collect telemetry, or store Claude credentials in this repository.
+claude-cli-UI 是一个 Windows 优先的 Electron 桌面界面，用于调用本机已安装的 Claude CLI。它将工作目录组织为项目，每个项目支持多个对话，并且能够发现和恢复 Claude CLI 已有的 session。应用必须保持 local-first：不要添加托管后端、收集 telemetry，也不要在本仓库中存储 Claude 凭据。
 
-## Repository layout
+## 仓库结构
 
-- `electron/main.ts`: Electron lifecycle, native dialogs and shell integration, Claude CLI process management, model discovery, and CLI session parsing.
-- `electron/preload.ts`: the narrow IPC bridge exposed to the renderer.
-- `src/`: React renderer, UI components, shared types, and local persistence.
-- `tests/workflow.mjs`: end-to-end behavior tests using a fake Claude CLI.
-- `tests/visual-smoke.mjs`: desktop and compact-layout visual checks.
-- `dist/`, `dist-electron/`, `release/`, and `artifacts/`: generated output; never edit or commit these directories.
+- `electron/main.ts`：Electron 生命周期、原生对话框与 shell 集成、Claude CLI 进程管理、模型发现以及 CLI session 解析。
+- `electron/preload.ts`：暴露给 renderer 的精简 IPC bridge。
+- `src/`：React renderer、UI 组件、共享类型和本地持久化逻辑。
+- `tests/workflow.mjs`：使用 fake Claude CLI 执行的端到端行为测试。
+- `tests/visual-smoke.mjs`：桌面窗口和紧凑窗口布局的视觉检查。
+- `dist/`、`dist-electron/`、`release/` 和 `artifacts/`：生成产物，禁止手动编辑或提交这些目录。
 
-## Development commands
+## 开发命令
 
-Use Node.js 22 or later and install dependencies from the lockfile.
+使用 Node.js 22 或更高版本，并根据 lockfile 安装依赖。
 
 ```powershell
 npm ci
@@ -25,34 +25,34 @@ npm test
 npm run dist
 ```
 
-`npm test` is the required pre-merge check. It performs type checking, builds both processes, runs the workflow test, and runs the visual smoke test.
+`npm test` 是合并前必须执行的检查。它会运行类型检查、构建 Electron main process 和 renderer process、执行 workflow 测试，并执行 visual smoke 测试。
 
-## Architecture rules
+## 架构规则
 
-- Keep Node.js and operating-system access in the Electron main process. The renderer must use the typed API exposed by `electron/preload.ts` and declared in `src/global.d.ts`.
-- When adding IPC, update the main handler, preload bridge, global declaration, and shared request/response types together. Validate renderer-provided paths and values in the main process.
-- Treat `%USERPROFILE%\.claude\projects` session JSONL files as Claude-owned data. Imported histories must retain their original session IDs. Permitted mutations are normalizing top-level `entrypoint` and `promptSource` fields written by claude-cli-UI after the Claude process exits, appending a `custom-title` record after a user rename, creating a new re-identified session from a user-selected transcript prefix, and moving a user-confirmed deleted session to the operating system recycle bin. Branching must never modify the source session. Never alter message content, UUIDs, or tool records in an existing session.
-- Do not persist imported message bodies in `localStorage`; only persist the metadata needed to rediscover them. Preserve storage migrations and tolerate malformed or older saved data.
-- Keep streaming events associated with their run ID. A stopped or failed process must leave the conversation in a usable state and must not leak listeners or child processes.
-- Preserve the existing model-role mapping behavior. Model roles such as Sonnet, Opus, Fable, and Haiku may resolve to the same configured model and must still remain distinct choices in the UI.
+- Node.js 和操作系统访问必须放在 Electron main process 中。renderer 必须通过 `electron/preload.ts` 暴露、并在 `src/global.d.ts` 中声明的 typed API 访问这些能力。
+- 新增 IPC 时，必须同时更新 main handler、preload bridge、global declaration 以及共享的 request/response 类型。renderer 提供的路径和值必须在 main process 中验证。
+- 将 `%USERPROFILE%\.claude\projects` 下的 session JSONL 文件视为 Claude 所有的数据。导入的历史记录必须保留原始 session ID。允许的修改只有：Claude 进程退出后，规范化 claude-cli-UI 写入的顶层 `entrypoint` 和 `promptSource` 字段；用户重命名后追加一条 `custom-title` 记录；根据用户选择的 transcript 前缀创建一个重新生成标识的新 session；以及将用户确认删除的 session 移入操作系统回收站。分叉操作不得修改源 session。禁止修改现有 session 中的消息内容、UUID 或 tool record。
+- 不要把导入的消息正文持久化到 `localStorage`，只保存重新发现这些消息所需的 metadata。必须保留 storage migration，并兼容损坏或旧版本的保存数据。
+- streaming event 必须始终与对应的 run ID 关联。被停止或失败的进程必须让对话保持可用状态，并且不得泄漏 listener 或 child process。
+- 保持现有的 model-role mapping 行为。Sonnet、Opus、Fable 和 Haiku 等模型角色可能映射到同一个实际模型，但在 UI 中仍必须保留为不同选项。
 
-## UI expectations
+## UI 要求
 
-- A project represents a real workspace directory and can contain multiple conversations.
-- Project aliases and conversation titles remain editable. When a project alias differs from the directory name, display both.
-- Existing Claude CLI sessions, thinking blocks, tool activity, permission mode, and model information must remain visible and resumable.
-- Sending a message should keep the newest output in view unless the user has deliberately scrolled away from the bottom.
-- Match the existing restrained desktop-tool design. Reuse Lucide icons, existing components, spacing, colors, and interaction patterns instead of introducing a second visual language.
-- Verify that controls and text do not overlap at both desktop and compact window sizes.
+- 一个项目代表一个真实的 workspace 目录，并且可以包含多个对话。
+- 项目别名和对话标题必须保持可编辑。项目别名与真实目录名不同时，两者都要显示。
+- 已有 Claude CLI session、thinking block、tool activity、permission mode 和模型信息必须保持可见，并且能够恢复。
+- 发送消息后，除非用户主动向上滚动并离开底部，否则应持续显示最新输出。
+- 保持现有克制的桌面工具设计。复用 Lucide icon、现有组件、间距、颜色和交互模式，不要引入第二套视觉语言。
+- 在桌面窗口和紧凑窗口尺寸下，都要确认控件和文字不会重叠。
 
-## Code and test conventions
+## 代码和测试约定
 
-- TypeScript is strict. Prefer explicit domain types over `any`, and keep renderer state updates immutable.
-- Follow the existing formatting: two-space indentation, double quotes, semicolons, and small focused functions.
-- Keep edits scoped to the requested behavior. Do not rewrite unrelated code or generated files.
-- Update `tests/workflow.mjs` for behavior changes and `tests/visual-smoke.mjs` for layout or interaction changes. Add regression assertions for bugs.
-- Tests must not depend on a developer's real Claude login or mutate real Claude history.
+- TypeScript 使用 strict 模式。优先使用明确的 domain type，不要使用 `any`，renderer state 更新必须保持 immutable。
+- 遵循现有格式：两个空格缩进、双引号、分号以及小而聚焦的函数。
+- 修改范围必须限定在用户请求的行为内。不要重写无关代码或生成文件。
+- 行为变更需要更新 `tests/workflow.mjs`，布局或交互变更需要更新 `tests/visual-smoke.mjs`。修复 bug 时要添加 regression assertion。
+- 测试不得依赖开发者真实的 Claude 登录状态，也不得修改真实的 Claude 历史记录。
 
-## Releases
+## 发布
 
-The GitHub Actions workflow builds Windows artifacts on pushes and pull requests. To publish a release, update the version in `package.json` and `package-lock.json`, commit it, then push a matching tag such as `v0.2.0`. The tag and package version must match exactly.
+GitHub Actions workflow 会在 push 和 pull request 时构建 Windows 产物。发布新版本时，先更新 `package.json` 和 `package-lock.json` 中的版本号并提交，然后推送匹配的 tag，例如 `v0.2.0`。tag 必须与 package version 完全一致。

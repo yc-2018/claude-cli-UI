@@ -69,6 +69,7 @@ const launch = () => electron.launch({
     CLAUDE_DESK_USER_DATA_DIR: profile,
     CLAUDE_DESK_TEST_WORKSPACE: root,
     CLAUDE_DESK_FAKE_SESSIONS_DIR: cliSessions,
+    CLAUDE_DESK_DISABLE_NOTIFICATIONS: "1",
     CLAUDE_DESK_TEST_MODELS: JSON.stringify({
       Sonnet: "ThirdParty-A",
       Opus: "ThirdParty-A",
@@ -99,8 +100,29 @@ try {
   electronApp = await launch();
   let page = await electronApp.firstWindow();
   watchErrors(page);
+  await page.waitForFunction(() => document.title === "claude-cli-UI");
+  await page.waitForSelector(".sidebar-brand");
   if (await page.title() !== "claude-cli-UI") throw new Error("window title did not use the product name");
   if ((await page.locator(".sidebar-brand").textContent())?.trim() !== "claude-cli-UI") throw new Error("sidebar did not use the product name");
+
+  await page.locator(".settings-trigger").click();
+  const traySetting = page.locator(".segmented-control button", { hasText: "托盘后台" });
+  const quitSetting = page.locator(".segmented-control button", { hasText: "退出应用" });
+  const completionSetting = page.locator(".setting-toggle-row input");
+  if (!(await traySetting.getAttribute("class"))?.includes("active") || !(await completionSetting.isChecked())) {
+    throw new Error("background settings did not use the expected defaults");
+  }
+  await quitSetting.click();
+  await page.waitForFunction(async () => (await window.claudeDesk.getAppSettings()).closeBehavior === "quit");
+  await traySetting.click();
+  await completionSetting.evaluate((input) => input.click());
+  await page.waitForFunction(async () => (await window.claudeDesk.getAppSettings()).notifyOnCompletion === false);
+  await completionSetting.evaluate((input) => input.click());
+  await page.waitForFunction(async () => {
+    const settings = await window.claudeDesk.getAppSettings();
+    return settings.closeBehavior === "tray" && settings.notifyOnCompletion === true;
+  });
+  await page.keyboard.press("Escape");
 
   await page.click(".new-task-button");
   await page.waitForSelector(".composer");
@@ -449,9 +471,23 @@ try {
   await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 4);
   if (await page.locator(".conversation-intro").count() !== 1) throw new Error("new conversation did not open independently");
 
-  await page.locator(".composer textarea").fill("第二个对话");
+  await page.locator(".composer textarea").fill("后台提醒测试 第二个对话");
   await page.locator(".composer textarea").press("Enter");
-  await page.waitForSelector('.message.assistant[data-status="done"]');
+  const backgroundConversationRow = page.locator(".task-row", { hasText: "后台提醒测试 第二个对话" });
+  await backgroundConversationRow.locator(".conversation-running-icon").waitFor();
+  await page.locator(".task-row strong").filter({ hasText: /^CLI 外部改名$/ }).click();
+  await page.waitForSelector(".completion-toast");
+  if (!(await page.locator(".completion-toast").textContent())?.includes("后台提醒测试 第二个对话")) {
+    throw new Error("background completion reminder did not identify the finished conversation");
+  }
+  if (await backgroundConversationRow.locator(".conversation-running-icon").count()) {
+    throw new Error("running conversation indicator remained after completion");
+  }
+  await page.locator(".completion-toast").click();
+  await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "后台提醒测试 第二个对话");
+  if (!(await page.locator(".markdown").last().textContent())?.includes("后台会话提醒测试完成")) {
+    throw new Error("completion reminder did not navigate to the finished conversation");
+  }
   await page.locator(".composer textarea").fill("/clear");
   await page.locator(".composer textarea").press("Enter");
   await page.waitForSelector(".conversation-intro");
@@ -476,6 +512,21 @@ try {
   await page.locator(".composer textarea").press("Enter");
   await page.waitForFunction(() => document.querySelectorAll('.message.assistant[data-status="error"]').length === 2);
 
+  await page.locator(".composer textarea").fill("后台托盘测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForSelector('.message.assistant[data-status="running"]');
+  await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.close());
+  await page.waitForTimeout(150);
+  if (await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isVisible())) {
+    throw new Error("default window close behavior did not hide the app to the tray");
+  }
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.show());
+  await page.waitForFunction(() => document.visibilityState === "visible");
+  if (!(await page.locator(".markdown").last().textContent())?.includes("托盘后台运行测试完成")) {
+    throw new Error("Claude CLI run was interrupted while the window was hidden to the tray");
+  }
+
   await page.locator(".composer textarea").fill("慢任务");
   await page.locator(".composer textarea").press("Enter");
   await page.waitForSelector('.message.assistant[data-status="running"]');
@@ -495,6 +546,10 @@ try {
   const projectStore = JSON.parse(await readFile(resolve(profile, "projects.json"), "utf8"));
   if (!Array.isArray(projectStore) || projectStore.length !== 1 || projectStore[0]?.conversations?.length !== 6) {
     throw new Error("main-process project store was not written");
+  }
+  const persistedSettings = JSON.parse(await readFile(resolve(profile, "settings.json"), "utf8"));
+  if (persistedSettings.closeBehavior !== "tray" || persistedSettings.notifyOnCompletion !== true) {
+    throw new Error("background settings were not persisted by the main process");
   }
   await rm(resolve(profile, "Local Storage"), { recursive: true, force: true });
 

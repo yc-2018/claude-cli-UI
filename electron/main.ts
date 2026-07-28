@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, shell, Tray, type MessageBoxOptions } from "electron";
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
@@ -9,6 +9,11 @@ import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 
 type PermissionMode = "default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions";
+
+interface AppSettings {
+  closeBehavior: "tray" | "quit";
+  notifyOnCompletion: boolean;
+}
 
 interface RunRequest {
   runId: string;
@@ -72,6 +77,13 @@ interface ClaudeSessionSummary {
 }
 
 const activeRuns = new Map<string, ChildProcessWithoutNullStreams>();
+const activeNotifications = new Set<Notification>();
+const DEFAULT_APP_SETTINGS: AppSettings = { closeBehavior: "tray", notifyOnCompletion: true };
+let appSettings: AppSettings = DEFAULT_APP_SETTINGS;
+let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let isQuitting = false;
+let closePromptOpen = false;
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ATTACHMENT_NAME_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:\.[a-z0-9]{1,12})?$/i;
 const IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
@@ -132,6 +144,112 @@ function createWindow() {
     const line = `${new Date().toISOString()} renderer ${details.reason} (${details.exitCode})\n`;
     void appendFile(join(app.getPath("userData"), "renderer-errors.log"), line, "utf8");
   });
+
+  window.on("close", (event) => {
+    if (isQuitting) return;
+    event.preventDefault();
+    void handleWindowClose(window);
+  });
+  window.on("closed", () => {
+    if (mainWindow === window) mainWindow = null;
+  });
+  mainWindow = window;
+  return window;
+}
+
+function trayIconPath() {
+  return app.isPackaged
+    ? join(process.resourcesPath, "icon.png")
+    : join(app.getAppPath(), "build", "icon.png");
+}
+
+function showMainWindow(conversationId?: string) {
+  const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createWindow();
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
+  if (conversationId) {
+    if (window.webContents.isLoading()) {
+      window.webContents.once("did-finish-load", () => window.webContents.send("app:navigate-conversation", conversationId));
+    } else {
+      window.webContents.send("app:navigate-conversation", conversationId);
+    }
+  }
+}
+
+function ensureTray() {
+  if (tray && !tray.isDestroyed()) return tray;
+  const image = nativeImage.createFromPath(trayIconPath()).resize({ width: 18, height: 18 });
+  tray = new Tray(image);
+  tray.setToolTip("claude-cli-UI");
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: "打开 claude-cli-UI", click: () => showMainWindow() },
+    { type: "separator" },
+    { label: "退出", click: () => { void requestQuitFromTray(); } },
+  ]));
+  tray.on("click", () => showMainWindow());
+  return tray;
+}
+
+function quitApplication() {
+  isQuitting = true;
+  for (const child of activeRuns.values()) child.kill();
+  app.quit();
+}
+
+async function requestQuitFromTray() {
+  if (activeRuns.size === 0) {
+    quitApplication();
+    return;
+  }
+  const options: MessageBoxOptions = {
+    type: "warning",
+    title: "仍有会话正在进行",
+    message: "仍有会话正在进行",
+    detail: "退出会停止所有正在运行的 Claude CLI 会话。",
+    buttons: ["停止并退出", "取消"],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  };
+  const result = mainWindow && !mainWindow.isDestroyed()
+    ? await dialog.showMessageBox(mainWindow, options)
+    : await dialog.showMessageBox(options);
+  if (result.response === 0) quitApplication();
+}
+
+async function handleWindowClose(window: BrowserWindow) {
+  if (appSettings.closeBehavior === "tray") {
+    ensureTray();
+    window.hide();
+    return;
+  }
+  if (activeRuns.size === 0) {
+    quitApplication();
+    return;
+  }
+  if (closePromptOpen) return;
+  closePromptOpen = true;
+  try {
+    const result = await dialog.showMessageBox(window, {
+      type: "question",
+      title: "仍有会话正在进行",
+      message: "仍有会话正在进行",
+      detail: "请选择继续在后台运行，或停止会话并退出应用。",
+      buttons: ["后台继续", "停止并退出", "取消"],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+    });
+    if (result.response === 0) {
+      ensureTray();
+      window.hide();
+    } else if (result.response === 1) {
+      quitApplication();
+    }
+  } finally {
+    closePromptOpen = false;
+  }
 }
 
 function findClaudeExecutable(): string {
@@ -227,6 +345,33 @@ function attachmentsDirectory() {
 
 function projectsStorePath() {
   return join(app.getPath("userData"), "projects.json");
+}
+
+function appSettingsPath() {
+  return join(app.getPath("userData"), "settings.json");
+}
+
+function normalizeAppSettings(value: unknown): AppSettings | null {
+  if (!value || typeof value !== "object") return null;
+  const settings = value as Partial<AppSettings>;
+  if ((settings.closeBehavior !== "tray" && settings.closeBehavior !== "quit") || typeof settings.notifyOnCompletion !== "boolean") {
+    return null;
+  }
+  return { closeBehavior: settings.closeBehavior, notifyOnCompletion: settings.notifyOnCompletion };
+}
+
+async function loadAppSettings() {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(appSettingsPath(), "utf8"));
+    return normalizeAppSettings(parsed) ?? DEFAULT_APP_SETTINGS;
+  } catch {
+    return DEFAULT_APP_SETTINGS;
+  }
+}
+
+async function saveAppSettings(settings: AppSettings) {
+  await mkdir(app.getPath("userData"), { recursive: true });
+  await writeFile(appSettingsPath(), JSON.stringify(settings), "utf8");
 }
 
 async function discoverClaudeWorkspaces() {
@@ -707,6 +852,45 @@ ipcMain.on("app:renderer-error", (_event, value: unknown) => {
   void appendFile(join(app.getPath("userData"), "renderer-errors.log"), line, "utf8");
 });
 
+ipcMain.handle("app:settings:get", () => appSettings);
+
+ipcMain.handle("app:settings:set", async (_event, value: unknown) => {
+  const normalized = normalizeAppSettings(value);
+  if (!normalized) throw new Error("设置数据无效");
+  appSettings = normalized;
+  await saveAppSettings(appSettings);
+  return appSettings;
+});
+
+ipcMain.handle("app:notify-completion", (_event, value: unknown) => {
+  if (
+    process.env.CLAUDE_DESK_DISABLE_NOTIFICATIONS === "1" ||
+    !appSettings.notifyOnCompletion ||
+    !Notification.isSupported() ||
+    !value ||
+    typeof value !== "object"
+  ) return false;
+  const request = value as Record<string, unknown>;
+  if (
+    typeof request.conversationId !== "string" || request.conversationId.length === 0 || request.conversationId.length > 200 ||
+    typeof request.title !== "string" || request.title.length === 0 || request.title.length > 100
+  ) return false;
+  const notification = new Notification({
+    title: "会话已完成",
+    body: `“${request.title}”已完成`,
+    icon: trayIconPath(),
+  });
+  activeNotifications.add(notification);
+  notification.on("click", () => {
+    activeNotifications.delete(notification);
+    showMainWindow(request.conversationId as string);
+  });
+  notification.on("close", () => activeNotifications.delete(notification));
+  notification.on("failed", () => activeNotifications.delete(notification));
+  notification.show();
+  return true;
+});
+
 ipcMain.handle("claude:info", async () => new Promise<{ available: boolean; version?: string }>((resolve) => {
   const invocation = getClaudeInvocation(["--version"]);
   const child = spawn(invocation.executable, invocation.args, {
@@ -1049,7 +1233,8 @@ ipcMain.handle("claude:stop", (_event, runId: string) => {
   return child.kill();
 });
 
-if (hasSingleInstanceLock) app.whenReady().then(() => {
+if (hasSingleInstanceLock) app.whenReady().then(async () => {
+  appSettings = await loadAppSettings();
   protocol.handle("claude-desk-attachment", (request) => {
     const storedName = decodeURIComponent(new URL(request.url).pathname.slice(1));
     const filePath = attachmentPath(storedName);
@@ -1057,19 +1242,21 @@ if (hasSingleInstanceLock) app.whenReady().then(() => {
     return net.fetch(pathToFileURL(filePath).toString());
   });
   createWindow();
-  app.on("second-instance", () => {
-    const window = BrowserWindow.getAllWindows()[0];
-    if (!window) return;
-    if (window.isMinimized()) window.restore();
-    window.show();
-    window.focus();
-  });
+  app.on("second-instance", () => showMainWindow());
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    showMainWindow();
   });
 });
 
 app.on("window-all-closed", () => {
+  if (process.platform !== "darwin" && isQuitting) app.quit();
+});
+
+app.on("before-quit", () => {
+  isQuitting = true;
   for (const child of activeRuns.values()) child.kill();
-  if (process.platform !== "darwin") app.quit();
+  tray?.destroy();
+  tray = null;
+  for (const notification of activeNotifications) notification.close();
+  activeNotifications.clear();
 });
