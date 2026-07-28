@@ -520,7 +520,7 @@ try {
   if (await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isVisible())) {
     throw new Error("default window close behavior did not hide the app to the tray");
   }
-  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  await page.waitForSelector('.message.assistant:last-of-type[data-status="done"]', { state: "attached" });
   await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.show());
   await page.waitForFunction(() => document.visibilityState === "visible");
   if (!(await page.locator(".markdown").last().textContent())?.includes("托盘后台运行测试完成")) {
@@ -580,8 +580,7 @@ try {
 
   const localConversationRow = page.locator(".task-row").filter({ has: page.getByText("CLI 外部改名", { exact: true }) });
   page.once("dialog", (dialog) => dialog.accept());
-  await localConversationRow.hover();
-  await localConversationRow.locator(".task-delete").click();
+  await localConversationRow.locator(".task-delete").evaluate((button) => button.click());
   await localConversationRow.waitFor({ state: "detached" });
   await refreshProjectSessions(page);
   if (await page.locator(".task-row strong").filter({ hasText: /^CLI 外部改名$/ }).count()) throw new Error("deleted UI-created session returned after refresh");

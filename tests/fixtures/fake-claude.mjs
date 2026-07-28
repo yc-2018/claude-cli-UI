@@ -36,7 +36,9 @@ process.stdin.on("end", () => {
   const resumedSessionId = resumeIndex >= 0 ? args[resumeIndex + 1] : undefined;
   const sessionId = resumedSessionId ?? (prompt.includes("第二个")
     ? "33333333-3333-4333-8333-333333333333"
-    : "22222222-2222-4222-8222-222222222222");
+    : prompt.includes("后台托盘测试")
+      ? "55555555-5555-4555-8555-555555555555"
+      : "22222222-2222-4222-8222-222222222222");
   const modelIndex = args.indexOf("--model");
   const modelRole = modelIndex >= 0 ? args[modelIndex + 1] : "sonnet";
   const roleName = modelRole.charAt(0).toUpperCase() + modelRole.slice(1).toLowerCase();
