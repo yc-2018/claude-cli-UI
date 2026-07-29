@@ -6,8 +6,8 @@
 
 - 仓库：`git@github.com:yc-2018/claude-cli-UI.git`
 - 主分支：`main`
-- 当前版本：`0.1.15`
-- 当前已发布基线：commit `6658343`，tag `v0.1.15`
+- 当前版本：`0.1.16`
+- 当前已发布基线：tag `v0.1.16`
 - 产品名称必须统一写作 `claude-cli-UI`。
 - 项目是第三方开源客户端，与 Anthropic 及 Claude 官方无关；README 已有明确声明。
 - 当前工作区包含尚未提交的后台会话功能、中文 `AGENTS.md`、README 修订和本文。不要在新会话中覆盖这些修改。
@@ -62,6 +62,8 @@ claude -p --verbose --output-format stream-json --include-partial-messages
 - 会话标题通过 Claude `custom-title` 双向同步。
 - 删除带 session 的会话会真正删除 CLI 历史，具体方式是移入回收站。
 - 已完成 assistant 回复下方提供 hover 后出现的分叉按钮。新会话名称使用 `原名称 (2)`、`原名称 (3)` 递增。
+- 所有用户/AI 消息下方提供 hover 后出现的复制按钮，一键复制消息内容并显示「已复制」反馈。
+- 最后一条用户消息下方提供「编辑并重新发送」：内联编辑后重发，UI 层替换最后一轮问答（原附件一并重发）。注意 CLI session JSONL 不可改写，旧一轮仍保留在 Claude 上下文中。
 - 侧边栏可拖动调整宽度，并保存宽度。
 - streaming event 按 run ID 隔离；支持停止、失败恢复、thinking 和 tool activity 渲染。
 - 自动滚动只在用户位于底部时跟随；用户主动向上滚动后，streaming 不会抢走位置。
@@ -124,6 +126,8 @@ npm test
 ```powershell
 npm run dist
 ```
+
+**每次打包都必须使用新版本号**：打包前先升级 `package.json` 和 `package-lock.json` 中的版本（至少 patch），禁止用相同版本号重复打包、覆盖 `release/` 中已存在的同名产物。
 
 GitHub workflow 位于 `.github/workflows/windows-release.yml`：
 

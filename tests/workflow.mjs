@@ -425,6 +425,45 @@ try {
   const resumedBottomDistance = await page.locator(".conversation-scroll").evaluate((container) => container.scrollHeight - container.clientHeight - container.scrollTop);
   if (resumedBottomDistance > 2) throw new Error(`bottom-follow did not resume: ${resumedBottomDistance}px`);
 
+  const lastUserMessage = page.locator(".message.user").last();
+  await lastUserMessage.hover();
+  await lastUserMessage.locator('[aria-label="复制"]').click();
+  await lastUserMessage.locator('[aria-label="已复制"]').waitFor();
+  const copiedUserText = await electronApp.evaluate(({ clipboard }) => clipboard.readText());
+  if (copiedUserText !== "滚动锁定测试") throw new Error(`user message copy did not reach the clipboard: ${copiedUserText}`);
+  await lastUserMessage.locator('[aria-label="复制"]').waitFor();
+  const lastAssistantMessage = page.locator(".message.assistant").last();
+  await lastAssistantMessage.hover();
+  await lastAssistantMessage.locator('[aria-label="复制"]').click();
+  await lastAssistantMessage.locator('[aria-label="已复制"]').waitFor();
+  const copiedAssistantText = await electronApp.evaluate(({ clipboard }) => clipboard.readText());
+  if (!copiedAssistantText.includes("滚动锁定测试完成")) throw new Error("assistant message copy did not reach the clipboard");
+
+  const earlierUserMessage = page.locator(".message.user").nth(-2);
+  await earlierUserMessage.hover();
+  if (await earlierUserMessage.locator('[aria-label="编辑并重新发送"]').count()) {
+    throw new Error("edit action appeared on an older user message");
+  }
+  await lastUserMessage.hover();
+  await lastUserMessage.locator('[aria-label="编辑并重新发送"]').click();
+  const editBox = lastUserMessage.locator(".user-bubble.editing textarea");
+  await editBox.waitFor();
+  if (await editBox.inputValue() !== "滚动锁定测试") throw new Error("edit draft did not preload the original message");
+  await editBox.press("Escape");
+  if (await editBox.count()) throw new Error("Escape did not cancel message editing");
+  await lastUserMessage.hover();
+  await lastUserMessage.locator('[aria-label="编辑并重新发送"]').click();
+  await editBox.fill("滚动锁定测试（已编辑）");
+  await editBox.press("Enter");
+  await page.waitForFunction(() => {
+    const bubbles = [...document.querySelectorAll(".user-bubble")];
+    return bubbles.some((item) => item.textContent === "滚动锁定测试（已编辑）") && !bubbles.some((item) => item.textContent === "滚动锁定测试");
+  });
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  if (!(await page.locator(".markdown").last().textContent())?.includes("测试通过：滚动锁定测试（已编辑）")) {
+    throw new Error("edited message was not resent to Claude");
+  }
+
   await page.locator(".composer textarea").fill("/st");
   await page.waitForSelector(".command-menu");
   if (!(await page.locator(".command-menu").textContent())?.includes("/story")) throw new Error("CLI slash commands were not merged");

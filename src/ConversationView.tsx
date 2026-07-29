@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { BrainCircuit, Check, ChevronRight, Code2, FileCode2, GitFork, Search, Sparkles, TerminalSquare, Wrench } from "lucide-react";
+import { BrainCircuit, Check, ChevronRight, Code2, Copy, FileCode2, GitFork, Pencil, Search, Sparkles, TerminalSquare, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Activity, ChatMessage } from "./types";
@@ -68,14 +68,150 @@ function ThinkingBlock({ content, running }: { content: string; running: boolean
   );
 }
 
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => () => window.clearTimeout(timerRef.current), []);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      return;
+    }
+    setCopied(true);
+    window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => setCopied(false), 1200);
+  };
+
+  return (
+    <button
+      aria-label={copied ? "已复制" : "复制"}
+      onClick={() => { void copy(); }}
+      title={copied ? "已复制" : "复制"}
+      type="button"
+    >
+      {copied ? <Check size={14} /> : <Copy size={14} />}
+    </button>
+  );
+}
+
+interface UserMessageProps {
+  message: ChatMessage;
+  canEdit: boolean;
+  onEditResend?(messageId: string, content: string): void;
+}
+
+function UserMessage({ message, canEdit, onEditResend }: UserMessageProps) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const editing = draft !== null;
+  const attachmentCount = message.attachments?.length ?? 0;
+  const canSubmit = editing && (draft.trim().length > 0 || attachmentCount > 0);
+
+  useEffect(() => {
+    if (!editing || !textareaRef.current) return;
+    const textarea = textareaRef.current;
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 220)}px`;
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+  }, [editing]);
+
+  const submitEdit = () => {
+    if (!canSubmit || !onEditResend || draft === null) return;
+    const value = draft.trim();
+    setDraft(null);
+    onEditResend(message.id, value);
+  };
+
+  const attachments = attachmentCount > 0 ? (
+    <div className="sent-attachments">
+      {message.attachments?.map((attachment) => attachment.kind === "image" ? (
+        <figure className="sent-image" key={attachment.id}>
+          <img src={`claude-desk-attachment://local/${encodeURIComponent(attachment.storedName)}`} alt={attachment.name} />
+          <figcaption title={attachment.name}>{attachment.name}</figcaption>
+        </figure>
+      ) : (
+        <div className="sent-file" key={attachment.id} title={attachment.name}>
+          <FileCode2 size={16} />
+          <span>{attachment.name}</span>
+        </div>
+      ))}
+    </div>
+  ) : null;
+
+  if (editing) {
+    return (
+      <div className="user-bubble editing">
+        {attachments}
+        <textarea
+          ref={textareaRef}
+          aria-label="编辑消息"
+          onChange={(event) => {
+            setDraft(event.target.value);
+            event.target.style.height = "auto";
+            event.target.style.height = `${Math.min(event.target.scrollHeight, 220)}px`;
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              submitEdit();
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setDraft(null);
+            }
+          }}
+          placeholder="编辑消息后重新发送…"
+          rows={1}
+          value={draft}
+        />
+        <div className="user-edit-actions">
+          <button onClick={() => setDraft(null)} type="button">取消</button>
+          <button className="primary" disabled={!canSubmit} onClick={submitEdit} type="button">重新发送</button>
+        </div>
+      </div>
+    );
+  }
+
+  const showActions = Boolean(message.content) || canEdit;
+  return (
+    <>
+      <div className="user-bubble">
+        {attachments}
+        {message.content ? <div className="user-message-text">{message.content}</div> : null}
+      </div>
+      {showActions ? (
+        <div className="message-actions user">
+          {message.content ? <CopyButton text={message.content} /> : null}
+          {canEdit && onEditResend ? (
+            <button
+              aria-label="编辑并重新发送"
+              onClick={() => setDraft(message.content)}
+              title="编辑并重新发送"
+              type="button"
+            >
+              <Pencil size={14} />
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 interface ConversationViewProps {
   messages: ChatMessage[];
   loadingHistory?: boolean;
   branchDisabled?: boolean;
+  editDisabled?: boolean;
   onBranch?(userTurn: number): void;
+  onEditResend?(messageId: string, content: string): void;
 }
 
-export default function ConversationView({ messages, loadingHistory = false, branchDisabled = false, onBranch }: ConversationViewProps) {
+export default function ConversationView({ messages, loadingHistory = false, branchDisabled = false, editDisabled = false, onBranch, onEditResend }: ConversationViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const previousMessageCountRef = useRef(0);
@@ -113,6 +249,13 @@ export default function ConversationView({ messages, loadingHistory = false, bra
   }
 
   let userTurn = 0;
+  let lastUserMessageId: string | null = null;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === "user") {
+      lastUserMessageId = messages[index].id;
+      break;
+    }
+  }
   return (
     <div
       className="conversation-scroll"
@@ -127,29 +270,20 @@ export default function ConversationView({ messages, loadingHistory = false, bra
           if (message.role === "user") userTurn += 1;
           const messageUserTurn = userTurn;
           const canBranch = message.role === "assistant" && messageUserTurn > 0 && (message.status === "done" || message.status === undefined);
+          const canEdit = message.role === "user" && message.id === lastUserMessageId && !editDisabled;
+          const hasActions = message.role === "user"
+            ? Boolean(message.content) || canEdit
+            : Boolean(message.content) || (canBranch && onBranch);
           return (
-            <article className={`message ${message.role} ${canBranch && onBranch ? "branchable" : ""}`} data-status={message.status} key={message.id}>
+            <article
+              className={`message ${message.role} ${canBranch && onBranch ? "branchable" : ""} ${hasActions ? "has-actions" : ""}`}
+              data-status={message.status}
+              key={message.id}
+            >
               {message.role === "assistant" ? <div className="assistant-avatar"><Sparkles size={14} /></div> : null}
               <div className="message-body">
                 {message.role === "user" ? (
-                  <div className="user-bubble">
-                    {(message.attachments?.length ?? 0) > 0 ? (
-                      <div className="sent-attachments">
-                        {message.attachments?.map((attachment) => attachment.kind === "image" ? (
-                          <figure className="sent-image" key={attachment.id}>
-                            <img src={`claude-desk-attachment://local/${encodeURIComponent(attachment.storedName)}`} alt={attachment.name} />
-                            <figcaption title={attachment.name}>{attachment.name}</figcaption>
-                          </figure>
-                        ) : (
-                          <div className="sent-file" key={attachment.id} title={attachment.name}>
-                            <FileCode2 size={16} />
-                            <span>{attachment.name}</span>
-                          </div>
-                        ))}
-                      </div>
-                    ) : null}
-                    {message.content ? <div className="user-message-text">{message.content}</div> : null}
-                  </div>
+                  <UserMessage canEdit={canEdit} message={message} onEditResend={onEditResend} />
                 ) : (
                   <>
                     {message.thinking ? <ThinkingBlock content={message.thinking} running={message.status === "running"} /> : null}
@@ -159,17 +293,20 @@ export default function ConversationView({ messages, loadingHistory = false, bra
                       ? <div className="thinking"><span className="spinner" />Claude 正在思考</div>
                       : null}
                     {message.error ? <div className="message-error">{message.error}</div> : null}
-                    {canBranch && onBranch ? (
+                    {hasActions ? (
                       <div className="message-actions">
-                        <button
-                          aria-label="从这里分叉"
-                          disabled={branchDisabled}
-                          onClick={() => onBranch(messageUserTurn)}
-                          title="从这里分叉"
-                          type="button"
-                        >
-                          <GitFork size={14} />
-                        </button>
+                        {message.content ? <CopyButton text={message.content} /> : null}
+                        {canBranch && onBranch ? (
+                          <button
+                            aria-label="从这里分叉"
+                            disabled={branchDisabled}
+                            onClick={() => onBranch(messageUserTurn)}
+                            title="从这里分叉"
+                            type="button"
+                          >
+                            <GitFork size={14} />
+                          </button>
+                        ) : null}
                       </div>
                     ) : null}
                   </>

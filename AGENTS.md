@@ -55,4 +55,4 @@ npm run dist
 
 ## 发布
 
-GitHub Actions workflow 会在 push 和 pull request 时构建 Windows 产物。发布新版本时，先更新 `package.json` 和 `package-lock.json` 中的版本号并提交，然后推送匹配的 tag，例如 `v0.2.0`。tag 必须与 package version 完全一致。
+GitHub Actions workflow 会在 push 和 pull request 时构建 Windows 产物。**每次打包都必须使用新版本号**：先升级 `package.json` 和 `package-lock.json` 中的版本（至少 patch），再构建产物；禁止用相同版本号重复打包、覆盖 `release/` 中已存在的同名产物。发布新版本时，先更新 `package.json` 和 `package-lock.json` 中的版本号并提交，然后推送匹配的 tag，例如 `v0.2.0`。tag 必须与 package version 完全一致。

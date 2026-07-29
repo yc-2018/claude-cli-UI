@@ -902,6 +902,24 @@ export default function App() {
     }
   };
 
+  const editAndResend = async (messageId: string, content: string) => {
+    if (!activeProject || !activeConversation || activeRunId || (activeConversation.source === "claude" && !activeConversation.historyLoaded)) return;
+    const index = activeConversation.messages.findIndex((message) => message.id === messageId);
+    if (index < 0) return;
+    const target = activeConversation.messages[index];
+    if (target.role !== "user") return;
+    const isLastUserMessage = activeConversation.messages.slice(index + 1).every((message) => message.role !== "user");
+    if (!isLastUserMessage) return;
+    const attachments = target.attachments ?? [];
+    setPermissionQueue((current) => current.filter((item) => item.conversationId !== activeConversation.id));
+    updateConversation(activeConversation.id, (conversation) => ({
+      ...conversation,
+      updatedAt: Date.now(),
+      messages: conversation.messages.slice(0, index),
+    }));
+    await sendPrompt(content, attachments);
+  };
+
   const resolvePermission = async (decision: "deny" | "once" | "conversation") => {
     if (!pendingPermission || activeRuns[pendingPermission.conversationId]) return;
     setPermissionQueue((current) => current.filter((item) => item.responseId !== pendingPermission.responseId));
@@ -1132,6 +1150,8 @@ export default function App() {
               loadingHistory={activeConversation.source === "claude" && !activeConversation.historyLoaded}
               onBranch={activeConversation.sessionId ? branchConversation : undefined}
               branchDisabled={Boolean(activeRunId) || branchingConversationId === activeConversation.id}
+              onEditResend={editAndResend}
+              editDisabled={Boolean(activeRunId)}
             />
             <Composer
               key={`composer-${activeConversation.id}`}

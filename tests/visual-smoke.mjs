@@ -128,6 +128,16 @@ if (Number(await branchAction.evaluate((element) => getComputedStyle(element.par
 }
 await page.screenshot({ path: resolve(artifacts, "message-branch-action.png") });
 
+const visualUserMessage = page.locator(".message.user");
+await visualUserMessage.hover();
+await page.waitForFunction(() => {
+  const actions = document.querySelector(".message.user .message-actions");
+  return actions && Number(getComputedStyle(actions).opacity) > 0.9;
+});
+if (await visualUserMessage.locator('[aria-label="复制"]').count() !== 1) throw new Error("user message did not expose a copy action");
+if (await visualUserMessage.locator('[aria-label="编辑并重新发送"]').count() !== 1) throw new Error("last user message did not expose an edit action");
+await page.screenshot({ path: resolve(artifacts, "user-message-actions.png") });
+
 const initialSidebarWidth = await page.locator(".sidebar").evaluate((element) => element.getBoundingClientRect().width);
 const resizeHandle = page.locator(".sidebar-resizer");
 const resizeBox = await resizeHandle.boundingBox();
