@@ -453,14 +453,15 @@ try {
   if (await editBox.count()) throw new Error("Escape did not cancel message editing");
   await lastUserMessage.hover();
   await lastUserMessage.locator('[aria-label="编辑并重新发送"]').click();
-  await editBox.fill("滚动锁定测试（已编辑）");
+  // The edited text must avoid fake-CLI trigger keywords (e.g. "滚动锁定测试") so the resent prompt hits the default response branch.
+  await editBox.fill("重新编辑后的提问");
   await editBox.press("Enter");
   await page.waitForFunction(() => {
     const bubbles = [...document.querySelectorAll(".user-bubble")];
-    return bubbles.some((item) => item.textContent === "滚动锁定测试（已编辑）") && !bubbles.some((item) => item.textContent === "滚动锁定测试");
+    return bubbles.some((item) => item.textContent === "重新编辑后的提问") && !bubbles.some((item) => item.textContent === "滚动锁定测试");
   });
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
-  if (!(await page.locator(".markdown").last().textContent())?.includes("测试通过：滚动锁定测试（已编辑）")) {
+  if (!(await page.locator(".markdown").last().textContent())?.includes("测试通过：重新编辑后的提问")) {
     throw new Error("edited message was not resent to Claude");
   }
 
