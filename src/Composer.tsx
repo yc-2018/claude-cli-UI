@@ -72,6 +72,12 @@ export default function Composer({
 
   useEffect(() => setActiveSuggestion(0), [prompt]);
 
+  useEffect(() => {
+    if (running || loadingHistory) return;
+    const frame = requestAnimationFrame(() => textareaRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [conversation.id, loadingHistory]);
+
   const resetPrompt = () => {
     setPrompt("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";

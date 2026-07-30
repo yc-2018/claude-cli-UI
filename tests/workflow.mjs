@@ -425,18 +425,22 @@ try {
   const resumedBottomDistance = await page.locator(".conversation-scroll").evaluate((container) => container.scrollHeight - container.clientHeight - container.scrollTop);
   if (resumedBottomDistance > 2) throw new Error(`bottom-follow did not resume: ${resumedBottomDistance}px`);
 
+  await page.evaluate(() => {
+    window.__clipboardWrites = [];
+    navigator.clipboard.writeText = async (text) => { window.__clipboardWrites.push(text); };
+  });
   const lastUserMessage = page.locator(".message.user").last();
   await lastUserMessage.hover();
   await lastUserMessage.locator('[aria-label="复制"]').click();
   await lastUserMessage.locator('[aria-label="已复制"]').waitFor();
-  const copiedUserText = await electronApp.evaluate(({ clipboard }) => clipboard.readText());
+  const copiedUserText = await page.evaluate(() => window.__clipboardWrites.at(-1));
   if (copiedUserText !== "滚动锁定测试") throw new Error(`user message copy did not reach the clipboard: ${copiedUserText}`);
   await lastUserMessage.locator('[aria-label="复制"]').waitFor();
   const lastAssistantMessage = page.locator(".message.assistant").last();
   await lastAssistantMessage.hover();
   await lastAssistantMessage.locator('[aria-label="复制"]').click();
   await lastAssistantMessage.locator('[aria-label="已复制"]').waitFor();
-  const copiedAssistantText = await electronApp.evaluate(({ clipboard }) => clipboard.readText());
+  const copiedAssistantText = await page.evaluate(() => window.__clipboardWrites.at(-1));
   if (!copiedAssistantText.includes("滚动锁定测试完成")) throw new Error("assistant message copy did not reach the clipboard");
 
   const earlierUserMessage = page.locator(".message.user").nth(-2);
@@ -535,31 +539,36 @@ try {
   await page.locator(".task-row strong").filter({ hasText: /^CLI 外部改名$/ }).click();
   await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "这是首次会话名称测试内容");
 
-  await page.evaluate(() => {
-    const original = window.claudeDesk.notifyCompletion;
-    window.__completionNotifyCalls = [];
-    window.claudeDesk.notifyCompletion = (conversationId, title) => {
-      window.__completionNotifyCalls.push({ conversationId, title });
-      return original(conversationId, title);
-    };
+  await electronApp.evaluate(({ ipcMain }) => {
+    globalThis.__completionNotifyCalls = [];
+    ipcMain.removeHandler("app:notify-completion");
+    ipcMain.handle("app:notify-completion", (_event, request) => {
+      globalThis.__completionNotifyCalls.push(request);
+      return true;
+    });
   });
   await page.locator(".composer textarea").fill("前台运行完成测试");
   await page.locator(".composer textarea").press("Enter");
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
   await page.waitForTimeout(300);
-  if (await page.evaluate(() => window.__completionNotifyCalls.length) !== 0) {
+  if (await electronApp.evaluate(() => globalThis.__completionNotifyCalls.length) !== 0) {
     throw new Error("focused active conversation triggered a completion notification");
   }
-  await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.blur());
-  await page.waitForFunction(() => !document.hasFocus());
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hasFocus", { configurable: true, value: () => false });
+  });
   await page.locator(".composer textarea").fill("失焦运行完成测试");
   await page.locator(".composer textarea").press("Enter");
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
-  await page.waitForFunction(() => window.__completionNotifyCalls.length === 1);
-  const notifyCall = await page.evaluate(() => window.__completionNotifyCalls[0]);
+  await electronApp.evaluate(async () => {
+    const deadline = Date.now() + 5_000;
+    while (globalThis.__completionNotifyCalls.length !== 1 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  });
+  const notifyCall = await electronApp.evaluate(() => globalThis.__completionNotifyCalls[0]);
   if (notifyCall?.title !== "CLI 外部改名") throw new Error("unfocused completion notified with the wrong conversation");
-  await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.focus());
-  await page.waitForFunction(() => document.hasFocus());
+  await page.evaluate(() => { delete document.hasFocus; });
 
   await page.locator(".composer textarea").fill("/new");
   await page.locator(".composer textarea").press("Enter");
@@ -652,6 +661,27 @@ try {
   if (await page.locator(".task-row strong").filter({ hasText: /^CLI 外部改名$/ }).count()) throw new Error("deleted UI-created session returned after refresh");
   const deletedLocalSessionStillExists = await readFile(localSessionPath, "utf8").then(() => true, () => false);
   if (deletedLocalSessionStillExists) throw new Error("deleted UI-created session remained in Claude CLI history");
+
+  await page.locator(".task-row strong").filter({ hasText: /^CLI 外部改名 \(2\)$/ }).click();
+  await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "CLI 外部改名 (2)");
+  await page.waitForFunction(() => document.activeElement?.matches(".composer textarea"));
+  await page.keyboard.type("删除后切换会话焦点测试");
+  if (await page.locator(".composer textarea").inputValue() !== "删除后切换会话焦点测试") {
+    throw new Error("composer did not accept keyboard input after deleting and switching conversations");
+  }
+  await page.locator(".composer textarea").fill("");
+
+  await page.locator(".project-row").first().hover();
+  await page.locator('.project-action[title="新建对话"]').click();
+  await page.waitForSelector(".conversation-intro");
+  await page.waitForFunction(() => document.activeElement?.matches(".composer textarea"));
+  await page.keyboard.type("删除后新建会话焦点测试");
+  if (await page.locator(".composer textarea").inputValue() !== "删除后新建会话焦点测试") {
+    throw new Error("composer did not accept keyboard input after deleting and creating a conversation");
+  }
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.locator(".task-row.active .task-delete").evaluate((button) => button.click());
+  await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 5);
 
   await page.evaluate(() => {
     const projectKey = "claude-desk.projects.v2";

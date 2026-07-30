@@ -131,8 +131,8 @@ npm run dist
 
 GitHub workflow 位于 `.github/workflows/windows-release.yml`：
 
-- push 和 pull request 会测试并构建 Windows 安装版与 Portable。
-- 普通构建产物保留 14 天。
+- push 和 pull request 只运行完整测试，不生成 Windows 安装包。
+- 只有推送 `v*` tag 时才构建 Windows 安装版与 Portable，并上传用于发布的 artifact。
 - 发布版本时，同时更新 `package.json` 和 `package-lock.json`，提交后推送完全匹配的 tag，例如 `v0.2.0`。
 - tag 与 package version 不一致时 workflow 会直接失败。
 - 用户会自行反馈 GitHub Actions 错误，不需要主动持续监控 workflow。
