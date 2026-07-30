@@ -2,6 +2,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { BrainCircuit, Check, ChevronRight, Code2, Copy, FileCode2, GitFork, Pencil, Search, Sparkles, TerminalSquare, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 import type { Activity, ChatMessage } from "./types";
 
 function getToolIcon(name: string) {
@@ -16,7 +18,8 @@ function getToolIcon(name: string) {
 function MarkdownMessage({ content }: { content: string }) {
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={[remarkGfm, remarkMath]}
+      rehypePlugins={[rehypeKatex]}
       components={{
         a: ({ href, children }) => <a href={href} target="_blank" rel="noreferrer">{children}</a>,
         code: ({ className, children, ...props }) => <code className={className} {...props}>{children}</code>,

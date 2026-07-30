@@ -17,11 +17,14 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
+    "katex": "^0.18.1",
     "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest",
     "react-markdown": "latest",
-    "remark-gfm": "latest"
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "latest",
+    "remark-math": "^6.0.0"
   },
   "devDependencies": {
     "@types/node": "latest",
