@@ -466,7 +466,7 @@ export default function App() {
       .flatMap((project) => project.conversations)
       .find((item) => item.id === conversationId);
     if (!conversation) return;
-    if (document.visibilityState === "visible") {
+    if (document.visibilityState === "visible" && document.hasFocus()) {
       if (activeConversationIdRef.current !== conversationId) {
         setCompletionNotice({ conversationId, title: conversation.title });
       }

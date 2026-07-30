@@ -535,6 +535,32 @@ try {
   await page.locator(".task-row strong").filter({ hasText: /^CLI 外部改名$/ }).click();
   await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "这是首次会话名称测试内容");
 
+  await page.evaluate(() => {
+    const original = window.claudeDesk.notifyCompletion;
+    window.__completionNotifyCalls = [];
+    window.claudeDesk.notifyCompletion = (conversationId, title) => {
+      window.__completionNotifyCalls.push({ conversationId, title });
+      return original(conversationId, title);
+    };
+  });
+  await page.locator(".composer textarea").fill("前台运行完成测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  await page.waitForTimeout(300);
+  if (await page.evaluate(() => window.__completionNotifyCalls.length) !== 0) {
+    throw new Error("focused active conversation triggered a completion notification");
+  }
+  await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.blur());
+  await page.waitForFunction(() => !document.hasFocus());
+  await page.locator(".composer textarea").fill("失焦运行完成测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  await page.waitForFunction(() => window.__completionNotifyCalls.length === 1);
+  const notifyCall = await page.evaluate(() => window.__completionNotifyCalls[0]);
+  if (notifyCall?.title !== "CLI 外部改名") throw new Error("unfocused completion notified with the wrong conversation");
+  await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.focus());
+  await page.waitForFunction(() => document.hasFocus());
+
   await page.locator(".composer textarea").fill("/new");
   await page.locator(".composer textarea").press("Enter");
   await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 5);
