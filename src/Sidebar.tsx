@@ -18,11 +18,14 @@ import type { AppSettings, Project } from "./types";
 
 interface Props {
   projects: Project[];
+  activeProjectId: string | null;
   activeConversationId: string | null;
+  appVersion: string;
   collapsed: boolean;
   cliInfo: { available: boolean; version?: string } | null;
   runningConversationIds: ReadonlySet<string>;
   appSettings: AppSettings;
+  onSelectProject(id: string): void;
   onSelectConversation(id: string): void;
   onNewProject(): void;
   onNewConversation(projectId: string): void;
@@ -62,11 +65,14 @@ function formatConversationTime(timestamp: number) {
 
 export default function Sidebar({
   projects,
+  activeProjectId,
   activeConversationId,
+  appVersion,
   collapsed,
   cliInfo,
   runningConversationIds,
   appSettings,
+  onSelectProject,
   onSelectConversation,
   onNewProject,
   onNewConversation,
@@ -94,7 +100,7 @@ export default function Sidebar({
   }, [settingsOpen]);
 
   useEffect(() => {
-    const activeProject = projects.find((project) => project.conversations.some((item) => item.id === activeConversationId));
+    const activeProject = projects.find((project) => project.id === activeProjectId);
     if (!activeProject) return;
     setClosedProjects((current) => {
       if (!current.has(activeProject.id)) return current;
@@ -102,7 +108,7 @@ export default function Sidebar({
       next.delete(activeProject.id);
       return next;
     });
-  }, [projects, activeConversationId]);
+  }, [projects, activeProjectId]);
 
   const toggleProject = (projectId: string) => {
     setClosedProjects((current) => {
@@ -183,7 +189,7 @@ export default function Sidebar({
           return (
             <section className="project-group" key={project.id}>
               <div
-                className="project-row"
+                className={`project-row ${activeProjectId === project.id && !activeConversationId ? "active" : ""}`}
                 onContextMenu={(event) => {
                   event.preventDefault();
                   onOpenProject(project.workspace);
@@ -203,7 +209,14 @@ export default function Sidebar({
                     />
                   </div>
                 ) : (
-                  <button className="project-toggle" onClick={() => toggleProject(project.id)} title={project.workspace}>
+                  <button
+                    className="project-toggle"
+                    onClick={() => {
+                      onSelectProject(project.id);
+                      toggleProject(project.id);
+                    }}
+                    title={project.workspace}
+                  >
                     {closed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                     <Folder size={14} />
                     <span className="project-name">
@@ -333,6 +346,7 @@ export default function Sidebar({
           <Settings size={15} />
           <span>设置</span>
         </button>
+        <div className="sidebar-version">claude-cli-UI v{appVersion || "…"}</div>
         <div className="sidebar-footer">
           <span className={`status-dot ${cliInfo && !cliInfo.available ? "off" : ""}`} />
           {cliInfo ? (cliInfo.available ? `Claude CLI ${cliInfo.version ?? ""}` : "未找到 Claude CLI") : "正在检测 Claude CLI"}

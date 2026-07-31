@@ -3,6 +3,7 @@ import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
+const packageVersion = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")).version;
 const workspaceDirectoryName = basename(root);
 const artifacts = resolve(root, "artifacts");
 const profile = resolve(artifacts, `workflow-profile-${Date.now()}`);
@@ -104,6 +105,7 @@ try {
   await page.waitForSelector(".sidebar-brand");
   if (await page.title() !== "claude-cli-UI") throw new Error("window title did not use the product name");
   if ((await page.locator(".sidebar-brand").textContent())?.trim() !== "claude-cli-UI") throw new Error("sidebar did not use the product name");
+  await page.waitForFunction((version) => document.querySelector(".sidebar-version")?.textContent === `claude-cli-UI v${version}`, packageVersion);
 
   await page.locator(".settings-trigger").click();
   const traySetting = page.locator(".segmented-control button", { hasText: "托盘后台" });
@@ -185,17 +187,16 @@ try {
   await refreshProjectSessions(page);
   const hiddenRow = page.locator(".task-row", { hasText: "准备从 UI 移除的 CLI 会话" });
   await hiddenRow.waitFor();
-  let deleteConfirmation = "";
-  page.once("dialog", async (dialog) => {
-    deleteConfirmation = dialog.message();
-    await dialog.accept();
-  });
   await hiddenRow.hover();
   await hiddenRow.locator(".task-delete").click();
-  await hiddenRow.waitFor({ state: "detached" });
-  if (!deleteConfirmation.includes("移入 Windows 回收站") || !deleteConfirmation.includes("从 /resume 中消失")) {
+  const deleteConfirmation = page.locator(".delete-confirm-dialog");
+  await deleteConfirmation.waitFor();
+  const deleteConfirmationText = await deleteConfirmation.textContent();
+  if (!deleteConfirmationText?.includes("移入 Windows 回收站") || !deleteConfirmationText.includes("从 /resume 中消失")) {
     throw new Error("session deletion did not explain its effect on CLI history");
   }
+  await deleteConfirmation.locator(".delete-confirm-button.danger").click();
+  await hiddenRow.waitFor({ state: "detached" });
   const deletedSessionStillExists = await readFile(hiddenSessionPath, "utf8").then(() => true, () => false);
   if (deletedSessionStillExists) throw new Error("deleted Claude CLI session remained at its original path");
   await refreshProjectSessions(page);
@@ -209,7 +210,13 @@ try {
   await page.locator(".workspace-chip").click();
   await page.locator(".project-row").click({ button: "right" });
 
-  const modelOptions = await page.locator(".model-select option").allTextContents();
+  if (await page.locator(".composer-options select").count()) throw new Error("composer still used native select controls");
+  await page.locator(".model-select .composer-select-trigger").click();
+  const modelOptions = await page.locator(".model-select .composer-select-option").evaluateAll((options) => options.map((option) => {
+    const role = option.querySelector("strong")?.textContent ?? "";
+    const actual = option.querySelector("small")?.textContent ?? "";
+    return `${role} · ${actual}`;
+  }));
   if (modelOptions.length !== 4 || modelOptions.some((label) => label.includes("跟随 CLI"))) {
     throw new Error(`model roles were collapsed or fallback option remained: ${modelOptions.join(", ")}`);
   }
@@ -218,9 +225,11 @@ try {
   }
   await page.locator(".composer textarea").fill("/model");
   await page.locator(".composer textarea").press("Enter");
-  await page.waitForFunction(() => document.activeElement?.classList.contains("model-select"));
+  await page.waitForFunction(() => document.querySelector('.model-select .composer-select-trigger')?.getAttribute("aria-expanded") === "true");
+  await page.waitForFunction(() => document.activeElement?.matches(".model-select .composer-select-trigger"));
   await page.keyboard.press("Escape");
-  await page.locator(".model-select").selectOption("fable");
+  await page.locator(".model-select .composer-select-trigger").click();
+  await page.locator('.model-select .composer-select-option[data-value="fable"]').click();
 
   await page.locator('.project-action[title="重命名项目"]').evaluate((button) => button.click());
   await page.locator('input[aria-label="项目名称"]').fill("我的 Claude 项目");
@@ -238,7 +247,14 @@ try {
   if (await page.locator(".command-option").count() < 6) throw new Error("local slash commands missing");
   await page.locator(".composer textarea").fill("/plan");
   await page.locator(".composer textarea").press("Enter");
-  if (await page.locator('.select-control select').last().inputValue() !== "plan") throw new Error("/plan did not change permission mode");
+  if (!(await page.locator(".permission-select .composer-select-value").textContent())?.includes("计划模式")) {
+    throw new Error("/plan did not change permission mode");
+  }
+  await page.locator(".permission-select .composer-select-trigger").click();
+  if (await page.locator(".permission-select .composer-select-option").count() !== 4) throw new Error("custom permission picker did not expose every mode");
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
   await page.locator(".composer textarea").fill("/edit");
   await page.locator(".composer textarea").press("Enter");
 
@@ -607,6 +623,8 @@ try {
   await page.waitForSelector('.message.assistant[data-status="running"]');
   await page.locator(".send-button.stop").click();
   await page.waitForSelector('.message.assistant[data-status="stopped"]');
+  await page.locator(".task-select", { hasText: "来自终端的历史对话" }).click();
+  await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "来自终端的历史对话");
   await page.waitForTimeout(500);
   await page.screenshot({ path: resolve(artifacts, "workflow-complete.png") });
   const localSessionPath = resolve(cliSessions, "22222222-2222-4222-8222-222222222222.jsonl");
@@ -625,6 +643,10 @@ try {
   const persistedSettings = JSON.parse(await readFile(resolve(profile, "settings.json"), "utf8"));
   if (persistedSettings.closeBehavior !== "tray" || persistedSettings.notifyOnCompletion !== true) {
     throw new Error("background settings were not persisted by the main process");
+  }
+  const persistedSelection = JSON.parse(await readFile(resolve(profile, "selection.json"), "utf8"));
+  if (persistedSelection.projectId !== projectStore[0].id || persistedSelection.conversationId !== `claude-${importedSessionId}`) {
+    throw new Error(`active project/conversation selection was not persisted: ${JSON.stringify(persistedSelection)}`);
   }
   await rm(resolve(profile, "Local Storage"), { recursive: true, force: true });
 
@@ -649,14 +671,48 @@ try {
     throw new Error("project name mapping did not survive restart");
   }
   if (await page.locator('.message.assistant[data-status="running"]').count()) throw new Error("running state survived restart");
+  await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "来自终端的历史对话");
+  if (await page.locator(".task-row.active", { hasText: "来自终端的历史对话" }).count() !== 1) {
+    throw new Error("last active conversation was not restored after restart");
+  }
   await page.locator(".task-select", { hasText: "来自终端的历史对话" }).click();
   await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "来自终端的历史对话");
   if (await page.locator(".markdown", { hasText: "恢复的回答" }).count() === 0) throw new Error("CLI session was not reloaded after restart");
 
   const localConversationRow = page.locator(".task-row").filter({ has: page.getByText("CLI 外部改名", { exact: true }) });
-  page.once("dialog", (dialog) => dialog.accept());
+  await electronApp.evaluate(({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    globalThis.__deleteFocusCalls = 0;
+    const focus = window.focus.bind(window);
+    window.focus = () => {
+      globalThis.__deleteFocusCalls += 1;
+      focus();
+    };
+  });
   await localConversationRow.locator(".task-delete").evaluate((button) => button.click());
+  await page.locator(".delete-confirm-dialog").waitFor();
+  await page.locator(".delete-confirm-button.secondary").click();
+  await page.locator(".delete-confirm-dialog").waitFor({ state: "detached" });
+  await page.waitForFunction(() => document.activeElement?.matches(".composer textarea"));
+  await page.keyboard.type("取消删除后焦点测试");
+  if (await page.locator(".composer textarea").inputValue() !== "取消删除后焦点测试") {
+    throw new Error("composer did not accept keyboard input after canceling conversation deletion");
+  }
+  await page.locator(".composer textarea").fill("");
+  if (await localConversationRow.count() !== 1) throw new Error("canceling deletion removed the conversation");
+
+  await localConversationRow.locator(".task-delete").evaluate((button) => button.click());
+  await page.locator(".delete-confirm-button.danger").click();
   await localConversationRow.waitFor({ state: "detached" });
+  if (await electronApp.evaluate(() => globalThis.__deleteFocusCalls) < 1) {
+    throw new Error("deleting a conversation did not restore the native window focus");
+  }
+  await page.waitForFunction(() => document.activeElement?.matches(".composer textarea"));
+  await page.keyboard.type("删除后当前会话焦点测试");
+  if (await page.locator(".composer textarea").inputValue() !== "删除后当前会话焦点测试") {
+    throw new Error("composer did not accept keyboard input immediately after deleting another conversation");
+  }
+  await page.locator(".composer textarea").fill("");
   await refreshProjectSessions(page);
   if (await page.locator(".task-row strong").filter({ hasText: /^CLI 外部改名$/ }).count()) throw new Error("deleted UI-created session returned after refresh");
   const deletedLocalSessionStillExists = await readFile(localSessionPath, "utf8").then(() => true, () => false);
@@ -679,9 +735,34 @@ try {
   if (await page.locator(".composer textarea").inputValue() !== "删除后新建会话焦点测试") {
     throw new Error("composer did not accept keyboard input after deleting and creating a conversation");
   }
-  page.once("dialog", (dialog) => dialog.accept());
   await page.locator(".task-row.active .task-delete").evaluate((button) => button.click());
+  await page.locator(".delete-confirm-button.danger").click();
   await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 5);
+  await page.waitForSelector(".project-row.active");
+  if (await page.locator(".task-row.active").count() !== 0 || await page.locator(".composer").count() !== 0 || await page.locator(".project-empty-view").count() !== 1) {
+    throw new Error("deleting the active conversation did not leave its project selected without opening another conversation");
+  }
+  await page.waitForFunction(async () => (await window.claudeDesk.getAppSelection()).conversationId === null);
+
+  await electronApp.close();
+  electronApp = await launch();
+  page = await electronApp.firstWindow();
+  watchErrors(page);
+  await page.waitForSelector(".project-row.active");
+  if (await page.locator(".task-row.active").count() !== 0 || await page.locator(".project-empty-view").count() !== 1) {
+    throw new Error("project-only selection was not restored after restart");
+  }
+
+  await page.evaluate(() => window.claudeDesk.saveAppSelection({ projectId: "missing-project", conversationId: "missing-conversation" }));
+  await page.waitForTimeout(100);
+  await electronApp.close();
+  electronApp = await launch();
+  page = await electronApp.firstWindow();
+  watchErrors(page);
+  await page.waitForSelector(".task-row.active");
+  if (await page.locator(".task-row.active").count() !== 1 || await page.locator(".composer").count() !== 1) {
+    throw new Error("missing saved project did not fall back to the first available conversation");
+  }
 
   await page.evaluate(() => {
     const projectKey = "claude-desk.projects.v2";

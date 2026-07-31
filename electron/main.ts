@@ -15,6 +15,11 @@ interface AppSettings {
   notifyOnCompletion: boolean;
 }
 
+interface AppSelection {
+  projectId: string | null;
+  conversationId: string | null;
+}
+
 interface RunRequest {
   runId: string;
   prompt: string;
@@ -351,6 +356,10 @@ function appSettingsPath() {
   return join(app.getPath("userData"), "settings.json");
 }
 
+function appSelectionPath() {
+  return join(app.getPath("userData"), "selection.json");
+}
+
 function normalizeAppSettings(value: unknown): AppSettings | null {
   if (!value || typeof value !== "object") return null;
   const settings = value as Partial<AppSettings>;
@@ -372,6 +381,27 @@ async function loadAppSettings() {
 async function saveAppSettings(settings: AppSettings) {
   await mkdir(app.getPath("userData"), { recursive: true });
   await writeFile(appSettingsPath(), JSON.stringify(settings), "utf8");
+}
+
+function normalizeAppSelection(value: unknown): AppSelection | null {
+  if (!value || typeof value !== "object") return null;
+  const selection = value as Partial<AppSelection>;
+  const validId = (id: unknown) => id === null || (typeof id === "string" && id.length > 0 && id.length <= 200);
+  if (!validId(selection.projectId) || !validId(selection.conversationId)) return null;
+  return {
+    projectId: selection.projectId ?? null,
+    conversationId: selection.conversationId ?? null,
+  };
+}
+
+function saveAppSelection(value: unknown) {
+  const selection = normalizeAppSelection(value);
+  if (!selection) return;
+  const directory = app.getPath("userData");
+  const temporaryPath = join(directory, `selection-${process.pid}.tmp`);
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(temporaryPath, JSON.stringify(selection), "utf8");
+  renameSync(temporaryPath, appSelectionPath());
 }
 
 async function discoverClaudeWorkspaces() {
@@ -854,12 +884,24 @@ ipcMain.on("app:renderer-error", (_event, value: unknown) => {
 
 ipcMain.handle("app:settings:get", () => appSettings);
 
+ipcMain.handle("app:get-version", () => app.getVersion());
+
 ipcMain.handle("app:settings:set", async (_event, value: unknown) => {
   const normalized = normalizeAppSettings(value);
   if (!normalized) throw new Error("设置数据无效");
   appSettings = normalized;
   await saveAppSettings(appSettings);
   return appSettings;
+});
+
+ipcMain.handle("app:focus-window", (event) => {
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  if (!owner || owner.isDestroyed()) return false;
+  if (owner.isMinimized()) owner.restore();
+  owner.show();
+  owner.focus();
+  owner.webContents.focus();
+  return owner.isFocused();
 });
 
 ipcMain.handle("app:notify-completion", (_event, value: unknown) => {
@@ -1053,6 +1095,23 @@ ipcMain.on("projects:save", (_event, value: unknown) => {
   } catch (error) {
     const detail = error instanceof Error ? error.stack ?? error.message : String(error);
     void appendFile(join(app.getPath("userData"), "renderer-errors.log"), `${new Date().toISOString()} project save failed: ${detail}\n`, "utf8");
+  }
+});
+
+ipcMain.handle("selection:load", async () => {
+  try {
+    return normalizeAppSelection(JSON.parse(await readFile(appSelectionPath(), "utf8")));
+  } catch {
+    return null;
+  }
+});
+
+ipcMain.on("selection:save", (_event, value: unknown) => {
+  try {
+    saveAppSelection(value);
+  } catch (error) {
+    const detail = error instanceof Error ? error.stack ?? error.message : String(error);
+    void appendFile(join(app.getPath("userData"), "renderer-errors.log"), `${new Date().toISOString()} selection save failed: ${detail}\n`, "utf8");
   }
 });
 

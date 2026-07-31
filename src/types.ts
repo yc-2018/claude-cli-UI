@@ -5,6 +5,11 @@ export interface AppSettings {
   notifyOnCompletion: boolean;
 }
 
+export interface AppSelection {
+  projectId: string | null;
+  conversationId: string | null;
+}
+
 export interface Activity {
   id: string;
   name: string;

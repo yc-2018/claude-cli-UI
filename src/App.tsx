@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
-import { CheckCircle2, Folder, FolderOpen, TerminalSquare } from "lucide-react";
+import { CheckCircle2, Folder, FolderOpen, Plus, TerminalSquare } from "lucide-react";
 import Composer from "./Composer";
 import ConversationView from "./ConversationView";
+import DeleteConfirmDialog from "./DeleteConfirmDialog";
 import PermissionDialog from "./PermissionDialog";
 import Sidebar from "./Sidebar";
 import { hasLegacyProjectsToMigrate, loadProjects, makeId, parseProjects, pathName, saveProjects, shorten } from "./storage";
 import type {
   Activity,
+  AppSelection,
   AppSettings,
   Attachment,
   ChatMessage,
@@ -40,11 +42,38 @@ interface PendingPermission {
   requests: ToolPermissionRequest[];
 }
 
+type PendingDeletion = {
+  kind: "conversation";
+  projectId: string;
+  conversationId: string;
+  title: string;
+  hasSession: boolean;
+} | {
+  kind: "project";
+  projectId: string;
+  title: string;
+};
+
 const DEFAULT_SIDEBAR_WIDTH = 280;
 const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 520;
 const SIDEBAR_WIDTH_STORAGE_KEY = "claude-desk.sidebar-width.v1";
 const DEFAULT_APP_SETTINGS: AppSettings = { closeBehavior: "tray", notifyOnCompletion: true };
+
+function resolveSelection(projects: Project[], saved: AppSelection | null): AppSelection {
+  const savedProject = saved?.projectId ? projects.find((project) => project.id === saved.projectId) : undefined;
+  if (savedProject) {
+    const savedConversation = saved?.conversationId
+      ? savedProject.conversations.find((conversation) => conversation.id === saved.conversationId)
+      : undefined;
+    return { projectId: savedProject.id, conversationId: savedConversation?.id ?? null };
+  }
+  const firstProject = projects[0];
+  return {
+    projectId: firstProject?.id ?? null,
+    conversationId: firstProject?.conversations[0]?.id ?? null,
+  };
+}
 
 function maxSidebarWidth() {
   return Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, window.innerWidth - 420));
@@ -216,23 +245,38 @@ function EmptyView({ onNewProject }: { onNewProject(): void }) {
   );
 }
 
+function ProjectEmptyView({ project, onNewConversation }: { project: Project; onNewConversation(): void }) {
+  return (
+    <div className="empty-view project-empty-view">
+      <div className="empty-icon"><Folder size={25} /></div>
+      <h1>{project.customName ?? project.name}</h1>
+      <p>当前没有打开的对话</p>
+      <button className="primary-button" onClick={onNewConversation}><Plus size={16} />新建对话</button>
+    </div>
+  );
+}
+
 export default function App() {
   const [initialProjects] = useState<Project[]>(loadProjects);
   const [preferLegacyProjects] = useState(hasLegacyProjectsToMigrate);
   const [projects, setProjects] = useState<Project[]>(initialProjects);
   const [storageReady, setStorageReady] = useState(false);
-  const [activeConversationId, setActiveConversationId] = useState<string | null>(
-    initialProjects.flatMap((project) => project.conversations)[0]?.id ?? null,
-  );
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [activeRuns, setActiveRuns] = useState<Record<string, string>>({});
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [completionNotice, setCompletionNotice] = useState<{ conversationId: string; title: string } | null>(null);
+  const [appVersion, setAppVersion] = useState("");
   const [cliInfo, setCliInfo] = useState<{ available: boolean; version?: string } | null>(null);
   const [modelConfig, setModelConfig] = useState<ModelConfig>({ options: [] });
   const [permissionQueue, setPermissionQueue] = useState<PendingPermission[]>([]);
   const [branchingConversationId, setBranchingConversationId] = useState<string | null>(null);
+  const [composerFocusRequest, setComposerFocusRequest] = useState(0);
+  const [pendingDeletion, setPendingDeletion] = useState<PendingDeletion | null>(null);
+  const [deletionBusy, setDeletionBusy] = useState(false);
+  const [deletionError, setDeletionError] = useState("");
   const projectsRef = useRef(projects);
   const activeConversationIdRef = useRef(activeConversationId);
   const appSettingsRef = useRef(appSettings);
@@ -243,8 +287,8 @@ export default function App() {
   const branchingConversation = useRef(false);
 
   const activeProject = useMemo(
-    () => projects.find((project) => project.conversations.some((item) => item.id === activeConversationId)) ?? null,
-    [projects, activeConversationId],
+    () => projects.find((project) => project.id === selectedProjectId) ?? null,
+    [projects, selectedProjectId],
   );
   const activeConversation = useMemo(
     () => activeProject?.conversations.find((item) => item.id === activeConversationId) ?? null,
@@ -255,7 +299,10 @@ export default function App() {
 
   useEffect(() => {
     let canceled = false;
-    void window.claudeDesk.getProjectStore().then(async (stored) => {
+    void Promise.all([
+      window.claudeDesk.getProjectStore(),
+      window.claudeDesk.getAppSelection().catch(() => null),
+    ]).then(async ([stored, savedSelection]) => {
       if (canceled) return;
       const storedProjects = parseProjects(stored);
       let loaded = preferLegacyProjects || stored === null || (storedProjects.length === 0 && initialProjects.length > 0)
@@ -276,10 +323,10 @@ export default function App() {
         });
       }
       if (canceled) return;
+      const selection = resolveSelection(loaded, savedSelection);
       setProjects(loaded);
-      setActiveConversationId((current) => loaded.some((project) => project.conversations.some((conversation) => conversation.id === current))
-        ? current
-        : loaded.flatMap((project) => project.conversations)[0]?.id ?? null);
+      setSelectedProjectId(selection.projectId);
+      setActiveConversationId(selection.conversationId);
       setStorageReady(true);
       if (stored === null) window.claudeDesk.saveProjectStore(loaded);
     }).catch(() => {
@@ -287,6 +334,11 @@ export default function App() {
     });
     return () => { canceled = true; };
   }, [initialProjects, preferLegacyProjects]);
+
+  useEffect(() => {
+    if (!storageReady) return;
+    window.claudeDesk.saveAppSelection({ projectId: selectedProjectId, conversationId: activeConversationId });
+  }, [activeConversationId, selectedProjectId, storageReady]);
 
   useEffect(() => {
     projectsRef.current = projects;
@@ -317,6 +369,7 @@ export default function App() {
 
   useEffect(() => {
     void window.claudeDesk.getClaudeInfo().then(setCliInfo).catch(() => setCliInfo({ available: false }));
+    void window.claudeDesk.getAppVersion().then(setAppVersion).catch(() => setAppVersion(""));
   }, []);
 
   useEffect(() => {
@@ -337,8 +390,9 @@ export default function App() {
   }, [appSettings]);
 
   useEffect(() => window.claudeDesk.onNavigateToConversation((conversationId) => {
-    const exists = projectsRef.current.some((project) => project.conversations.some((conversation) => conversation.id === conversationId));
-    if (!exists) return;
+    const project = projectsRef.current.find((item) => item.conversations.some((conversation) => conversation.id === conversationId));
+    if (!project) return;
+    setSelectedProjectId(project.id);
     setActiveConversationId(conversationId);
     setCompletionNotice(null);
   }), []);
@@ -415,7 +469,6 @@ export default function App() {
         conversations: [...refreshed, ...additions].sort((a, b) => b.updatedAt - a.updatedAt),
       };
     }));
-    setActiveConversationId((current) => current ?? (sessions[0] ? `claude-${sessions[0].sessionId}` : null));
   }, []);
 
   useEffect(() => {
@@ -672,7 +725,23 @@ export default function App() {
     setProjects((current) => current.map((project) => project.id === projectId
       ? { ...project, updatedAt: Date.now(), conversations: [conversation, ...project.conversations] }
       : project));
+    setSelectedProjectId(projectId);
     setActiveConversationId(conversation.id);
+    setComposerFocusRequest((request) => request + 1);
+  };
+
+  const selectConversation = (conversationId: string) => {
+    const project = projects.find((item) => item.conversations.some((conversation) => conversation.id === conversationId));
+    if (!project) return;
+    setSelectedProjectId(project.id);
+    setActiveConversationId(conversationId);
+    setComposerFocusRequest((request) => request + 1);
+  };
+
+  const selectProject = (projectId: string) => {
+    if (!projects.some((project) => project.id === projectId)) return;
+    setSelectedProjectId(projectId);
+    setActiveConversationId(null);
   };
 
   const addProject = async () => {
@@ -695,7 +764,9 @@ export default function App() {
       conversations: [conversation],
     };
     setProjects((current) => [project, ...current]);
+    setSelectedProjectId(project.id);
     setActiveConversationId(conversation.id);
+    setComposerFocusRequest((request) => request + 1);
   };
 
   const openProject = async (workspace: string) => {
@@ -715,48 +786,84 @@ export default function App() {
     }
   };
 
-  const deleteConversation = async (projectId: string, conversationId: string) => {
+  const deleteConversation = (projectId: string, conversationId: string) => {
     if (activeRuns[conversationId]) return;
     const project = projects.find((item) => item.id === projectId);
     const deleted = project?.conversations.find((conversation) => conversation.id === conversationId);
     if (!project || !deleted) return;
-    const confirmation = deleted.sessionId
-      ? `删除对话“${deleted.title}”？\n\n对应的 Claude CLI 会话将移入 Windows 回收站，并从 /resume 中消失。`
-      : `删除对话“${deleted.title}”？`;
-    if (!window.confirm(confirmation)) return;
-    if (deleted.sessionId) {
-      try {
-        const result = await window.claudeDesk.deleteClaudeSession(project.workspace, deleted.sessionId);
-        if (!result.deleted) {
-          window.alert(result.error ?? "无法删除 Claude CLI 会话");
-          return;
-        }
-      } catch (error) {
-        window.alert(error instanceof Error ? error.message : "无法删除 Claude CLI 会话");
-        return;
-      }
-    }
-    const remaining = projects.flatMap((project) => project.id === projectId
-      ? project.conversations.filter((item) => item.id !== conversationId)
-      : project.conversations);
-    setProjects((current) => current.map((project) => project.id === projectId
-      ? {
-        ...project,
-        conversations: project.conversations.filter((item) => item.id !== conversationId),
-      }
-      : project));
-    setPermissionQueue((current) => current.filter((item) => item.conversationId !== conversationId));
-    if (activeConversationId === conversationId) setActiveConversationId(remaining[0]?.id ?? null);
+    setDeletionError("");
+    setPendingDeletion({
+      kind: "conversation",
+      projectId,
+      conversationId,
+      title: deleted.title,
+      hasSession: Boolean(deleted.sessionId),
+    });
   };
 
   const deleteProject = (projectId: string) => {
     const project = projects.find((item) => item.id === projectId);
     if (!project || project.conversations.some((item) => activeRuns[item.id])) return;
-    if (!window.confirm(`删除项目“${project.customName ?? project.name}”及其本地对话记录？项目文件不会被删除。`)) return;
-    const remaining = projects.filter((item) => item.id !== projectId);
-    setProjects(remaining);
-    if (project.conversations.some((item) => item.id === activeConversationId)) {
-      setActiveConversationId(remaining.flatMap((item) => item.conversations)[0]?.id ?? null);
+    setDeletionError("");
+    setPendingDeletion({ kind: "project", projectId, title: project.customName ?? project.name });
+  };
+
+  const cancelDeletion = useCallback(() => {
+    if (deletionBusy) return;
+    setPendingDeletion(null);
+    setDeletionError("");
+    setComposerFocusRequest((request) => request + 1);
+  }, [deletionBusy]);
+
+  const confirmDeletion = async () => {
+    const deletion = pendingDeletion;
+    if (!deletion || deletionBusy) return;
+    setDeletionBusy(true);
+    setDeletionError("");
+    try {
+      if (deletion.kind === "conversation") {
+        const project = projects.find((item) => item.id === deletion.projectId);
+        const deleted = project?.conversations.find((conversation) => conversation.id === deletion.conversationId);
+        if (!project || !deleted) {
+          setPendingDeletion(null);
+          return;
+        }
+        if (deleted.sessionId) {
+          const result = await window.claudeDesk.deleteClaudeSession(project.workspace, deleted.sessionId);
+          if (!result.deleted) throw new Error(result.error ?? "无法删除 Claude CLI 会话");
+        }
+        setProjects((current) => current.map((item) => item.id === deletion.projectId
+          ? {
+            ...item,
+            conversations: item.conversations.filter((conversation) => conversation.id !== deletion.conversationId),
+          }
+          : item));
+        setPermissionQueue((current) => current.filter((item) => item.conversationId !== deletion.conversationId));
+        if (activeConversationId === deletion.conversationId) {
+          setSelectedProjectId(deletion.projectId);
+          setActiveConversationId(null);
+        }
+      } else {
+        const project = projects.find((item) => item.id === deletion.projectId);
+        if (!project) {
+          setPendingDeletion(null);
+          return;
+        }
+        const remaining = projects.filter((item) => item.id !== deletion.projectId);
+        setProjects(remaining);
+        if (selectedProjectId === deletion.projectId) {
+          const fallback = resolveSelection(remaining, null);
+          setSelectedProjectId(fallback.projectId);
+          setActiveConversationId(fallback.conversationId);
+        }
+      }
+      setPendingDeletion(null);
+      await window.claudeDesk.focusWindow().catch(() => false);
+      setComposerFocusRequest((request) => request + 1);
+    } catch (error) {
+      setDeletionError(error instanceof Error ? error.message : "删除失败");
+    } finally {
+      setDeletionBusy(false);
     }
   };
 
@@ -837,6 +944,7 @@ export default function App() {
       setProjects((current) => current.map((project) => project.id === sourceProject.id
         ? { ...project, updatedAt: Date.now(), conversations: [branch, ...project.conversations] }
         : project));
+      setSelectedProjectId(sourceProject.id);
       setActiveConversationId(branch.id);
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "无法创建 Claude CLI 会话分支");
@@ -1090,12 +1198,15 @@ export default function App() {
       <div className="title-drag-region" />
       <Sidebar
         projects={projects}
+        activeProjectId={selectedProjectId}
         activeConversationId={activeConversationId}
+        appVersion={appVersion}
         collapsed={sidebarCollapsed}
         cliInfo={cliInfo}
         runningConversationIds={new Set(Object.keys(activeRuns))}
         appSettings={appSettings}
-        onSelectConversation={setActiveConversationId}
+        onSelectProject={selectProject}
+        onSelectConversation={selectConversation}
         onNewProject={addProject}
         onNewConversation={addConversation}
         onRefreshProject={refreshProject}
@@ -1159,6 +1270,7 @@ export default function App() {
               modelConfig={modelConfig}
               running={Boolean(activeRunId)}
               loadingHistory={activeConversation.source === "claude" && !activeConversation.historyLoaded}
+              focusRequest={composerFocusRequest}
               onSend={sendPrompt}
               onStop={stopRun}
               onModelChange={(selectedModel) => updateConversation(activeConversation.id, (conversation) => ({ ...conversation, selectedModel }))}
@@ -1166,12 +1278,16 @@ export default function App() {
               onPermissionChange={(permissionMode: PermissionMode) => updateConversation(activeConversation.id, (conversation) => ({ ...conversation, permissionMode }))}
             />
           </>
-        ) : <EmptyView onNewProject={addProject} />}
+        ) : activeProject
+          ? <ProjectEmptyView project={activeProject} onNewConversation={() => addConversation(activeProject.id)} />
+          : <EmptyView onNewProject={addProject} />}
       </main>
       {completionNotice ? (
         <button
           className="completion-toast"
           onClick={() => {
+            const project = projects.find((item) => item.conversations.some((conversation) => conversation.id === completionNotice.conversationId));
+            if (project) setSelectedProjectId(project.id);
             setActiveConversationId(completionNotice.conversationId);
             setCompletionNotice(null);
           }}
@@ -1191,6 +1307,21 @@ export default function App() {
           onDeny={() => { void resolvePermission("deny"); }}
           onAllowOnce={() => { void resolvePermission("once"); }}
           onAllowConversation={() => { void resolvePermission("conversation"); }}
+        />
+      ) : null}
+      {pendingDeletion ? (
+        <DeleteConfirmDialog
+          title={pendingDeletion.kind === "conversation" ? `删除对话“${pendingDeletion.title}”？` : `删除项目“${pendingDeletion.title}”？`}
+          description={pendingDeletion.kind === "conversation" && pendingDeletion.hasSession
+            ? "对应的 Claude CLI 会话将移入 Windows 回收站，并从 /resume 中消失。"
+            : pendingDeletion.kind === "project"
+              ? "项目及其本地对话记录会从列表中移除。"
+              : "这个对话会从项目中移除。"}
+          detail={pendingDeletion.kind === "project" ? "项目目录和其中的文件不会被删除。" : undefined}
+          error={deletionError}
+          deleting={deletionBusy}
+          onCancel={cancelDeletion}
+          onConfirm={() => { void confirmDeletion(); }}
         />
       ) : null}
     </div>

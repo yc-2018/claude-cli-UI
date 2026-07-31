@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, CircleStop, FileText, Paperclip, Send, ShieldCheck, Sparkles, X } from "lucide-react";
+import { CircleStop, FileText, Paperclip, Send, ShieldCheck, Sparkles, X } from "lucide-react";
+import ComposerSelect, { type ComposerSelectHandle } from "./ComposerSelect";
 import type { Attachment, AttachmentUpload, Conversation, ModelConfig, PermissionMode } from "./types";
 
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
@@ -26,6 +27,7 @@ interface Props {
   modelConfig: ModelConfig;
   running: boolean;
   loadingHistory?: boolean;
+  focusRequest?: number;
   onSend(prompt: string, attachments: Attachment[]): void;
   onStop(): void;
   onModelChange(model: string): void;
@@ -38,6 +40,7 @@ export default function Composer({
   modelConfig,
   running,
   loadingHistory = false,
+  focusRequest = 0,
   onSend,
   onStop,
   onModelChange,
@@ -51,11 +54,14 @@ export default function Composer({
   const [dragActive, setDragActive] = useState(false);
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const modelSelectRef = useRef<HTMLSelectElement>(null);
+  const modelSelectRef = useRef<ComposerSelectHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const matchedModel = modelConfig.options.find((option) => option.value === conversation.selectedModel)
     ?? modelConfig.options.find((option) => option.actualModel === conversation.selectedModel)
     ?? modelConfig.options[0];
+  const visiblePermissionOptions = conversation.permissionMode === "bypassPermissions"
+    ? [{ value: "bypassPermissions" as PermissionMode, label: "跳过权限检查" }, ...permissionOptions]
+    : permissionOptions;
   const slashSuggestions = useMemo(() => {
     if (attachments.length > 0 || !prompt.startsWith("/") || /\s/.test(prompt)) return [];
     const external = (conversation.slashCommands ?? []).map((name) => ({ name, description: "Claude 命令" }));
@@ -76,7 +82,7 @@ export default function Composer({
     if (running || loadingHistory) return;
     const frame = requestAnimationFrame(() => textareaRef.current?.focus());
     return () => cancelAnimationFrame(frame);
-  }, [conversation.id, loadingHistory]);
+  }, [conversation.id, focusRequest, loadingHistory, running]);
 
   const resetPrompt = () => {
     setPrompt("");
@@ -136,12 +142,7 @@ export default function Composer({
   };
 
   const openModelPicker = () => {
-    modelSelectRef.current?.focus();
-    try {
-      modelSelectRef.current?.showPicker();
-    } catch {
-      // Focusing the select remains a usable fallback.
-    }
+    modelSelectRef.current?.open();
   };
 
   const submit = () => {
@@ -294,29 +295,27 @@ export default function Composer({
               tabIndex={-1}
               onChange={(event) => { void addFiles(Array.from(event.target.files ?? [])); }}
             />
-            <label className="select-control model-control" title="选择模型">
-              <Sparkles size={14} />
-              <select
-                ref={modelSelectRef}
-                className="model-select"
-                value={matchedModel?.value ?? ""}
-                onChange={(event) => onModelChange(event.target.value)}
-                disabled={running || loadingHistory || modelConfig.options.length === 0}
-              >
-                {modelConfig.options.length === 0 ? <option value="">正在读取模型…</option> : null}
-                {modelConfig.options.map((option) => (
-                  <option key={option.value} value={option.value}>{option.role} · {option.actualModel}</option>
-                ))}
-              </select>
-              <ChevronDown size={13} />
-            </label>
-            <label className="select-control" title="权限模式">
-              <ShieldCheck size={14} />
-              <select value={conversation.permissionMode} onChange={(event) => onPermissionChange(event.target.value as PermissionMode)} disabled={running || loadingHistory}>
-                {permissionOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-              </select>
-              <ChevronDown size={13} />
-            </label>
+            <ComposerSelect
+              ariaLabel="选择模型"
+              className="model-select"
+              disabled={running || loadingHistory || modelConfig.options.length === 0}
+              icon={<Sparkles size={14} />}
+              onChange={onModelChange}
+              options={modelConfig.options.map((option) => ({ value: option.value, label: option.role, detail: option.actualModel }))}
+              ref={modelSelectRef}
+              title="选择模型"
+              value={matchedModel?.value ?? ""}
+            />
+            <ComposerSelect
+              ariaLabel="选择权限模式"
+              className="permission-select"
+              disabled={running || loadingHistory}
+              icon={<ShieldCheck size={14} />}
+              onChange={(value) => onPermissionChange(value as PermissionMode)}
+              options={visiblePermissionOptions}
+              title="权限模式"
+              value={conversation.permissionMode}
+            />
           </div>
           {running
             ? <button className="send-button stop" onClick={onStop} title="停止运行"><CircleStop size={17} /></button>

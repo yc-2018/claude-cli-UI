@@ -14,6 +14,13 @@ const electronApp = await electron.launch({
     ...process.env,
     CLAUDE_DESK_USER_DATA_DIR: profile,
     CLAUDE_DESK_DISABLE_PROJECT_DISCOVERY: "1",
+    CLAUDE_DESK_TEST_WORKSPACE: root,
+    CLAUDE_DESK_TEST_MODELS: JSON.stringify({
+      Sonnet: "LongCat-2.0",
+      Opus: "LongCat-2.0",
+      Fable: "LongCat-2.0",
+      Haiku: "LongCat-2.0",
+    }),
   },
 });
 try {
@@ -35,14 +42,14 @@ await page.reload();
 await page.waitForSelector(".empty-view");
 await page.screenshot({ path: resolve(artifacts, "empty-state.png") });
 
-await page.evaluate(() => {
+await page.evaluate((workspace) => {
   const now = Date.now();
   const key = "claude-desk.projects.v2";
   const originalSetItem = Storage.prototype.setItem;
   const seededProjects = [{
     id: "visual-project",
     name: "sample-dashboard",
-    workspace: "C:\\Projects\\sample-dashboard",
+    workspace,
     createdAt: now,
     updatedAt: now,
     conversations: [{
@@ -85,9 +92,50 @@ await page.evaluate(() => {
     if (storageKey !== key) originalSetItem.call(this, storageKey, value);
   };
   location.reload();
-});
+}, root);
 await page.waitForSelector(".composer");
+if (!(await page.locator(".sidebar-version").textContent())?.startsWith("claude-cli-UI v")) throw new Error("UI version was not shown in the sidebar footer");
 await page.screenshot({ path: resolve(artifacts, "conversation.png") });
+if (await page.locator(".composer-options select").count()) throw new Error("composer rendered native select controls");
+
+await page.locator(".model-select .composer-select-trigger").click();
+const modelMenuLayout = await page.locator(".model-select .composer-select-menu").evaluate((element) => element.getBoundingClientRect().toJSON());
+if (modelMenuLayout.left < 0 || modelMenuLayout.top < 0 || modelMenuLayout.right > 1320 || modelMenuLayout.bottom > 860) {
+  throw new Error(`model menu escaped the viewport: ${JSON.stringify(modelMenuLayout)}`);
+}
+await page.screenshot({ path: resolve(artifacts, "model-picker.png") });
+await page.keyboard.press("Escape");
+
+await page.locator(".permission-select .composer-select-trigger").click();
+const permissionMenuLayout = await page.locator(".permission-select .composer-select-menu").evaluate((element) => element.getBoundingClientRect().toJSON());
+if (permissionMenuLayout.left < 0 || permissionMenuLayout.top < 0 || permissionMenuLayout.right > 1320 || permissionMenuLayout.bottom > 860) {
+  throw new Error(`permission menu escaped the viewport: ${JSON.stringify(permissionMenuLayout)}`);
+}
+await page.screenshot({ path: resolve(artifacts, "permission-picker.png") });
+await page.keyboard.press("Escape");
+
+const localDeleteRow = page.locator(".task-row", { hasText: "添加数据导出功能" });
+await localDeleteRow.hover();
+await localDeleteRow.locator(".task-delete").click();
+await page.waitForSelector(".delete-confirm-dialog");
+const deleteDialogLayout = await page.locator(".delete-confirm-dialog").evaluate((element) => element.getBoundingClientRect().toJSON());
+if (deleteDialogLayout.left < 0 || deleteDialogLayout.top < 0 || deleteDialogLayout.right > 1320 || deleteDialogLayout.bottom > 860) {
+  throw new Error(`delete confirmation escaped the viewport: ${JSON.stringify(deleteDialogLayout)}`);
+}
+await page.screenshot({ path: resolve(artifacts, "delete-confirm-dialog.png") });
+await page.locator(".delete-confirm-button.secondary").click();
+await page.waitForSelector(".delete-confirm-dialog", { state: "detached" });
+await page.waitForFunction(() => document.activeElement?.matches(".composer textarea"));
+
+await page.locator(".project-toggle").click();
+await page.waitForSelector(".project-row.active");
+if (await page.locator(".project-empty-view").count() !== 1 || await page.locator(".task-row.active").count() !== 0) {
+  throw new Error("project-only selection was not rendered");
+}
+await page.screenshot({ path: resolve(artifacts, "project-only-selection.png") });
+await page.locator(".project-toggle").click();
+await page.locator(".task-select").first().click();
+await page.waitForSelector(".composer");
 
 await page.locator(".settings-trigger").click();
 await page.waitForSelector(".settings-popover");
@@ -195,7 +243,24 @@ for (let index = 1; index < compactLayout.projectActions.length; index += 1) {
   }
 }
 
-console.log(JSON.stringify({ errors, settingsLayout, layout, compactLayout }, null, 2));
+await page.locator(".model-select .composer-select-trigger").click();
+const compactModelMenuLayout = await page.locator(".model-select .composer-select-menu").evaluate((element) => element.getBoundingClientRect().toJSON());
+if (compactModelMenuLayout.left < 0 || compactModelMenuLayout.top < 0 || compactModelMenuLayout.right > 900 || compactModelMenuLayout.bottom > 640) {
+  throw new Error(`compact model menu escaped the viewport: ${JSON.stringify(compactModelMenuLayout)}`);
+}
+await page.screenshot({ path: resolve(artifacts, "model-picker-compact.png") });
+await page.keyboard.press("Escape");
+
+await localDeleteRow.hover();
+await localDeleteRow.locator(".task-delete").click();
+const compactDeleteDialogLayout = await page.locator(".delete-confirm-dialog").evaluate((element) => element.getBoundingClientRect().toJSON());
+if (compactDeleteDialogLayout.left < 0 || compactDeleteDialogLayout.top < 0 || compactDeleteDialogLayout.right > 900 || compactDeleteDialogLayout.bottom > 640) {
+  throw new Error(`compact delete confirmation escaped the viewport: ${JSON.stringify(compactDeleteDialogLayout)}`);
+}
+await page.screenshot({ path: resolve(artifacts, "delete-confirm-dialog-compact.png") });
+await page.locator(".delete-confirm-button.secondary").click();
+
+console.log(JSON.stringify({ errors, modelMenuLayout, permissionMenuLayout, compactModelMenuLayout, deleteDialogLayout, compactDeleteDialogLayout, settingsLayout, layout, compactLayout }, null, 2));
 await electronApp.close();
 
 if (errors.length > 0) process.exitCode = 1;
