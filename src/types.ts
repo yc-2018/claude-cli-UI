@@ -10,6 +10,31 @@ export interface AppSelection {
   conversationId: string | null;
 }
 
+export type AppUpdatePhase = "idle" | "checking" | "available" | "downloading" | "ready" | "up-to-date" | "error";
+
+export interface AppUpdateState {
+  phase: AppUpdatePhase;
+  currentVersion: string;
+  portable: boolean;
+  latestVersion?: string;
+  releaseName?: string;
+  releaseNotes?: string;
+  releaseUrl?: string;
+  publishedAt?: string;
+  percent?: number;
+  transferred?: number;
+  total?: number;
+  bytesPerSecond?: number;
+  downloadAvailable?: boolean;
+  error?: string;
+  errorContext?: "check" | "download";
+}
+
+export interface UpdateActionResult {
+  started: boolean;
+  error?: string;
+}
+
 export interface Activity {
   id: string;
   name: string;

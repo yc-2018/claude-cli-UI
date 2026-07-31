@@ -15,6 +15,10 @@ const electronApp = await electron.launch({
     CLAUDE_DESK_USER_DATA_DIR: profile,
     CLAUDE_DESK_DISABLE_PROJECT_DISCOVERY: "1",
     CLAUDE_DESK_TEST_WORKSPACE: root,
+    CLAUDE_DESK_DISABLE_AUTO_UPDATE_CHECK: "1",
+    CLAUDE_DESK_TEST_UPDATE_VERSION: "9.9.9",
+    CLAUDE_DESK_TEST_UPDATE_NOTES: "<h2>更新内容</h2><ul><li>修复 &amp; 优化 Portable 更新</li></ul>",
+    CLAUDE_DESK_TEST_PORTABLE: "1",
     CLAUDE_DESK_TEST_MODELS: JSON.stringify({
       Sonnet: "LongCat-2.0",
       Opus: "LongCat-2.0",
@@ -151,6 +155,18 @@ if (
   settingsLayout.popover.top < settingsLayout.sidebar.top
 ) throw new Error(`settings popover escaped the sidebar: ${JSON.stringify(settingsLayout)}`);
 await page.screenshot({ path: resolve(artifacts, "settings-popover.png") });
+await page.locator(".setting-update-button").click();
+await page.waitForSelector(".update-dialog");
+const updateDialogText = await page.locator(".update-dialog").textContent();
+if (!updateDialogText?.includes("更新内容") || !updateDialogText.includes("修复 & 优化 Portable 更新") || updateDialogText.includes("<h2>")) {
+  throw new Error("GitHub release notes were not converted to readable text");
+}
+const updateDialogLayout = await page.locator(".update-dialog").evaluate((element) => element.getBoundingClientRect().toJSON());
+if (updateDialogLayout.left < 0 || updateDialogLayout.top < 0 || updateDialogLayout.right > 1320 || updateDialogLayout.bottom > 860) {
+  throw new Error(`update dialog escaped the viewport: ${JSON.stringify(updateDialogLayout)}`);
+}
+await page.screenshot({ path: resolve(artifacts, "update-dialog.png") });
+await page.locator(".update-later-button").click();
 await page.locator(".settings-trigger").click();
 
 const branchAction = page.locator('[aria-label="从这里分叉"]');
@@ -252,7 +268,7 @@ await page.screenshot({ path: resolve(artifacts, "model-picker-compact.png") });
 await page.keyboard.press("Escape");
 
 await localDeleteRow.hover();
-await localDeleteRow.locator(".task-delete").click();
+await localDeleteRow.locator(".task-delete").evaluate((button) => button.click());
 const compactDeleteDialogLayout = await page.locator(".delete-confirm-dialog").evaluate((element) => element.getBoundingClientRect().toJSON());
 if (compactDeleteDialogLayout.left < 0 || compactDeleteDialogLayout.top < 0 || compactDeleteDialogLayout.right > 900 || compactDeleteDialogLayout.bottom > 640) {
   throw new Error(`compact delete confirmation escaped the viewport: ${JSON.stringify(compactDeleteDialogLayout)}`);
@@ -260,7 +276,17 @@ if (compactDeleteDialogLayout.left < 0 || compactDeleteDialogLayout.top < 0 || c
 await page.screenshot({ path: resolve(artifacts, "delete-confirm-dialog-compact.png") });
 await page.locator(".delete-confirm-button.secondary").click();
 
-console.log(JSON.stringify({ errors, modelMenuLayout, permissionMenuLayout, compactModelMenuLayout, deleteDialogLayout, compactDeleteDialogLayout, settingsLayout, layout, compactLayout }, null, 2));
+await page.locator(".settings-trigger").click();
+await page.locator(".setting-update-button").click();
+await page.waitForSelector(".update-dialog");
+const compactUpdateDialogLayout = await page.locator(".update-dialog").evaluate((element) => element.getBoundingClientRect().toJSON());
+if (compactUpdateDialogLayout.left < 0 || compactUpdateDialogLayout.top < 0 || compactUpdateDialogLayout.right > 900 || compactUpdateDialogLayout.bottom > 640) {
+  throw new Error(`compact update dialog escaped the viewport: ${JSON.stringify(compactUpdateDialogLayout)}`);
+}
+await page.screenshot({ path: resolve(artifacts, "update-dialog-compact.png") });
+await page.locator(".update-later-button").click();
+
+console.log(JSON.stringify({ errors, modelMenuLayout, permissionMenuLayout, compactModelMenuLayout, deleteDialogLayout, compactDeleteDialogLayout, updateDialogLayout, compactUpdateDialogLayout, settingsLayout, layout, compactLayout }, null, 2));
 await electronApp.close();
 
 if (errors.length > 0) process.exitCode = 1;

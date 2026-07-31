@@ -14,7 +14,7 @@ import {
   Sparkles,
   Trash2,
 } from "lucide-react";
-import type { AppSettings, Project } from "./types";
+import type { AppSettings, AppUpdateState, Project } from "./types";
 
 interface Props {
   projects: Project[];
@@ -25,6 +25,7 @@ interface Props {
   cliInfo: { available: boolean; version?: string } | null;
   runningConversationIds: ReadonlySet<string>;
   appSettings: AppSettings;
+  updateState: AppUpdateState;
   onSelectProject(id: string): void;
   onSelectConversation(id: string): void;
   onNewProject(): void;
@@ -36,6 +37,7 @@ interface Props {
   onRenameConversation(conversationId: string, title: string): void;
   onRenameProject(projectId: string, name: string): void;
   onSettingsChange(settings: AppSettings): void;
+  onCheckForUpdates(): void;
   onToggle(): void;
 }
 
@@ -63,6 +65,16 @@ function formatConversationTime(timestamp: number) {
     }).format(value);
 }
 
+function updateStatusText(state: AppUpdateState) {
+  if (state.phase === "checking") return "正在检查 GitHub Releases…";
+  if (state.phase === "available") return `发现新版本 v${state.latestVersion}`;
+  if (state.phase === "downloading") return `正在下载 v${state.latestVersion} · ${Math.round(state.percent ?? 0)}%`;
+  if (state.phase === "ready") return `v${state.latestVersion} 已准备好`;
+  if (state.phase === "up-to-date") return "当前已经是最新版本";
+  if (state.phase === "error") return "检查失败，点击重试";
+  return state.portable ? "Portable 自动更新" : "自动检查 GitHub Releases";
+}
+
 export default function Sidebar({
   projects,
   activeProjectId,
@@ -72,6 +84,7 @@ export default function Sidebar({
   cliInfo,
   runningConversationIds,
   appSettings,
+  updateState,
   onSelectProject,
   onSelectConversation,
   onNewProject,
@@ -83,6 +96,7 @@ export default function Sidebar({
   onRenameConversation,
   onRenameProject,
   onSettingsChange,
+  onCheckForUpdates,
   onToggle,
 }: Props) {
   const [closedProjects, setClosedProjects] = useState<Set<string>>(() => new Set());
@@ -340,6 +354,21 @@ export default function Sidebar({
               />
               <span className="toggle-track" aria-hidden="true"><span /></span>
             </label>
+            <div className="setting-update-row">
+              <span>
+                <strong>应用更新</strong>
+                <small>{updateStatusText(updateState)}</small>
+              </span>
+              <button
+                className="setting-update-button"
+                disabled={updateState.phase === "checking"}
+                onClick={onCheckForUpdates}
+                type="button"
+              >
+                <RefreshCw className={updateState.phase === "checking" ? "spinning" : undefined} size={13} />
+                {updateState.phase === "available" || updateState.phase === "downloading" || updateState.phase === "ready" ? "查看" : "检查"}
+              </button>
+            </div>
           </section>
         ) : null}
         <button className={`settings-trigger ${settingsOpen ? "active" : ""}`} onClick={() => setSettingsOpen((value) => !value)} type="button">

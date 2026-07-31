@@ -5,11 +5,13 @@ import ConversationView from "./ConversationView";
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
 import PermissionDialog from "./PermissionDialog";
 import Sidebar from "./Sidebar";
+import UpdateDialog from "./UpdateDialog";
 import { hasLegacyProjectsToMigrate, loadProjects, makeId, parseProjects, pathName, saveProjects, shorten } from "./storage";
 import type {
   Activity,
   AppSelection,
   AppSettings,
+  AppUpdateState,
   Attachment,
   ChatMessage,
   ClaudeEvent,
@@ -59,6 +61,7 @@ const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 520;
 const SIDEBAR_WIDTH_STORAGE_KEY = "claude-desk.sidebar-width.v1";
 const DEFAULT_APP_SETTINGS: AppSettings = { closeBehavior: "tray", notifyOnCompletion: true };
+const DEFAULT_UPDATE_STATE: AppUpdateState = { phase: "idle", currentVersion: "", portable: false };
 
 function resolveSelection(projects: Project[], saved: AppSelection | null): AppSelection {
   const savedProject = saved?.projectId ? projects.find((project) => project.id === saved.projectId) : undefined;
@@ -269,6 +272,9 @@ export default function App() {
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [completionNotice, setCompletionNotice] = useState<{ conversationId: string; title: string } | null>(null);
   const [appVersion, setAppVersion] = useState("");
+  const [updateState, setUpdateState] = useState<AppUpdateState>(DEFAULT_UPDATE_STATE);
+  const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null);
+  const [updateActionError, setUpdateActionError] = useState("");
   const [cliInfo, setCliInfo] = useState<{ available: boolean; version?: string } | null>(null);
   const [modelConfig, setModelConfig] = useState<ModelConfig>({ options: [] });
   const [permissionQueue, setPermissionQueue] = useState<PendingPermission[]>([]);
@@ -285,6 +291,7 @@ export default function App() {
   const loadingHistories = useRef(new Set<string>());
   const sidebarResize = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
   const branchingConversation = useRef(false);
+  const previousUpdatePhase = useRef(updateState.phase);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -371,6 +378,30 @@ export default function App() {
     void window.claudeDesk.getClaudeInfo().then(setCliInfo).catch(() => setCliInfo({ available: false }));
     void window.claudeDesk.getAppVersion().then(setAppVersion).catch(() => setAppVersion(""));
   }, []);
+
+  useEffect(() => {
+    let canceled = false;
+    void window.claudeDesk.getUpdateState()
+      .then((state) => {
+        if (!canceled) setUpdateState(state);
+      })
+      .catch(() => undefined);
+    const removeListener = window.claudeDesk.onUpdateState((state) => {
+      if (!canceled) setUpdateState(state);
+    });
+    return () => {
+      canceled = true;
+      removeListener();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (updateState.phase === "ready" && previousUpdatePhase.current !== "ready") {
+      setDismissedUpdateVersion(null);
+      setUpdateActionError("");
+    }
+    previousUpdatePhase.current = updateState.phase;
+  }, [updateState.phase]);
 
   useEffect(() => {
     void window.claudeDesk.getAppSettings()
@@ -542,6 +573,55 @@ export default function App() {
         setAppSettings(previous);
         window.alert("无法保存设置");
       });
+  };
+
+  const checkForUpdates = () => {
+    setUpdateActionError("");
+    if (
+      updateState.phase === "available" ||
+      updateState.phase === "downloading" ||
+      updateState.phase === "ready" ||
+      (updateState.phase === "error" && updateState.errorContext === "download")
+    ) {
+      setDismissedUpdateVersion(null);
+      return;
+    }
+    void window.claudeDesk.checkAppUpdate()
+      .then((state) => {
+        setUpdateState(state);
+        if (state.phase === "available") setDismissedUpdateVersion(null);
+      })
+      .catch((error) => {
+        setUpdateState((current) => ({
+          ...current,
+          phase: "error",
+          error: error instanceof Error ? error.message : "检查更新失败",
+          errorContext: "check",
+        }));
+      });
+  };
+
+  const downloadUpdate = () => {
+    setUpdateActionError("");
+    void window.claudeDesk.downloadAppUpdate()
+      .then(setUpdateState)
+      .catch((error) => setUpdateActionError(error instanceof Error ? error.message : "下载更新失败"));
+  };
+
+  const installUpdate = () => {
+    setUpdateActionError("");
+    void window.claudeDesk.installAppUpdate()
+      .then((result) => {
+        if (result.started) setDismissedUpdateVersion(updateState.latestVersion ?? null);
+        else setUpdateActionError(result.error ?? "无法启动更新");
+      })
+      .catch((error) => setUpdateActionError(error instanceof Error ? error.message : "无法启动更新"));
+  };
+
+  const openUpdateRelease = () => {
+    void window.claudeDesk.openUpdateRelease().catch((error) => {
+      setUpdateActionError(error instanceof Error ? error.message : "无法打开发布页面");
+    });
   };
 
   useEffect(() => {
@@ -1205,6 +1285,7 @@ export default function App() {
         cliInfo={cliInfo}
         runningConversationIds={new Set(Object.keys(activeRuns))}
         appSettings={appSettings}
+        updateState={updateState}
         onSelectProject={selectProject}
         onSelectConversation={selectConversation}
         onNewProject={addProject}
@@ -1216,6 +1297,7 @@ export default function App() {
         onRenameConversation={renameConversation}
         onRenameProject={renameProject}
         onSettingsChange={changeAppSettings}
+        onCheckForUpdates={checkForUpdates}
         onToggle={() => setSidebarCollapsed((value) => !value)}
       />
       {!sidebarCollapsed ? (
@@ -1322,6 +1404,24 @@ export default function App() {
           deleting={deletionBusy}
           onCancel={cancelDeletion}
           onConfirm={() => { void confirmDeletion(); }}
+        />
+      ) : null}
+      {!pendingPermission && !pendingDeletion && updateState.latestVersion && dismissedUpdateVersion !== updateState.latestVersion && (
+        updateState.phase === "available" ||
+        updateState.phase === "downloading" ||
+        updateState.phase === "ready" ||
+        (updateState.phase === "error" && updateState.errorContext === "download")
+      ) ? (
+        <UpdateDialog
+          state={updateState}
+          actionError={updateActionError}
+          onDismiss={() => {
+            setDismissedUpdateVersion(updateState.latestVersion ?? null);
+            setUpdateActionError("");
+          }}
+          onDownload={downloadUpdate}
+          onInstall={installUpdate}
+          onOpenRelease={openUpdateRelease}
         />
       ) : null}
     </div>

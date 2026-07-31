@@ -33,6 +33,8 @@ npm run dist
 
 运行中的会话会在侧边栏显示动态状态。其他会话完成后，应用会在右下角显示可点击提醒；窗口隐藏时使用 Windows notification，点击后会恢复窗口并跳转到对应会话。侧边栏底部的设置可以选择关闭窗口时退出应用或继续在 tray 后台运行，默认使用 tray；也可以关闭后台会话完成提醒。选择退出应用且仍有会话运行时，会提供“后台继续”“停止并退出”“取消”三个选项。
 
+应用会自动检查 [GitHub Releases](https://github.com/yc-2018/claude-cli-UI/releases)，也可以在设置中手动检查。Portable 版会下载新版、校验 SHA-256，启动新版后将旧文件移入 Windows 回收站；Setup 安装版会下载更新并在确认后重启安装。更新过程中不会上传项目、对话或 Claude 凭据。
+
 从 claude-cli-UI 删除带 CLI session 的对话时，对应的 Claude CLI 会话文件会移入 Windows 回收站，并从 CLI 的 `/resume` 中消失。
 
 模型下拉框动态读取全局及项目 `.claude/settings*.json` 中的模型配置，并分别显示 Sonnet、Opus、Fable 和 Haiku 角色及其实际映射名称。即使多个角色映射到同一个模型，它们也仍是独立选项。

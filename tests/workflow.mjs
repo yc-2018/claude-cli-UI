@@ -1,5 +1,7 @@
 import { _electron as electron } from "playwright";
+import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { basename, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
@@ -13,6 +15,52 @@ const fakeCli = resolve(root, "tests", "fixtures", "fake-claude.mjs");
 const packagedExecutable = process.env.CLAUDE_DESK_TEST_EXECUTABLE;
 await mkdir(profile, { recursive: true });
 await mkdir(cliSessions, { recursive: true });
+const updateVersion = "9.9.9";
+const updateExecutableName = `claude-cli-UI Portable ${updateVersion}.exe`;
+const updateExecutable = Buffer.alloc(512 * 1024, 0x5a);
+updateExecutable.write("MZ claude-cli-UI portable update regression fixture\n", "utf8");
+const updateManifest = JSON.stringify({
+  version: updateVersion,
+  fileName: updateExecutableName,
+  size: updateExecutable.byteLength,
+  sha256: createHash("sha256").update(updateExecutable).digest("hex"),
+});
+const updateServer = createServer((request, response) => {
+  const requestPath = decodeURIComponent(new URL(request.url ?? "/", "http://127.0.0.1").pathname.slice(1));
+  if (requestPath === "portable-update.json") {
+    response.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(updateManifest) });
+    response.end(updateManifest);
+    return;
+  }
+  if (requestPath === updateExecutableName) {
+    response.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": updateExecutable.byteLength });
+    let offset = 0;
+    const writeNextChunk = () => {
+      if (response.destroyed) return;
+      if (offset >= updateExecutable.byteLength) {
+        response.end();
+        return;
+      }
+      const nextOffset = Math.min(updateExecutable.byteLength, offset + 32 * 1024);
+      response.write(updateExecutable.subarray(offset, nextOffset));
+      offset = nextOffset;
+      setTimeout(writeNextChunk, 25);
+    };
+    writeNextChunk();
+    return;
+  }
+  response.writeHead(404);
+  response.end();
+});
+await new Promise((resolveListen, rejectListen) => {
+  updateServer.once("error", rejectListen);
+  updateServer.listen(0, "127.0.0.1", resolveListen);
+});
+const updateAddress = updateServer.address();
+if (!updateAddress || typeof updateAddress === "string") throw new Error("failed to start the local update fixture server");
+const updateBaseUrl = `http://127.0.0.1:${updateAddress.port}`;
+const currentPortablePath = resolve(profile, `claude-cli-UI Portable ${packageVersion}.exe`);
+await writeFile(currentPortablePath, "current portable fixture", "utf8");
 const attachmentText = "attachment text fixture";
 const attachmentPngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+Av7sNwAAAABJRU5ErkJggg==";
 const importedSessionId = "44444444-4444-4444-8444-444444444444";
@@ -71,6 +119,10 @@ const launch = () => electron.launch({
     CLAUDE_DESK_TEST_WORKSPACE: root,
     CLAUDE_DESK_FAKE_SESSIONS_DIR: cliSessions,
     CLAUDE_DESK_DISABLE_NOTIFICATIONS: "1",
+    CLAUDE_DESK_DISABLE_AUTO_UPDATE_CHECK: "1",
+    CLAUDE_DESK_TEST_UPDATE_BASE_URL: updateBaseUrl,
+    CLAUDE_DESK_TEST_UPDATE_INSTALL: "1",
+    PORTABLE_EXECUTABLE_FILE: currentPortablePath,
     CLAUDE_DESK_TEST_MODELS: JSON.stringify({
       Sonnet: "ThirdParty-A",
       Opus: "ThirdParty-A",
@@ -93,7 +145,7 @@ const watchErrors = (page) => {
 const refreshProjectSessions = async (page) => {
   const projectRow = page.locator(".project-row").first();
   await projectRow.hover();
-  await projectRow.locator('[title="刷新 Claude CLI 会话"]').click();
+  await projectRow.locator('[title="刷新 Claude CLI 会话"]').evaluate((button) => button.click());
 };
 
 let electronApp;
@@ -124,6 +176,32 @@ try {
     const settings = await window.claudeDesk.getAppSettings();
     return settings.closeBehavior === "tray" && settings.notifyOnCompletion === true;
   });
+  const updateButton = page.locator(".setting-update-button");
+  if (!(await page.locator(".setting-update-row").textContent())?.includes("Portable 自动更新")) {
+    throw new Error("settings did not identify the Portable update mode");
+  }
+  await updateButton.click();
+  await page.waitForSelector(".update-dialog");
+  const updateDialogText = await page.locator(".update-dialog").textContent();
+  if (!updateDialogText?.includes(`发现新版本 v${updateVersion}`) || !updateDialogText.includes(`当前版本 v${packageVersion}`)) {
+    throw new Error("available update details were not shown in the app dialog");
+  }
+  if (!updateDialogText.includes("旧版文件会移入 Windows 回收站")) {
+    throw new Error("Portable update cleanup behavior was not explained");
+  }
+  await page.locator(".update-later-button").click();
+  await page.waitForSelector(".update-dialog", { state: "detached" });
+  await updateButton.click();
+  await page.locator(".update-download-button").click();
+  await page.waitForSelector(".update-progress-track");
+  await page.waitForSelector(".update-install-button");
+  if (!(await page.locator(".setting-update-row").textContent())?.includes(`v${updateVersion} 已准备好`)) {
+    throw new Error("downloaded update state was not reflected in settings");
+  }
+  const downloadedUpdate = await readFile(resolve(profile, updateExecutableName));
+  if (!downloadedUpdate.equals(updateExecutable)) throw new Error("Portable update bytes were not downloaded and verified correctly");
+  await page.locator(".update-install-button").click();
+  await page.waitForSelector(".update-dialog", { state: "detached" });
   await page.keyboard.press("Escape");
 
   await page.click(".new-task-button");
@@ -812,4 +890,5 @@ try {
   if (errors.length > 0) process.exitCode = 1;
 } finally {
   if (electronApp) await electronApp.close().catch(() => undefined);
+  await new Promise((resolveClose) => updateServer.close(() => resolveClose(undefined)));
 }

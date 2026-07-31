@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { extname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
+import { UpdateManager } from "./update-manager";
 
 type PermissionMode = "default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions";
 
@@ -89,6 +90,11 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
 let closePromptOpen = false;
+const updateManager = new UpdateManager({
+  getWindow: () => mainWindow,
+  hasActiveRuns: () => activeRuns.size > 0,
+  prepareToQuit: () => { isQuitting = true; },
+});
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ATTACHMENT_NAME_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:\.[a-z0-9]{1,12})?$/i;
 const IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
@@ -886,6 +892,16 @@ ipcMain.handle("app:settings:get", () => appSettings);
 
 ipcMain.handle("app:get-version", () => app.getVersion());
 
+ipcMain.handle("app:update:get-state", () => updateManager.getState());
+
+ipcMain.handle("app:update:check", () => updateManager.checkForUpdates(true));
+
+ipcMain.handle("app:update:download", () => updateManager.downloadUpdate());
+
+ipcMain.handle("app:update:install", () => updateManager.installUpdate());
+
+ipcMain.handle("app:update:open-release", () => updateManager.openReleasePage());
+
 ipcMain.handle("app:settings:set", async (_event, value: unknown) => {
   const normalized = normalizeAppSettings(value);
   if (!normalized) throw new Error("设置数据无效");
@@ -1301,6 +1317,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     return net.fetch(pathToFileURL(filePath).toString());
   });
   createWindow();
+  updateManager.initialize();
   app.on("second-instance", () => showMainWindow());
   app.on("activate", () => {
     showMainWindow();
@@ -1313,6 +1330,7 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  updateManager.dispose();
   for (const child of activeRuns.values()) child.kill();
   tray?.destroy();
   tray = null;

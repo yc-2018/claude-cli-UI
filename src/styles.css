@@ -368,6 +368,36 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .setting-toggle-row input:checked + .toggle-track span { transform: translateX(13px); }
 .setting-toggle-row input:focus-visible + .toggle-track { outline: 2px solid #9c9c94; outline-offset: 2px; }
 
+.setting-update-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 11px;
+  padding-top: 11px;
+  border-top: 1px solid #e2e2dc;
+}
+
+.setting-update-row > span { display: grid; min-width: 0; gap: 3px; }
+.setting-update-row strong { color: #50504b; font-size: 11.5px; font-weight: 570; }
+.setting-update-row small { overflow: hidden; color: #92928b; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.setting-update-button {
+  display: inline-flex;
+  height: 27px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid #d3d3cc;
+  border-radius: 5px;
+  background: #fff;
+  color: #61615b;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.setting-update-button:hover { background: #f0f0ec; color: #363632; }
+.setting-update-button:disabled { opacity: .55; cursor: wait; }
+
 .sidebar-footer {
   display: flex;
   align-items: center;
@@ -687,6 +717,47 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .delete-confirm-button.danger:hover { background: #913a33; }
 .delete-confirm-button:disabled { opacity: .55; cursor: wait; }
 
+.update-overlay { z-index: 26; }
+
+.update-dialog {
+  width: min(100%, 520px);
+  max-height: calc(100vh - 48px);
+  padding: 20px;
+  overflow-y: auto;
+  border: 1px solid #cfcfc8;
+  border-radius: 8px;
+  background: #fbfbfa;
+  box-shadow: 0 18px 50px rgb(25 25 22 / 22%);
+}
+
+.update-heading { display: flex; align-items: flex-start; gap: 11px; }
+.update-icon { display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border-radius: 7px; background: #e6eee8; color: #52725c; }
+.update-heading > div { min-width: 0; flex: 1; }
+.update-heading h2 { margin: 1px 0 5px; color: #30302d; font-size: 15px; font-weight: 650; letter-spacing: 0; }
+.update-heading p { margin: 0; color: #777770; font-size: 11.5px; line-height: 1.5; }
+.update-close { display: grid; width: 27px; height: 27px; flex: 0 0 auto; place-items: center; padding: 0; border: 0; border-radius: 5px; background: transparent; color: #8b8b84; cursor: pointer; }
+.update-close:hover { background: #ededE8; color: #44443f; }
+
+.update-release-notes { margin-top: 17px; padding: 11px 12px; border: 1px solid #e0e0da; border-radius: 6px; background: #f6f6f3; }
+.update-release-notes strong { display: block; margin-bottom: 6px; color: #4d4d48; font-size: 11.5px; font-weight: 620; }
+.update-release-notes p { max-height: 150px; margin: 0; overflow-y: auto; color: #74746d; font-size: 11px; line-height: 1.55; white-space: pre-wrap; }
+.update-mode-note { margin: 15px 0 0; color: #85857e; font-size: 10.8px; line-height: 1.55; }
+.update-error { margin: 12px 0 0; padding: 8px 10px; border-left: 3px solid #c96a60; background: #f8eeee; color: #93433d; font-size: 11px; line-height: 1.5; }
+
+.update-progress-section { margin-top: 19px; }
+.update-progress-label { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; color: #575752; font-size: 11.5px; }
+.update-progress-label small { color: #92928b; font-size: 10.5px; }
+.update-progress-track { height: 7px; overflow: hidden; border-radius: 4px; background: #e3e3dd; }
+.update-progress-track span { display: block; height: 100%; border-radius: inherit; background: #5f8269; transition: width .15s ease; }
+
+.update-actions { display: flex; align-items: center; gap: 7px; margin-top: 19px; }
+.update-action-spacer { flex: 1; }
+.update-button { display: inline-flex; height: 32px; align-items: center; justify-content: center; gap: 6px; padding: 0 11px; border: 1px solid #d2d2cb; border-radius: 6px; font-size: 11.5px; font-weight: 570; cursor: pointer; }
+.update-button.secondary { background: #fff; color: #555550; }
+.update-button.secondary:hover { background: #f1f1ed; }
+.update-button.primary { border-color: #3f5445; background: #3f5445; color: #fff; }
+.update-button.primary:hover { background: #314337; }
+
 .composer-wrap {
   position: relative;
   z-index: 4;
@@ -918,4 +989,7 @@ button, select, textarea { -webkit-app-region: no-drag; }
   .permission-action-spacer { display: none; }
   .permission-button { flex: 1 1 auto; }
   .permission-tool { grid-template-columns: 90px minmax(0, 1fr); }
+  .update-actions { flex-wrap: wrap; }
+  .update-action-spacer { display: none; }
+  .update-button { flex: 1 1 auto; }
 }

@@ -20,6 +20,11 @@ contextBridge.exposeInMainWorld("claudeDesk", {
   getAppSelection: () => ipcRenderer.invoke("selection:load"),
   saveAppSelection: (selection: unknown) => ipcRenderer.send("selection:save", selection),
   getAppVersion: () => ipcRenderer.invoke("app:get-version"),
+  getUpdateState: () => ipcRenderer.invoke("app:update:get-state"),
+  checkAppUpdate: () => ipcRenderer.invoke("app:update:check"),
+  downloadAppUpdate: () => ipcRenderer.invoke("app:update:download"),
+  installAppUpdate: () => ipcRenderer.invoke("app:update:install"),
+  openUpdateRelease: () => ipcRenderer.invoke("app:update:open-release"),
   getAppSettings: () => ipcRenderer.invoke("app:settings:get"),
   setAppSettings: (settings: unknown) => ipcRenderer.invoke("app:settings:set", settings),
   focusWindow: () => ipcRenderer.invoke("app:focus-window"),
@@ -38,5 +43,10 @@ contextBridge.exposeInMainWorld("claudeDesk", {
     };
     ipcRenderer.on("app:navigate-conversation", listener);
     return () => ipcRenderer.removeListener("app:navigate-conversation", listener);
+  },
+  onUpdateState: (callback: (state: unknown) => void) => {
+    const listener = (_ipcEvent: Electron.IpcRendererEvent, state: unknown) => callback(state);
+    ipcRenderer.on("app:update-state", listener);
+    return () => ipcRenderer.removeListener("app:update-state", listener);
   },
 });

@@ -1,4 +1,4 @@
-import type { AppSelection, AppSettings, Attachment, AttachmentUpload, BranchClaudeSessionResult, ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ModelConfig, Project, RunRequest } from "./types";
+import type { AppSelection, AppSettings, AppUpdateState, Attachment, AttachmentUpload, BranchClaudeSessionResult, ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ModelConfig, Project, RunRequest, UpdateActionResult } from "./types";
 
 declare module "*.css";
 
@@ -24,6 +24,11 @@ declare global {
       getAppSelection(): Promise<AppSelection | null>;
       saveAppSelection(selection: AppSelection): void;
       getAppVersion(): Promise<string>;
+      getUpdateState(): Promise<AppUpdateState>;
+      checkAppUpdate(): Promise<AppUpdateState>;
+      downloadAppUpdate(): Promise<AppUpdateState>;
+      installAppUpdate(): Promise<UpdateActionResult>;
+      openUpdateRelease(): Promise<boolean>;
       getAppSettings(): Promise<AppSettings>;
       setAppSettings(settings: AppSettings): Promise<AppSettings>;
       focusWindow(): Promise<boolean>;
@@ -33,6 +38,7 @@ declare global {
       stopRun(runId: string): Promise<boolean>;
       onEvent(callback: (event: ClaudeEvent) => void): () => void;
       onNavigateToConversation(callback: (conversationId: string) => void): () => void;
+      onUpdateState(callback: (state: AppUpdateState) => void): () => void;
     };
   }
 }
