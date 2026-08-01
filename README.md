@@ -35,7 +35,7 @@ npm run dist
 
 应用会自动检查 [GitHub Releases](https://github.com/yc-2018/claude-cli-UI/releases)，也可以在设置中手动检查。Portable 版会下载新版、校验 SHA-256，启动新版后将旧文件移入 Windows 回收站；Setup 安装版会下载更新并在确认后重启安装。更新过程中不会上传项目、对话或 Claude 凭据。
 
-从 Portable `v0.1.25` 或 `v0.1.26` 升级时，需要从 Releases 手动下载 `v0.1.27` 一次。这两个旧版本未处理 GitHub 对带空格资产名的规范化；从 `v0.1.27` 开始，后续版本可以继续使用应用内自动更新。
+从 Portable `v0.1.25` 或 `v0.1.26` 升级时，需要从 Releases 手动下载 `v0.1.28` 一次。这两个旧版本未处理 GitHub 对带空格资产名的规范化；从 `v0.1.28` 开始，后续版本可以继续使用应用内自动更新。
 
 从 claude-cli-UI 删除带 CLI session 的对话时，对应的 Claude CLI 会话文件会移入 Windows 回收站，并从 CLI 的 `/resume` 中消失。
 
