@@ -1,20 +1,23 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
   Folder,
+  GripVertical,
   LoaderCircle,
   MessageSquareText,
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
+  Pin,
+  PinOff,
   Plus,
   RefreshCw,
   Settings,
   Sparkles,
   Trash2,
 } from "lucide-react";
-import type { AppSettings, AppUpdateState, Project } from "./types";
+import type { AppSettings, AppUpdateState, Project, ReorderPosition } from "./types";
 
 interface Props {
   projects: Project[];
@@ -36,6 +39,10 @@ interface Props {
   onDeleteProject(projectId: string): void;
   onRenameConversation(conversationId: string, title: string): void;
   onRenameProject(projectId: string, name: string): void;
+  onReorderConversation(projectId: string, sourceId: string, targetId: string, position: ReorderPosition): void;
+  onReorderProject(sourceId: string, targetId: string, position: ReorderPosition): void;
+  onToggleConversationPinned(projectId: string, conversationId: string): void;
+  onToggleProjectPinned(projectId: string): void;
   onSettingsChange(settings: AppSettings): void;
   onCheckForUpdates(): void;
   onToggle(): void;
@@ -46,6 +53,19 @@ interface EditingName {
   id: string;
   value: string;
 }
+
+type DragItem = {
+  kind: "project";
+  id: string;
+  pinned: boolean;
+} | {
+  kind: "conversation";
+  projectId: string;
+  id: string;
+  pinned: boolean;
+};
+
+type DropTarget = DragItem & { position: ReorderPosition };
 
 function formatConversationTime(timestamp: number) {
   const value = new Date(timestamp);
@@ -95,6 +115,10 @@ export default function Sidebar({
   onDeleteProject,
   onRenameConversation,
   onRenameProject,
+  onReorderConversation,
+  onReorderProject,
+  onToggleConversationPinned,
+  onToggleProjectPinned,
   onSettingsChange,
   onCheckForUpdates,
   onToggle,
@@ -103,6 +127,9 @@ export default function Sidebar({
   const [editingName, setEditingName] = useState<EditingName | null>(null);
   const [refreshingProjects, setRefreshingProjects] = useState<Set<string>>(() => new Set());
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [draggedItem, setDraggedItem] = useState<DragItem | null>(null);
+  const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
+  const draggedItemRef = useRef<DragItem | null>(null);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -163,6 +190,53 @@ export default function Sidebar({
     }
   };
 
+  const clearDrag = () => {
+    draggedItemRef.current = null;
+    setDraggedItem(null);
+    setDropTarget(null);
+  };
+
+  const canDrop = (source: DragItem | null, target: DragItem) => {
+    if (!source || source.kind !== target.kind || source.pinned !== target.pinned || source.id === target.id) return false;
+    if (source.kind === "conversation" && target.kind === "conversation") {
+      return source.projectId === target.projectId;
+    }
+    return source.kind === "project" && target.kind === "project";
+  };
+
+  const startDrag = (event: React.DragEvent<HTMLButtonElement>, item: DragItem) => {
+    draggedItemRef.current = item;
+    setDraggedItem(item);
+    setDropTarget(null);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", item.id);
+  };
+
+  const dragOver = (event: React.DragEvent<HTMLElement>, target: DragItem) => {
+    if (!canDrop(draggedItemRef.current, target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const position: ReorderPosition = event.clientY < bounds.top + bounds.height / 2 ? "before" : "after";
+    setDropTarget({ ...target, position });
+  };
+
+  const dropItem = (event: React.DragEvent<HTMLElement>, target: DragItem) => {
+    const source = draggedItemRef.current;
+    if (!canDrop(source, target) || !source) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const position: ReorderPosition = event.clientY < bounds.top + bounds.height / 2 ? "before" : "after";
+    if (source.kind === "project" && target.kind === "project") {
+      onReorderProject(source.id, target.id, position);
+    } else if (source.kind === "conversation" && target.kind === "conversation") {
+      onReorderConversation(source.projectId, source.id, target.id, position);
+    }
+    clearDrag();
+  };
+
   if (collapsed) {
     return (
       <aside className="sidebar sidebar-collapsed">
@@ -200,16 +274,40 @@ export default function Sidebar({
         {projects.map((project) => {
           const closed = closedProjects.has(project.id);
           const projectRunning = project.conversations.some((conversation) => runningConversationIds.has(conversation.id));
+          const projectDragItem: DragItem = { kind: "project", id: project.id, pinned: Boolean(project.pinned) };
+          const projectDropPosition = dropTarget?.kind === "project" && dropTarget.id === project.id
+            ? dropTarget.position
+            : null;
           return (
-            <section className="project-group" key={project.id}>
+            <section
+              className={`project-group ${project.pinned ? "pinned" : ""} ${draggedItem?.kind === "project" && draggedItem.id === project.id ? "dragging" : ""} ${projectDropPosition ? `drop-${projectDropPosition}` : ""}`}
+              data-pinned={project.pinned ? "true" : "false"}
+              data-project-id={project.id}
+              key={project.id}
+            >
               <div
                 className={`project-row ${activeProjectId === project.id && !activeConversationId ? "active" : ""}`}
+                onDragOver={(event) => dragOver(event, projectDragItem)}
+                onDrop={(event) => dropItem(event, projectDragItem)}
                 onContextMenu={(event) => {
                   event.preventDefault();
                   onOpenProject(project.workspace);
                 }}
                 title="右键在文件管理器中打开"
               >
+                {editingName?.kind === "project" && editingName.id === project.id ? null : (
+                  <button
+                    aria-label={`拖动项目 ${project.customName ?? project.name} 排序`}
+                    className="reorder-handle project-drag-handle"
+                    draggable
+                    onDragEnd={clearDrag}
+                    onDragStart={(event) => startDrag(event, projectDragItem)}
+                    title="拖动排序（置顶项目与普通项目分别排序）"
+                    type="button"
+                  >
+                    <GripVertical size={13} />
+                  </button>
+                )}
                 {editingName?.kind === "project" && editingName.id === project.id ? (
                   <div className="rename-editor project-rename-editor">
                     <Folder size={14} />
@@ -237,6 +335,7 @@ export default function Sidebar({
                       <strong>{project.customName ?? project.name}</strong>
                       {project.customName ? <small>{project.name}</small> : null}
                     </span>
+                    {project.pinned ? <Pin className="pin-indicator" size={11} aria-label="已置顶项目" /> : null}
                     {projectRunning ? <LoaderCircle className="project-running-icon" size={13} aria-label="项目中有会话正在运行" /> : null}
                   </button>
                 )}
@@ -253,6 +352,15 @@ export default function Sidebar({
                       <RefreshCw className={refreshingProjects.has(project.id) ? "spinning" : undefined} size={13} />
                     </button>
                     <button
+                      aria-label={project.pinned ? `取消置顶项目 ${project.customName ?? project.name}` : `置顶项目 ${project.customName ?? project.name}`}
+                      aria-pressed={Boolean(project.pinned)}
+                      className="project-action pin"
+                      onClick={() => onToggleProjectPinned(project.id)}
+                      title={project.pinned ? "取消置顶项目" : "置顶项目"}
+                    >
+                      {project.pinned ? <PinOff size={13} /> : <Pin size={13} />}
+                    </button>
+                    <button
                       className="project-action rename"
                       onClick={() => setEditingName({ kind: "project", id: project.id, value: project.customName ?? project.name })}
                       title="重命名项目"
@@ -265,8 +373,39 @@ export default function Sidebar({
               </div>
               {!closed ? (
                 <div className="project-conversations">
-                  {project.conversations.map((conversation) => (
-                    <div className={`task-row ${activeConversationId === conversation.id ? "active" : ""} ${runningConversationIds.has(conversation.id) ? "running" : ""}`} key={conversation.id}>
+                  {project.conversations.map((conversation) => {
+                    const conversationDragItem: DragItem = {
+                      kind: "conversation",
+                      projectId: project.id,
+                      id: conversation.id,
+                      pinned: Boolean(conversation.pinned),
+                    };
+                    const conversationDropPosition = dropTarget?.kind === "conversation" &&
+                      dropTarget.projectId === project.id && dropTarget.id === conversation.id
+                      ? dropTarget.position
+                      : null;
+                    return (
+                    <div
+                      className={`task-row ${activeConversationId === conversation.id ? "active" : ""} ${runningConversationIds.has(conversation.id) ? "running" : ""} ${conversation.pinned ? "pinned" : ""} ${draggedItem?.kind === "conversation" && draggedItem.id === conversation.id ? "dragging" : ""} ${conversationDropPosition ? `drop-${conversationDropPosition}` : ""}`}
+                      data-conversation-id={conversation.id}
+                      data-pinned={conversation.pinned ? "true" : "false"}
+                      key={conversation.id}
+                      onDragOver={(event) => dragOver(event, conversationDragItem)}
+                      onDrop={(event) => dropItem(event, conversationDragItem)}
+                    >
+                      {editingName?.kind === "conversation" && editingName.id === conversation.id ? null : (
+                        <button
+                          aria-label={`拖动会话 ${conversation.title} 排序`}
+                          className="reorder-handle task-drag-handle"
+                          draggable
+                          onDragEnd={clearDrag}
+                          onDragStart={(event) => startDrag(event, conversationDragItem)}
+                          title="拖动排序（仅限当前项目的同类置顶分组）"
+                          type="button"
+                        >
+                          <GripVertical size={12} />
+                        </button>
+                      )}
                       {editingName?.kind === "conversation" && editingName.id === conversation.id ? (
                         <div className="rename-editor conversation-rename-editor">
                           <MessageSquareText size={14} />
@@ -287,13 +426,25 @@ export default function Sidebar({
                               ? <LoaderCircle className="conversation-running-icon" size={14} aria-label="会话正在运行" />
                               : <MessageSquareText size={14} />}
                             <span>
-                              <strong>{conversation.title}</strong>
+                              <span className="conversation-title-line">
+                                <strong>{conversation.title}</strong>
+                                {conversation.pinned ? <Pin className="pin-indicator" size={10} aria-label="已置顶会话" /> : null}
+                              </span>
                               <small className="conversation-meta">
                                 {conversation.source === "claude" ? <span>Claude CLI</span> : null}
                                 {conversation.gitBranch ? <span title={conversation.gitBranch}>{conversation.gitBranch}</span> : null}
                                 <time dateTime={new Date(conversation.updatedAt).toISOString()}>{formatConversationTime(conversation.updatedAt)}</time>
                               </small>
                             </span>
+                          </button>
+                          <button
+                            aria-label={conversation.pinned ? `取消置顶会话 ${conversation.title}` : `置顶会话 ${conversation.title}`}
+                            aria-pressed={Boolean(conversation.pinned)}
+                            className="task-pin"
+                            onClick={() => onToggleConversationPinned(project.id, conversation.id)}
+                            title={conversation.pinned ? "取消置顶会话" : "置顶会话"}
+                          >
+                            {conversation.pinned ? <PinOff size={13} /> : <Pin size={13} />}
                           </button>
                           <button
                             className="task-rename"
@@ -312,7 +463,8 @@ export default function Sidebar({
                         </>
                       )}
                     </div>
-                  ))}
+                    );
+                  })}
                   {project.conversations.length === 0 ? (
                     <button className="empty-conversation" onClick={() => onNewConversation(project.id)}>新建对话</button>
                   ) : null}

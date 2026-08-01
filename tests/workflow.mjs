@@ -873,6 +873,138 @@ try {
   });
   await page.waitForSelector(".project-group");
   if (await page.locator(".fatal-error").count()) throw new Error("corrupt project data reached the error boundary");
+
+  await electronApp.close();
+  electronApp = undefined;
+  const orderingNow = Date.now();
+  const orderingConversation = (id, title, age) => ({
+    id,
+    title,
+    createdAt: orderingNow - age,
+    updatedAt: orderingNow - age,
+    messages: [],
+    permissionMode: "acceptEdits",
+  });
+  const orderingProjects = [{
+    id: "order-project-a",
+    name: "排序项目 A",
+    workspace: profile,
+    createdAt: orderingNow - 9_000,
+    updatedAt: orderingNow - 1_000,
+    conversations: [
+      orderingConversation("order-conversation-a", "排序会话 A", 3_000),
+      orderingConversation("order-conversation-b", "排序会话 B", 1_000),
+      orderingConversation("order-conversation-c", "排序会话 C", 2_000),
+    ],
+  }, {
+    id: "order-project-b",
+    name: "排序项目 B",
+    workspace: claudeConfig,
+    createdAt: orderingNow - 8_000,
+    updatedAt: orderingNow - 2_000,
+    conversations: [orderingConversation("order-conversation-d", "排序会话 D", 4_000)],
+  }, {
+    id: "order-project-c",
+    name: "排序项目 C",
+    workspace: profile,
+    createdAt: orderingNow - 7_000,
+    updatedAt: orderingNow - 3_000,
+    conversations: [orderingConversation("order-conversation-e", "排序会话 E", 5_000)],
+  }];
+  await writeFile(resolve(profile, "projects.json"), JSON.stringify(orderingProjects), "utf8");
+  await writeFile(resolve(profile, "selection.json"), JSON.stringify({
+    projectId: "order-project-a",
+    conversationId: "order-conversation-a",
+  }), "utf8");
+  await rm(resolve(profile, "Local Storage"), { recursive: true, force: true });
+  electronApp = await launch();
+  page = await electronApp.firstWindow();
+  watchErrors(page);
+  await page.waitForFunction(() => document.querySelectorAll(".project-group").length === 3);
+
+  const projectA = page.locator('[data-project-id="order-project-a"]');
+  const projectB = page.locator('[data-project-id="order-project-b"]');
+  const projectC = page.locator('[data-project-id="order-project-c"]');
+  await projectC.locator(".project-row").hover();
+  await projectC.locator(".project-drag-handle").dragTo(projectA.locator(".project-row"), {
+    targetPosition: { x: 24, y: 2 },
+  });
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll(".project-group")].map((element) => element.getAttribute("data-project-id")).join(",") ===
+    "order-project-c,order-project-a,order-project-b"
+  ));
+
+  await projectB.locator(".project-row").hover();
+  await projectB.locator('[title="置顶项目"]').click();
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll(".project-group")].map((element) => element.getAttribute("data-project-id")).join(",") ===
+      "order-project-b,order-project-c,order-project-a" &&
+    document.querySelector('[data-project-id="order-project-b"]')?.getAttribute("data-pinned") === "true"
+  ));
+
+  const conversationA = projectA.locator('[data-conversation-id="order-conversation-a"]');
+  const conversationB = projectA.locator('[data-conversation-id="order-conversation-b"]');
+  const conversationC = projectA.locator('[data-conversation-id="order-conversation-c"]');
+  await conversationC.hover();
+  await conversationC.locator(".task-drag-handle").dragTo(conversationA, {
+    targetPosition: { x: 24, y: 2 },
+  });
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll('[data-project-id="order-project-a"] .task-row')]
+      .map((element) => element.getAttribute("data-conversation-id")).join(",") ===
+    "order-conversation-c,order-conversation-a,order-conversation-b"
+  ));
+
+  await conversationB.hover();
+  await conversationB.locator('[title="置顶会话"]').click();
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll('[data-project-id="order-project-a"] .task-row')]
+      .map((element) => element.getAttribute("data-conversation-id")).join(",") ===
+      "order-conversation-b,order-conversation-c,order-conversation-a" &&
+    document.querySelector('[data-conversation-id="order-conversation-b"]')?.getAttribute("data-pinned") === "true"
+  ));
+
+  await projectA.locator(".project-row").hover();
+  await projectA.locator('[title="刷新 Claude CLI 会话"]').click();
+  await page.waitForFunction(() => !document.querySelector('[data-project-id="order-project-a"] [title="刷新 Claude CLI 会话"]')?.hasAttribute("disabled"));
+  const orderAfterRefresh = await projectA.locator(".task-row").evaluateAll((elements) => (
+    elements.map((element) => element.getAttribute("data-conversation-id"))
+  ));
+  if (orderAfterRefresh.join(",") !== "order-conversation-b,order-conversation-c,order-conversation-a") {
+    throw new Error(`refresh replaced the manual conversation order: ${orderAfterRefresh.join(",")}`);
+  }
+
+  await page.waitForFunction(async () => {
+    const projects = await window.claudeDesk.getProjectStore();
+    if (!Array.isArray(projects)) return false;
+    const projectIds = projects.map((project) => project.id).join(",");
+    const orderedProject = projects.find((project) => project.id === "order-project-a");
+    const conversationIds = orderedProject?.conversations?.map((conversation) => conversation.id).join(",");
+    return projectIds === "order-project-b,order-project-c,order-project-a" &&
+      projects[0]?.pinned === true &&
+      conversationIds === "order-conversation-b,order-conversation-c,order-conversation-a" &&
+      orderedProject?.conversations?.[0]?.pinned === true;
+  });
+
+  await electronApp.close();
+  electronApp = await launch();
+  page = await electronApp.firstWindow();
+  watchErrors(page);
+  await page.waitForFunction(() => document.querySelectorAll(".project-group").length === 3);
+  const restoredOrder = await page.evaluate(() => ({
+    projects: [...document.querySelectorAll(".project-group")].map((element) => element.getAttribute("data-project-id")),
+    conversations: [...document.querySelectorAll('[data-project-id="order-project-a"] .task-row')]
+      .map((element) => element.getAttribute("data-conversation-id")),
+    projectPinned: document.querySelector('[data-project-id="order-project-b"]')?.getAttribute("data-pinned"),
+    conversationPinned: document.querySelector('[data-conversation-id="order-conversation-b"]')?.getAttribute("data-pinned"),
+  }));
+  if (
+    restoredOrder.projects.join(",") !== "order-project-b,order-project-c,order-project-a" ||
+    restoredOrder.conversations.join(",") !== "order-conversation-b,order-conversation-c,order-conversation-a" ||
+    restoredOrder.projectPinned !== "true" ||
+    restoredOrder.conversationPinned !== "true"
+  ) throw new Error(`project/conversation order or pin state did not survive restart: ${JSON.stringify(restoredOrder)}`);
+
   await electronApp.close();
   electronApp = undefined;
 
@@ -886,6 +1018,7 @@ try {
     slashCommands: true,
     legacyMigration: true,
     corruptDataRecovery: true,
+    reorderingAndPinning: true,
   }, null, 2));
   if (errors.length > 0) process.exitCode = 1;
 } finally {

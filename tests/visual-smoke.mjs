@@ -53,12 +53,14 @@ await page.evaluate((workspace) => {
   const seededProjects = [{
     id: "visual-project",
     name: "sample-dashboard",
+    pinned: true,
     workspace,
     createdAt: now,
     updatedAt: now,
     conversations: [{
       id: "visual-conversation",
       title: "检查登录流程并修复会话恢复",
+      pinned: true,
       createdAt: now,
       updatedAt: now,
       sessionId: "11111111-1111-4111-8111-111111111111",
@@ -99,6 +101,9 @@ await page.evaluate((workspace) => {
 }, root);
 await page.waitForSelector(".composer");
 if (!(await page.locator(".sidebar-version").textContent())?.startsWith("claude-cli-UI v")) throw new Error("UI version was not shown in the sidebar footer");
+if (await page.locator('[aria-label="已置顶项目"]').count() !== 1 || await page.locator('[aria-label="已置顶会话"]').count() !== 1) {
+  throw new Error("pinned project/conversation indicators were not rendered");
+}
 await page.screenshot({ path: resolve(artifacts, "conversation.png") });
 if (await page.locator(".composer-options select").count()) throw new Error("composer rendered native select controls");
 
@@ -120,6 +125,22 @@ await page.keyboard.press("Escape");
 
 const localDeleteRow = page.locator(".task-row", { hasText: "添加数据导出功能" });
 await localDeleteRow.hover();
+const conversationActionLayout = await localDeleteRow.locator(".task-pin, .task-rename, .task-delete").evaluateAll((elements) => (
+  elements
+    .filter((element) => getComputedStyle(element).display !== "none")
+    .map((element) => element.getBoundingClientRect().toJSON())
+));
+const localDeleteRowLayout = await localDeleteRow.evaluate((element) => element.getBoundingClientRect().toJSON());
+if (conversationActionLayout.length !== 3) throw new Error("conversation pin/rename/delete actions were not all available on hover");
+for (let index = 0; index < conversationActionLayout.length; index += 1) {
+  const action = conversationActionLayout[index];
+  if (action.left < localDeleteRowLayout.left || action.right > localDeleteRowLayout.right) {
+    throw new Error(`conversation action escaped its row: ${JSON.stringify(conversationActionLayout)}`);
+  }
+  if (index > 0 && action.left < conversationActionLayout[index - 1].right) {
+    throw new Error(`conversation actions overlap: ${JSON.stringify(conversationActionLayout)}`);
+  }
+}
 await localDeleteRow.locator(".task-delete").click();
 await page.waitForSelector(".delete-confirm-dialog");
 const deleteDialogLayout = await page.locator(".delete-confirm-dialog").evaluate((element) => element.getBoundingClientRect().toJSON());
@@ -239,6 +260,9 @@ const restingProjectActions = await page.locator(".project-row .project-action")
   elements.filter((element) => getComputedStyle(element).display !== "none").length
 ));
 if (restingProjectActions !== 0) throw new Error("project actions were visible before hover");
+if (Number(await page.locator(".project-drag-handle").evaluate((element) => getComputedStyle(element).opacity)) > 0.05) {
+  throw new Error("project drag handle was visible before hover");
+}
 await page.locator(".project-row").hover();
 const compactLayout = await page.evaluate(() => ({
   body: { width: document.body.scrollWidth, height: document.body.scrollHeight },
@@ -247,17 +271,24 @@ const compactLayout = await page.evaluate(() => ({
   projectActions: [...document.querySelectorAll(".project-row .project-action")]
     .filter((element) => getComputedStyle(element).display !== "none")
     .map((element) => element.getBoundingClientRect().toJSON()),
+  projectDragHandle: document.querySelector(".project-drag-handle")?.getBoundingClientRect().toJSON(),
 }));
 await page.screenshot({ path: resolve(artifacts, "compact.png") });
 if (compactLayout.body.width !== compactLayout.viewport.width || compactLayout.body.height !== compactLayout.viewport.height) {
   throw new Error(`compact layout overflow: ${JSON.stringify(compactLayout)}`);
 }
-if (compactLayout.projectActions.length !== 4) throw new Error("project actions were not all available on hover");
+if (compactLayout.projectActions.length !== 5) throw new Error("project actions were not all available on hover");
 for (let index = 1; index < compactLayout.projectActions.length; index += 1) {
   if (compactLayout.projectActions[index].left < compactLayout.projectActions[index - 1].right) {
     throw new Error(`project actions overlap: ${JSON.stringify(compactLayout.projectActions)}`);
   }
 }
+if (
+  !compactLayout.projectRow ||
+  !compactLayout.projectDragHandle ||
+  compactLayout.projectDragHandle.left < compactLayout.projectRow.left ||
+  compactLayout.projectDragHandle.right > compactLayout.projectRow.right
+) throw new Error(`project drag handle escaped its row: ${JSON.stringify(compactLayout)}`);
 
 await page.locator(".model-select .composer-select-trigger").click();
 const compactModelMenuLayout = await page.locator(".model-select .composer-select-menu").evaluate((element) => element.getBoundingClientRect().toJSON());

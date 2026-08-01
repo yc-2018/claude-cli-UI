@@ -19,6 +19,13 @@ export function shorten(text: string, limit = 38) {
   return singleLine.length > limit ? `${singleLine.slice(0, limit)}…` : singleLine;
 }
 
+function pinnedFirst<T extends { pinned?: boolean }>(items: T[]) {
+  return [
+    ...items.filter((item) => item.pinned),
+    ...items.filter((item) => !item.pinned),
+  ];
+}
+
 function normalizeMessage(value: unknown): ChatMessage | null {
   if (!value || typeof value !== "object") return null;
   const message = value as Partial<ChatMessage>;
@@ -69,6 +76,7 @@ function normalizeConversation(value: unknown): Conversation | null {
   return {
     id: conversation.id,
     title: typeof conversation.title === "string" && conversation.title ? conversation.title : "新对话",
+    pinned: conversation.pinned === true ? true : undefined,
     createdAt: typeof conversation.createdAt === "number" ? conversation.createdAt : Date.now(),
     updatedAt: typeof conversation.updatedAt === "number" ? conversation.updatedAt : Date.now(),
     sessionId: typeof conversation.sessionId === "string" && SESSION_ID_PATTERN.test(conversation.sessionId)
@@ -110,10 +118,11 @@ function normalizeProject(value: unknown): Project | null {
     customName: typeof project.customName === "string" && project.customName.trim()
       ? project.customName.trim()
       : undefined,
+    pinned: project.pinned === true ? true : undefined,
     workspace: project.workspace,
     createdAt: typeof project.createdAt === "number" ? project.createdAt : Date.now(),
     updatedAt: typeof project.updatedAt === "number" ? project.updatedAt : Date.now(),
-    conversations,
+    conversations: pinnedFirst(conversations),
   };
 }
 
@@ -173,7 +182,7 @@ export function hasLegacyProjectsToMigrate() {
 
 export function parseProjects(value: unknown): Project[] {
   return Array.isArray(value)
-    ? value.map(normalizeProject).filter((project): project is Project => project !== null)
+    ? pinnedFirst(value.map(normalizeProject).filter((project): project is Project => project !== null))
     : [];
 }
 

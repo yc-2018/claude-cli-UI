@@ -21,6 +21,7 @@ import type {
   ModelConfig,
   PermissionMode,
   Project,
+  ReorderPosition,
   RunRequest,
   ToolPermissionRequest,
 } from "./types";
@@ -62,6 +63,54 @@ const MAX_SIDEBAR_WIDTH = 520;
 const SIDEBAR_WIDTH_STORAGE_KEY = "claude-desk.sidebar-width.v1";
 const DEFAULT_APP_SETTINGS: AppSettings = { closeBehavior: "tray", notifyOnCompletion: true };
 const DEFAULT_UPDATE_STATE: AppUpdateState = { phase: "idle", currentVersion: "", portable: false };
+
+function insertUnpinnedFirst<T extends { pinned?: boolean }>(items: T[], additions: T | T[]) {
+  const newItems = Array.isArray(additions) ? additions : [additions];
+  const firstUnpinnedIndex = items.findIndex((item) => !item.pinned);
+  const insertionIndex = firstUnpinnedIndex === -1 ? items.length : firstUnpinnedIndex;
+  return [
+    ...items.slice(0, insertionIndex),
+    ...newItems,
+    ...items.slice(insertionIndex),
+  ];
+}
+
+function reorderListItem<T extends { id: string; pinned?: boolean }>(
+  items: T[],
+  sourceId: string,
+  targetId: string,
+  position: ReorderPosition,
+) {
+  if (sourceId === targetId) return items;
+  const source = items.find((item) => item.id === sourceId);
+  const target = items.find((item) => item.id === targetId);
+  if (!source || !target || Boolean(source.pinned) !== Boolean(target.pinned)) return items;
+  const remaining = items.filter((item) => item.id !== sourceId);
+  const targetIndex = remaining.findIndex((item) => item.id === targetId);
+  if (targetIndex === -1) return items;
+  const insertionIndex = position === "after" ? targetIndex + 1 : targetIndex;
+  return [
+    ...remaining.slice(0, insertionIndex),
+    source,
+    ...remaining.slice(insertionIndex),
+  ];
+}
+
+function toggleListItemPinned<T extends { id: string; pinned?: boolean }>(items: T[], id: string) {
+  const item = items.find((candidate) => candidate.id === id);
+  if (!item) return items;
+  const pinned = !item.pinned;
+  const changed = { ...item, pinned: pinned ? true : undefined };
+  const remaining = items.filter((candidate) => candidate.id !== id);
+  if (pinned) return [changed, ...remaining];
+  const firstUnpinnedIndex = remaining.findIndex((candidate) => !candidate.pinned);
+  const insertionIndex = firstUnpinnedIndex === -1 ? remaining.length : firstUnpinnedIndex;
+  return [
+    ...remaining.slice(0, insertionIndex),
+    changed,
+    ...remaining.slice(insertionIndex),
+  ];
+}
 
 function resolveSelection(projects: Project[], saved: AppSelection | null): AppSelection {
   const savedProject = saved?.projectId ? projects.find((project) => project.id === saved.projectId) : undefined;
@@ -497,7 +546,10 @@ export default function App() {
         updatedAt: sessions.length > 0
           ? Math.max(item.updatedAt, ...sessions.map((session) => session.updatedAt))
           : item.updatedAt,
-        conversations: [...refreshed, ...additions].sort((a, b) => b.updatedAt - a.updatedAt),
+        conversations: insertUnpinnedFirst(
+          refreshed,
+          additions.sort((a, b) => b.updatedAt - a.updatedAt),
+        ),
       };
     }));
   }, []);
@@ -803,7 +855,7 @@ export default function App() {
   const addConversation = (projectId: string) => {
     const conversation = createConversation();
     setProjects((current) => current.map((project) => project.id === projectId
-      ? { ...project, updatedAt: Date.now(), conversations: [conversation, ...project.conversations] }
+      ? { ...project, updatedAt: Date.now(), conversations: insertUnpinnedFirst(project.conversations, conversation) }
       : project));
     setSelectedProjectId(projectId);
     setActiveConversationId(conversation.id);
@@ -843,7 +895,7 @@ export default function App() {
       updatedAt: now,
       conversations: [conversation],
     };
-    setProjects((current) => [project, ...current]);
+    setProjects((current) => insertUnpinnedFirst(current, project));
     setSelectedProjectId(project.id);
     setActiveConversationId(conversation.id);
     setComposerFocusRequest((request) => request + 1);
@@ -979,6 +1031,31 @@ export default function App() {
     updateConversation(conversationId, (conversation) => ({ ...conversation, title: trimmed, updatedAt: Date.now() }));
   };
 
+  const reorderProject = (sourceId: string, targetId: string, position: ReorderPosition) => {
+    setProjects((current) => reorderListItem(current, sourceId, targetId, position));
+  };
+
+  const reorderConversation = (
+    projectId: string,
+    sourceId: string,
+    targetId: string,
+    position: ReorderPosition,
+  ) => {
+    setProjects((current) => current.map((project) => project.id === projectId
+      ? { ...project, conversations: reorderListItem(project.conversations, sourceId, targetId, position) }
+      : project));
+  };
+
+  const toggleProjectPinned = (projectId: string) => {
+    setProjects((current) => toggleListItemPinned(current, projectId));
+  };
+
+  const toggleConversationPinned = (projectId: string, conversationId: string) => {
+    setProjects((current) => current.map((project) => project.id === projectId
+      ? { ...project, conversations: toggleListItemPinned(project.conversations, conversationId) }
+      : project));
+  };
+
   const branchConversation = async (userTurn: number) => {
     if (
       !activeProject ||
@@ -1022,7 +1099,7 @@ export default function App() {
         historyLoaded: true,
       };
       setProjects((current) => current.map((project) => project.id === sourceProject.id
-        ? { ...project, updatedAt: Date.now(), conversations: [branch, ...project.conversations] }
+        ? { ...project, updatedAt: Date.now(), conversations: insertUnpinnedFirst(project.conversations, branch) }
         : project));
       setSelectedProjectId(sourceProject.id);
       setActiveConversationId(branch.id);
@@ -1296,6 +1373,10 @@ export default function App() {
         onDeleteProject={deleteProject}
         onRenameConversation={renameConversation}
         onRenameProject={renameProject}
+        onReorderConversation={reorderConversation}
+        onReorderProject={reorderProject}
+        onToggleConversationPinned={toggleConversationPinned}
+        onToggleProjectPinned={toggleProjectPinned}
         onSettingsChange={changeAppSettings}
         onCheckForUpdates={checkForUpdates}
         onToggle={() => setSidebarCollapsed((value) => !value)}

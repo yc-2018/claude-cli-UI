@@ -1,4 +1,5 @@
 export type PermissionMode = "default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions";
+export type ReorderPosition = "before" | "after";
 
 export interface AppSettings {
   closeBehavior: "tray" | "quit";
@@ -71,6 +72,7 @@ export interface ChatMessage {
 export interface Conversation {
   id: string;
   title: string;
+  pinned?: boolean;
   createdAt: number;
   updatedAt: number;
   sessionId?: string;
@@ -89,6 +91,7 @@ export interface Project {
   id: string;
   name: string;
   customName?: string;
+  pinned?: boolean;
   workspace: string;
   createdAt: number;
   updatedAt: number;
