@@ -216,6 +216,13 @@ try {
   if (!updateDialogText.includes("旧版文件会移入 Windows 回收站")) {
     throw new Error("Portable update cleanup behavior was not explained");
   }
+  const ignoreUpdateButton = page.locator(".update-ignore-button");
+  if (await ignoreUpdateButton.count() !== 1) throw new Error("update dialog did not offer per-version suppression");
+  await ignoreUpdateButton.click();
+  await page.waitForSelector(".update-dialog", { state: "detached" });
+  await page.waitForFunction(async (version) => (await window.claudeDesk.getAppSettings()).ignoredUpdateVersion === version, updateVersion);
+  await updateButton.click();
+  await page.waitForSelector(".update-dialog");
   await page.locator(".update-later-button").click();
   await page.waitForSelector(".update-dialog", { state: "detached" });
   await updateButton.click();
@@ -261,6 +268,11 @@ try {
   if (await page.locator(".project-group").count() !== 1) throw new Error("new project was not created");
   await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 2);
   const importedRow = page.locator(".task-row", { hasText: "来自终端的历史对话" });
+  const localConversationId = await page.locator(".task-row.active").getAttribute("data-conversation-id");
+  if (!localConversationId) throw new Error("new local conversation was not active");
+  const localRow = page.locator(`[data-conversation-id="${localConversationId}"]`);
+  const unsentDraft = "切换会话后仍应保留的未发送草稿";
+  await page.locator(".composer textarea").fill(unsentDraft);
   if (!(await importedRow.textContent())?.includes("Claude CLI")) throw new Error("imported CLI session was not identified in the sidebar");
   if (!(await importedRow.textContent())?.includes("feature/cli-sync") || await importedRow.locator("time").count() !== 1) {
     throw new Error("CLI session branch or updated time was not shown in the sidebar");
@@ -269,6 +281,21 @@ try {
   await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "来自终端的历史对话");
   if (!(await page.locator(".markdown").last().textContent())?.includes("恢复的回答")) throw new Error("CLI session response was not loaded");
   if (!(await page.locator(".thinking-toggle").last().textContent())?.includes("思考过程")) throw new Error("CLI session thinking was not loaded");
+  if (await page.locator(".composer textarea").inputValue() !== "") throw new Error("draft leaked into another conversation");
+  await localRow.locator(".task-select").click();
+  await page.waitForFunction((draft) => document.querySelector(".composer textarea")?.value === draft, unsentDraft);
+  await page.locator(".project-toggle").click();
+  await page.waitForSelector(".project-conversations", { state: "detached" });
+  if (
+    await page.locator(".composer textarea").inputValue() !== unsentDraft ||
+    await page.locator(".project-empty-view").count() !== 0
+  ) {
+    throw new Error("collapsing the active project closed its conversation or discarded its draft");
+  }
+  await page.locator(".project-toggle").click();
+  await localRow.waitFor();
+  await importedRow.locator(".task-select").click();
+  await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "来自终端的历史对话");
   await appendFile(resolve(cliSessions, `${importedSessionId}.jsonl`), `\n${[
     {
       type: "user",
@@ -775,7 +802,11 @@ try {
     throw new Error("main-process project store was not written");
   }
   const persistedSettings = JSON.parse(await readFile(resolve(profile, "settings.json"), "utf8"));
-  if (persistedSettings.closeBehavior !== "tray" || persistedSettings.notifyOnCompletion !== true) {
+  if (
+    persistedSettings.closeBehavior !== "tray" ||
+    persistedSettings.notifyOnCompletion !== true ||
+    persistedSettings.ignoredUpdateVersion !== updateVersion
+  ) {
     throw new Error("background settings were not persisted by the main process");
   }
   const persistedSelection = JSON.parse(await readFile(resolve(profile, "selection.json"), "utf8"));
@@ -788,6 +819,28 @@ try {
   page = await electronApp.firstWindow();
   watchErrors(page);
   await page.waitForSelector(".project-group");
+  useLegacyUpdateManifest = false;
+  await page.waitForFunction(async (version) => (await window.claudeDesk.getAppSettings()).ignoredUpdateVersion === version, updateVersion);
+  const ignoredUpdateState = await page.evaluate(() => window.claudeDesk.checkAppUpdate());
+  if (ignoredUpdateState.phase !== "available" || ignoredUpdateState.latestVersion !== updateVersion) {
+    throw new Error(`ignored update version was not discovered: ${JSON.stringify(ignoredUpdateState)}`);
+  }
+  await page.waitForTimeout(250);
+  if (await page.locator(".update-dialog").count()) throw new Error("ignored update version prompted again after restart");
+  await page.locator(".settings-trigger").click();
+  await page.locator(".setting-update-button").click();
+  await page.waitForSelector(".update-dialog");
+  await page.locator(".update-later-button").click();
+  await page.waitForSelector(".update-dialog", { state: "detached" });
+  await page.locator(".settings-trigger").click();
+  useLegacyUpdateManifest = true;
+  const newerUpdateState = await page.evaluate(() => window.claudeDesk.checkAppUpdate());
+  if (newerUpdateState.phase !== "available" || newerUpdateState.latestVersion !== legacyUpdateVersion) {
+    throw new Error(`newer update version was not discovered after ignoring an older version: ${JSON.stringify(newerUpdateState)}`);
+  }
+  await page.waitForSelector(".update-dialog");
+  await page.locator(".update-later-button").click();
+  await page.waitForSelector(".update-dialog", { state: "detached" });
   await page.waitForFunction(async () => {
     const project = JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0];
     const conversation = project?.conversations?.find((item) => item.sessionId === "22222222-2222-4222-8222-222222222222");
@@ -998,6 +1051,34 @@ try {
     document.querySelector('[data-project-id="order-project-b"]')?.getAttribute("data-pinned") === "true"
   ));
 
+  await projectA.locator(".project-row").hover();
+  await projectA.locator(".project-drag-handle").dragTo(projectB.locator(".project-row"), {
+    targetPosition: { x: 24, y: 2 },
+  });
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll(".project-group")].map((element) => element.getAttribute("data-project-id")).join(",") ===
+      "order-project-a,order-project-b,order-project-c" &&
+    document.querySelector('[data-project-id="order-project-a"]')?.getAttribute("data-pinned") === "true"
+  ));
+  await projectA.locator(".project-row").hover();
+  await projectA.locator(".project-drag-handle").dragTo(projectC.locator(".project-row"), {
+    targetPosition: { x: 24, y: 30 },
+  });
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll(".project-group")].map((element) => element.getAttribute("data-project-id")).join(",") ===
+      "order-project-b,order-project-c,order-project-a" &&
+    document.querySelector('[data-project-id="order-project-a"]')?.getAttribute("data-pinned") === "false"
+  ));
+  await projectA.locator(".project-row").hover();
+  await projectA.locator(".project-drag-handle").dragTo(page.locator(".sidebar-section-label"), {
+    targetPosition: { x: 24, y: 2 },
+  });
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll(".project-group")].map((element) => element.getAttribute("data-project-id")).join(",") ===
+      "order-project-a,order-project-b,order-project-c" &&
+    document.querySelector('[data-project-id="order-project-a"]')?.getAttribute("data-pinned") === "true"
+  ));
+
   const conversationA = projectA.locator('[data-conversation-id="order-conversation-a"]');
   const conversationB = projectA.locator('[data-conversation-id="order-conversation-b"]');
   const conversationC = projectA.locator('[data-conversation-id="order-conversation-c"]');
@@ -1020,6 +1101,64 @@ try {
     document.querySelector('[data-conversation-id="order-conversation-b"]')?.getAttribute("data-pinned") === "true"
   ));
 
+  await conversationA.hover();
+  await conversationA.locator(".task-drag-handle").dragTo(conversationB, {
+    targetPosition: { x: 24, y: 2 },
+  });
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll('[data-project-id="order-project-a"] .task-row')]
+      .map((element) => element.getAttribute("data-conversation-id")).join(",") ===
+      "order-conversation-a,order-conversation-b,order-conversation-c" &&
+    document.querySelector('[data-conversation-id="order-conversation-a"]')?.getAttribute("data-pinned") === "true"
+  ));
+  await conversationA.hover();
+  await conversationA.locator(".task-drag-handle").dragTo(conversationC, {
+    targetPosition: { x: 24, y: 32 },
+  });
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll('[data-project-id="order-project-a"] .task-row')]
+      .map((element) => element.getAttribute("data-conversation-id")).join(",") ===
+      "order-conversation-b,order-conversation-c,order-conversation-a" &&
+    document.querySelector('[data-conversation-id="order-conversation-a"]')?.getAttribute("data-pinned") === "false"
+  ));
+
+  const dragGapAcceptance = await page.evaluate(() => {
+    const dispatchGapDrag = (handle, target, clientY) => {
+      const dataTransfer = new DataTransfer();
+      handle.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer }));
+      const dragOverEvent = new DragEvent("dragover", {
+        bubbles: true,
+        cancelable: true,
+        clientY,
+        dataTransfer,
+      });
+      target.dispatchEvent(dragOverEvent);
+      handle.dispatchEvent(new DragEvent("dragend", { bubbles: true, cancelable: true, dataTransfer }));
+      return dragOverEvent.defaultPrevented;
+    };
+    const projectList = document.querySelector(".project-list");
+    const projectLabel = document.querySelector(".sidebar-section-label");
+    const settingsTrigger = document.querySelector(".settings-trigger");
+    const projectHandle = document.querySelector('[data-project-id="order-project-a"] .project-drag-handle');
+    const conversationList = document.querySelector('[data-project-id="order-project-a"] .project-conversations');
+    const conversationHandle = document.querySelector('[data-conversation-id="order-conversation-a"] .task-drag-handle');
+    if (!projectList || !projectLabel || !settingsTrigger || !projectHandle || !conversationList || !conversationHandle) return null;
+    return {
+      project: dispatchGapDrag(projectHandle, projectList, projectList.getBoundingClientRect().bottom - 2),
+      projectLabel: dispatchGapDrag(projectHandle, projectLabel, projectLabel.getBoundingClientRect().top + 2),
+      projectOutsideSortArea: dispatchGapDrag(projectHandle, settingsTrigger, settingsTrigger.getBoundingClientRect().top + 2),
+      conversation: dispatchGapDrag(conversationHandle, conversationList, conversationList.getBoundingClientRect().bottom - 2),
+    };
+  });
+  if (
+    !dragGapAcceptance?.project ||
+    !dragGapAcceptance.projectLabel ||
+    !dragGapAcceptance.projectOutsideSortArea ||
+    !dragGapAcceptance.conversation
+  ) {
+    throw new Error(`dragging over list gaps still used a forbidden drop target: ${JSON.stringify(dragGapAcceptance)}`);
+  }
+
   await projectA.locator(".project-row").hover();
   await projectA.locator('[title="刷新 Claude CLI 会话"]').click();
   await page.waitForFunction(() => !document.querySelector('[data-project-id="order-project-a"] [title="刷新 Claude CLI 会话"]')?.hasAttribute("disabled"));
@@ -1036,8 +1175,9 @@ try {
     const projectIds = projects.map((project) => project.id).join(",");
     const orderedProject = projects.find((project) => project.id === "order-project-a");
     const conversationIds = orderedProject?.conversations?.map((conversation) => conversation.id).join(",");
-    return projectIds === "order-project-b,order-project-c,order-project-a" &&
-      projects[0]?.pinned === true &&
+    return projectIds === "order-project-a,order-project-b,order-project-c" &&
+      orderedProject?.pinned === true &&
+      projects[1]?.pinned === true &&
       conversationIds === "order-conversation-b,order-conversation-c,order-conversation-a" &&
       orderedProject?.conversations?.[0]?.pinned === true;
   });
@@ -1051,13 +1191,15 @@ try {
     projects: [...document.querySelectorAll(".project-group")].map((element) => element.getAttribute("data-project-id")),
     conversations: [...document.querySelectorAll('[data-project-id="order-project-a"] .task-row')]
       .map((element) => element.getAttribute("data-conversation-id")),
-    projectPinned: document.querySelector('[data-project-id="order-project-b"]')?.getAttribute("data-pinned"),
+    projectAPinned: document.querySelector('[data-project-id="order-project-a"]')?.getAttribute("data-pinned"),
+    projectBPinned: document.querySelector('[data-project-id="order-project-b"]')?.getAttribute("data-pinned"),
     conversationPinned: document.querySelector('[data-conversation-id="order-conversation-b"]')?.getAttribute("data-pinned"),
   }));
   if (
-    restoredOrder.projects.join(",") !== "order-project-b,order-project-c,order-project-a" ||
+    restoredOrder.projects.join(",") !== "order-project-a,order-project-b,order-project-c" ||
     restoredOrder.conversations.join(",") !== "order-conversation-b,order-conversation-c,order-conversation-a" ||
-    restoredOrder.projectPinned !== "true" ||
+    restoredOrder.projectAPinned !== "true" ||
+    restoredOrder.projectBPinned !== "true" ||
     restoredOrder.conversationPinned !== "true"
   ) throw new Error(`project/conversation order or pin state did not survive restart: ${JSON.stringify(restoredOrder)}`);
 

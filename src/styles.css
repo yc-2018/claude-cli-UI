@@ -806,6 +806,8 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .update-button { display: inline-flex; height: 32px; align-items: center; justify-content: center; gap: 6px; padding: 0 11px; border: 1px solid #d2d2cb; border-radius: 6px; font-size: 11.5px; font-weight: 570; cursor: pointer; }
 .update-button.secondary { background: #fff; color: #555550; }
 .update-button.secondary:hover { background: #f1f1ed; }
+.update-button.quiet { border-color: transparent; background: transparent; color: #777770; }
+.update-button.quiet:hover { background: #efefeb; color: #4e4e49; }
 .update-button.primary { border-color: #3f5445; background: #3f5445; color: #fff; }
 .update-button.primary:hover { background: #314337; }
 

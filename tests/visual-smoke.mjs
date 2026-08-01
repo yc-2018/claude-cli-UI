@@ -141,6 +141,7 @@ for (let index = 0; index < conversationActionLayout.length; index += 1) {
     throw new Error(`conversation actions overlap: ${JSON.stringify(conversationActionLayout)}`);
   }
 }
+await localDeleteRow.hover();
 await localDeleteRow.locator(".task-delete").click();
 await page.waitForSelector(".delete-confirm-dialog");
 const deleteDialogLayout = await page.locator(".delete-confirm-dialog").evaluate((element) => element.getBoundingClientRect().toJSON());
@@ -152,15 +153,19 @@ await page.locator(".delete-confirm-button.secondary").click();
 await page.waitForSelector(".delete-confirm-dialog", { state: "detached" });
 await page.waitForFunction(() => document.activeElement?.matches(".composer textarea"));
 
+const activeConversationBeforeCollapse = await page.locator(".task-row.active").getAttribute("data-conversation-id");
+await page.locator(".composer textarea").fill("折叠项目时保留的草稿");
 await page.locator(".project-toggle").click();
-await page.waitForSelector(".project-row.active");
-if (await page.locator(".project-empty-view").count() !== 1 || await page.locator(".task-row.active").count() !== 0) {
-  throw new Error("project-only selection was not rendered");
+await page.waitForSelector(".project-conversations", { state: "detached" });
+if (
+  await page.locator(".composer textarea").inputValue() !== "折叠项目时保留的草稿" ||
+  await page.locator(".project-empty-view").count() !== 0
+) {
+  throw new Error("collapsing the active project closed its conversation or discarded its draft");
 }
-await page.screenshot({ path: resolve(artifacts, "project-only-selection.png") });
+await page.screenshot({ path: resolve(artifacts, "collapsed-project-active-conversation.png") });
 await page.locator(".project-toggle").click();
-await page.locator(".task-select").first().click();
-await page.waitForSelector(".composer");
+await page.waitForSelector(`[data-conversation-id="${activeConversationBeforeCollapse}"]`);
 
 await page.locator(".settings-trigger").click();
 await page.waitForSelector(".settings-popover");
@@ -182,6 +187,7 @@ const updateDialogText = await page.locator(".update-dialog").textContent();
 if (!updateDialogText?.includes("更新内容") || !updateDialogText.includes("修复 & 优化 Portable 更新") || updateDialogText.includes("<h2>")) {
   throw new Error("GitHub release notes were not converted to readable text");
 }
+if (await page.locator(".update-ignore-button").count() !== 1) throw new Error("update dialog did not show the per-version suppression action");
 const updateDialogLayout = await page.locator(".update-dialog").evaluate((element) => element.getBoundingClientRect().toJSON());
 if (updateDialogLayout.left < 0 || updateDialogLayout.top < 0 || updateDialogLayout.right > 1320 || updateDialogLayout.bottom > 860) {
   throw new Error(`update dialog escaped the viewport: ${JSON.stringify(updateDialogLayout)}`);
@@ -310,6 +316,7 @@ await page.locator(".delete-confirm-button.secondary").click();
 await page.locator(".settings-trigger").click();
 await page.locator(".setting-update-button").click();
 await page.waitForSelector(".update-dialog");
+if (await page.locator(".update-ignore-button").count() !== 1) throw new Error("compact update dialog hid the per-version suppression action");
 const compactUpdateDialogLayout = await page.locator(".update-dialog").evaluate((element) => element.getBoundingClientRect().toJSON());
 if (compactUpdateDialogLayout.left < 0 || compactUpdateDialogLayout.top < 0 || compactUpdateDialogLayout.right > 900 || compactUpdateDialogLayout.bottom > 640) {
   throw new Error(`compact update dialog escaped the viewport: ${JSON.stringify(compactUpdateDialogLayout)}`);

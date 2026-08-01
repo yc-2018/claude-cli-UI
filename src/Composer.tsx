@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CircleStop, FileText, Paperclip, Send, ShieldCheck, Sparkles, X } from "lucide-react";
 import ComposerSelect, { type ComposerSelectHandle } from "./ComposerSelect";
-import type { Attachment, AttachmentUpload, Conversation, ModelConfig, PermissionMode } from "./types";
+import type { Attachment, AttachmentUpload, ComposerDraft, Conversation, ModelConfig, PermissionMode } from "./types";
 
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES = 40 * 1024 * 1024;
@@ -28,8 +28,10 @@ interface Props {
   running: boolean;
   loadingHistory?: boolean;
   focusRequest?: number;
+  draft: ComposerDraft;
   onSend(prompt: string, attachments: Attachment[]): void;
   onStop(): void;
+  onDraftChange(update: (current: ComposerDraft) => ComposerDraft): void;
   onModelChange(model: string): void;
   onLocalCommand(command: string): boolean;
   onPermissionChange(mode: PermissionMode): void;
@@ -41,14 +43,14 @@ export default function Composer({
   running,
   loadingHistory = false,
   focusRequest = 0,
+  draft,
   onSend,
   onStop,
+  onDraftChange,
   onModelChange,
   onLocalCommand,
   onPermissionChange,
 }: Props) {
-  const [prompt, setPrompt] = useState("");
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachmentError, setAttachmentError] = useState("");
   const [stagingAttachments, setStagingAttachments] = useState(false);
   const [dragActive, setDragActive] = useState(false);
@@ -56,6 +58,8 @@ export default function Composer({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelSelectRef = useRef<ComposerSelectHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const prompt = draft.prompt;
+  const attachments = draft.attachments;
   const matchedModel = modelConfig.options.find((option) => option.value === conversation.selectedModel)
     ?? modelConfig.options.find((option) => option.actualModel === conversation.selectedModel)
     ?? modelConfig.options[0];
@@ -83,6 +87,21 @@ export default function Composer({
     const frame = requestAnimationFrame(() => textareaRef.current?.focus());
     return () => cancelAnimationFrame(frame);
   }, [conversation.id, focusRequest, loadingHistory, running]);
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px`;
+  }, [conversation.id, prompt]);
+
+  const setPrompt = (value: string) => {
+    onDraftChange((current) => ({ ...current, prompt: value }));
+  };
+
+  const setAttachments = (update: (current: Attachment[]) => Attachment[]) => {
+    onDraftChange((current) => ({ ...current, attachments: update(current.attachments) }));
+  };
 
   const resetPrompt = () => {
     setPrompt("");
@@ -158,7 +177,7 @@ export default function Composer({
       return;
     }
     onSend(value, attachments);
-    setAttachments([]);
+    setAttachments(() => []);
     setAttachmentError("");
     resetPrompt();
   };

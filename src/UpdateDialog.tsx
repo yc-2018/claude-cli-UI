@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { Download, ExternalLink, RefreshCw, Rocket, X } from "lucide-react";
+import { BellOff, Download, ExternalLink, RefreshCw, Rocket, X } from "lucide-react";
 import type { AppUpdateState } from "./types";
 
 interface UpdateDialogProps {
@@ -7,6 +7,7 @@ interface UpdateDialogProps {
   actionError?: string;
   onDismiss(): void;
   onDownload(): void;
+  onIgnoreVersion(): void;
   onInstall(): void;
   onOpenRelease(): void;
 }
@@ -28,6 +29,7 @@ export default function UpdateDialog({
   actionError,
   onDismiss,
   onDownload,
+  onIgnoreVersion,
   onInstall,
   onOpenRelease,
 }: UpdateDialogProps) {
@@ -105,6 +107,11 @@ export default function UpdateDialog({
           <button className="update-button secondary" onClick={onOpenRelease} type="button">
             <ExternalLink size={14} />发布页面
           </button>
+          {!downloading && !ready ? (
+            <button className="update-button quiet update-ignore-button" onClick={onIgnoreVersion} type="button">
+              <BellOff size={14} />此版本不再提醒
+            </button>
+          ) : null}
           <span className="update-action-spacer" />
           <button className="update-button secondary update-later-button" onClick={onDismiss} type="button">
             {downloading ? "后台下载" : ready ? "稍后重启" : "稍后"}

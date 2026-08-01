@@ -17,6 +17,7 @@ import type {
   ClaudeEvent,
   ClaudeSessionHistory,
   ClaudeSessionSummary,
+  ComposerDraft,
   Conversation,
   ModelConfig,
   PermissionMode,
@@ -63,6 +64,7 @@ const MAX_SIDEBAR_WIDTH = 520;
 const SIDEBAR_WIDTH_STORAGE_KEY = "claude-desk.sidebar-width.v1";
 const DEFAULT_APP_SETTINGS: AppSettings = { closeBehavior: "tray", notifyOnCompletion: true };
 const DEFAULT_UPDATE_STATE: AppUpdateState = { phase: "idle", currentVersion: "", portable: false };
+const EMPTY_COMPOSER_DRAFT: ComposerDraft = { prompt: "", attachments: [] };
 
 function insertUnpinnedFirst<T extends { pinned?: boolean }>(items: T[], additions: T | T[]) {
   const newItems = Array.isArray(additions) ? additions : [additions];
@@ -84,14 +86,17 @@ function reorderListItem<T extends { id: string; pinned?: boolean }>(
   if (sourceId === targetId) return items;
   const source = items.find((item) => item.id === sourceId);
   const target = items.find((item) => item.id === targetId);
-  if (!source || !target || Boolean(source.pinned) !== Boolean(target.pinned)) return items;
+  if (!source || !target) return items;
   const remaining = items.filter((item) => item.id !== sourceId);
   const targetIndex = remaining.findIndex((item) => item.id === targetId);
   if (targetIndex === -1) return items;
   const insertionIndex = position === "after" ? targetIndex + 1 : targetIndex;
+  const moved = Boolean(source.pinned) === Boolean(target.pinned)
+    ? source
+    : { ...source, pinned: target.pinned ? true : undefined };
   return [
     ...remaining.slice(0, insertionIndex),
-    source,
+    moved,
     ...remaining.slice(insertionIndex),
   ];
 }
@@ -319,6 +324,7 @@ export default function App() {
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [activeRuns, setActiveRuns] = useState<Record<string, string>>({});
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
+  const [appSettingsLoaded, setAppSettingsLoaded] = useState(false);
   const [completionNotice, setCompletionNotice] = useState<{ conversationId: string; title: string } | null>(null);
   const [appVersion, setAppVersion] = useState("");
   const [updateState, setUpdateState] = useState<AppUpdateState>(DEFAULT_UPDATE_STATE);
@@ -329,6 +335,7 @@ export default function App() {
   const [permissionQueue, setPermissionQueue] = useState<PendingPermission[]>([]);
   const [branchingConversationId, setBranchingConversationId] = useState<string | null>(null);
   const [composerFocusRequest, setComposerFocusRequest] = useState(0);
+  const [composerDrafts, setComposerDrafts] = useState<Record<string, ComposerDraft>>({});
   const [pendingDeletion, setPendingDeletion] = useState<PendingDeletion | null>(null);
   const [deletionBusy, setDeletionBusy] = useState(false);
   const [deletionError, setDeletionError] = useState("");
@@ -453,12 +460,19 @@ export default function App() {
   }, [updateState.phase]);
 
   useEffect(() => {
+    let canceled = false;
     void window.claudeDesk.getAppSettings()
       .then((settings) => {
+        if (canceled) return;
         appSettingsRef.current = settings;
         setAppSettings(settings);
+        setDismissedUpdateVersion(settings.ignoredUpdateVersion ?? null);
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        if (!canceled) setAppSettingsLoaded(true);
+      });
+    return () => { canceled = true; };
   }, []);
 
   useEffect(() => {
@@ -611,7 +625,7 @@ export default function App() {
     void window.claudeDesk.notifyCompletion(conversationId, conversation.title).catch(() => false);
   }, []);
 
-  const changeAppSettings = (settings: AppSettings) => {
+  const changeAppSettings = (settings: AppSettings, onFailure?: (previous: AppSettings) => void) => {
     const previous = appSettingsRef.current;
     appSettingsRef.current = settings;
     setAppSettings(settings);
@@ -623,8 +637,20 @@ export default function App() {
       .catch(() => {
         appSettingsRef.current = previous;
         setAppSettings(previous);
+        onFailure?.(previous);
         window.alert("无法保存设置");
       });
+  };
+
+  const ignoreUpdateVersion = () => {
+    const version = updateState.latestVersion;
+    if (!version) return;
+    setDismissedUpdateVersion(version);
+    setUpdateActionError("");
+    changeAppSettings(
+      { ...appSettingsRef.current, ignoredUpdateVersion: version },
+      (previous) => setDismissedUpdateVersion(previous.ignoredUpdateVersion ?? null),
+    );
   };
 
   const checkForUpdates = () => {
@@ -868,12 +894,6 @@ export default function App() {
     setSelectedProjectId(project.id);
     setActiveConversationId(conversationId);
     setComposerFocusRequest((request) => request + 1);
-  };
-
-  const selectProject = (projectId: string) => {
-    if (!projects.some((project) => project.id === projectId)) return;
-    setSelectedProjectId(projectId);
-    setActiveConversationId(null);
   };
 
   const addProject = async () => {
@@ -1363,7 +1383,6 @@ export default function App() {
         runningConversationIds={new Set(Object.keys(activeRuns))}
         appSettings={appSettings}
         updateState={updateState}
-        onSelectProject={selectProject}
         onSelectConversation={selectConversation}
         onNewProject={addProject}
         onNewConversation={addConversation}
@@ -1430,12 +1449,25 @@ export default function App() {
             <Composer
               key={`composer-${activeConversation.id}`}
               conversation={activeConversation}
+              draft={composerDrafts[activeConversation.id] ?? EMPTY_COMPOSER_DRAFT}
               modelConfig={modelConfig}
               running={Boolean(activeRunId)}
               loadingHistory={activeConversation.source === "claude" && !activeConversation.historyLoaded}
               focusRequest={composerFocusRequest}
               onSend={sendPrompt}
               onStop={stopRun}
+              onDraftChange={(update) => {
+                setComposerDrafts((current) => {
+                  const nextDraft = update(current[activeConversation.id] ?? EMPTY_COMPOSER_DRAFT);
+                  if (!nextDraft.prompt && nextDraft.attachments.length === 0) {
+                    if (!current[activeConversation.id]) return current;
+                    const next = { ...current };
+                    delete next[activeConversation.id];
+                    return next;
+                  }
+                  return { ...current, [activeConversation.id]: nextDraft };
+                });
+              }}
               onModelChange={(selectedModel) => updateConversation(activeConversation.id, (conversation) => ({ ...conversation, selectedModel }))}
               onLocalCommand={runLocalCommand}
               onPermissionChange={(permissionMode: PermissionMode) => updateConversation(activeConversation.id, (conversation) => ({ ...conversation, permissionMode }))}
@@ -1487,7 +1519,7 @@ export default function App() {
           onConfirm={() => { void confirmDeletion(); }}
         />
       ) : null}
-      {!pendingPermission && !pendingDeletion && updateState.latestVersion && dismissedUpdateVersion !== updateState.latestVersion && (
+      {appSettingsLoaded && !pendingPermission && !pendingDeletion && updateState.latestVersion && dismissedUpdateVersion !== updateState.latestVersion && (
         updateState.phase === "available" ||
         updateState.phase === "downloading" ||
         updateState.phase === "ready" ||
@@ -1501,6 +1533,7 @@ export default function App() {
             setUpdateActionError("");
           }}
           onDownload={downloadUpdate}
+          onIgnoreVersion={ignoreUpdateVersion}
           onInstall={installUpdate}
           onOpenRelease={openUpdateRelease}
         />

@@ -14,6 +14,7 @@ type PermissionMode = "default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPe
 interface AppSettings {
   closeBehavior: "tray" | "quit";
   notifyOnCompletion: boolean;
+  ignoredUpdateVersion?: string;
 }
 
 interface AppSelection {
@@ -372,7 +373,18 @@ function normalizeAppSettings(value: unknown): AppSettings | null {
   if ((settings.closeBehavior !== "tray" && settings.closeBehavior !== "quit") || typeof settings.notifyOnCompletion !== "boolean") {
     return null;
   }
-  return { closeBehavior: settings.closeBehavior, notifyOnCompletion: settings.notifyOnCompletion };
+  if (
+    settings.ignoredUpdateVersion !== undefined &&
+    (typeof settings.ignoredUpdateVersion !== "string" ||
+      settings.ignoredUpdateVersion.length === 0 ||
+      settings.ignoredUpdateVersion.length > 50 ||
+      !/^[0-9A-Za-z.+-]+$/.test(settings.ignoredUpdateVersion))
+  ) return null;
+  return {
+    closeBehavior: settings.closeBehavior,
+    notifyOnCompletion: settings.notifyOnCompletion,
+    ...(settings.ignoredUpdateVersion ? { ignoredUpdateVersion: settings.ignoredUpdateVersion } : {}),
+  };
 }
 
 async function loadAppSettings() {

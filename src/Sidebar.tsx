@@ -29,7 +29,6 @@ interface Props {
   runningConversationIds: ReadonlySet<string>;
   appSettings: AppSettings;
   updateState: AppUpdateState;
-  onSelectProject(id: string): void;
   onSelectConversation(id: string): void;
   onNewProject(): void;
   onNewConversation(projectId: string): void;
@@ -105,7 +104,6 @@ export default function Sidebar({
   runningConversationIds,
   appSettings,
   updateState,
-  onSelectProject,
   onSelectConversation,
   onNewProject,
   onNewConversation,
@@ -130,6 +128,7 @@ export default function Sidebar({
   const [draggedItem, setDraggedItem] = useState<DragItem | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
   const draggedItemRef = useRef<DragItem | null>(null);
+  const dropTargetRef = useRef<DropTarget | null>(null);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -192,48 +191,147 @@ export default function Sidebar({
 
   const clearDrag = () => {
     draggedItemRef.current = null;
+    dropTargetRef.current = null;
     setDraggedItem(null);
     setDropTarget(null);
   };
 
-  const canDrop = (source: DragItem | null, target: DragItem) => {
-    if (!source || source.kind !== target.kind || source.pinned !== target.pinned || source.id === target.id) return false;
+  const sameDragScope = (source: DragItem | null, target: DragItem) => {
+    if (!source || source.kind !== target.kind) return false;
     if (source.kind === "conversation" && target.kind === "conversation") {
       return source.projectId === target.projectId;
     }
     return source.kind === "project" && target.kind === "project";
   };
 
-  const startDrag = (event: React.DragEvent<HTMLButtonElement>, item: DragItem) => {
-    draggedItemRef.current = item;
-    setDraggedItem(item);
-    setDropTarget(null);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", item.id);
+  const updateDropTarget = (target: DropTarget | null) => {
+    dropTargetRef.current = target;
+    setDropTarget(target);
   };
 
-  const dragOver = (event: React.DragEvent<HTMLElement>, target: DragItem) => {
-    if (!canDrop(draggedItemRef.current, target)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.dataTransfer.dropEffect = "move";
-    const bounds = event.currentTarget.getBoundingClientRect();
-    const position: ReorderPosition = event.clientY < bounds.top + bounds.height / 2 ? "before" : "after";
-    setDropTarget({ ...target, position });
-  };
-
-  const dropItem = (event: React.DragEvent<HTMLElement>, target: DragItem) => {
-    const source = draggedItemRef.current;
-    if (!canDrop(source, target) || !source) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const bounds = event.currentTarget.getBoundingClientRect();
-    const position: ReorderPosition = event.clientY < bounds.top + bounds.height / 2 ? "before" : "after";
+  const commitDrop = (source: DragItem, target: DragItem, position: ReorderPosition) => {
+    if (!sameDragScope(source, target) || source.id === target.id) return;
     if (source.kind === "project" && target.kind === "project") {
       onReorderProject(source.id, target.id, position);
     } else if (source.kind === "conversation" && target.kind === "conversation") {
       onReorderConversation(source.projectId, source.id, target.id, position);
     }
+  };
+
+  const nearestDropTarget = (
+    clientY: number,
+    candidates: Array<{ element: HTMLElement; item: DragItem }>,
+  ) => {
+    const source = draggedItemRef.current;
+    const compatible = candidates.filter(({ item }) => sameDragScope(source, item) && source?.id !== item.id);
+    if (compatible.length === 0) {
+      updateDropTarget(null);
+      return;
+    }
+    const nearest = compatible.reduce((best, candidate) => {
+      const bounds = candidate.element.getBoundingClientRect();
+      const distance = Math.abs(clientY - (bounds.top + bounds.height / 2));
+      return distance < best.distance ? { candidate, bounds, distance } : best;
+    }, (() => {
+      const candidate = compatible[0];
+      const bounds = candidate.element.getBoundingClientRect();
+      return { candidate, bounds, distance: Math.abs(clientY - (bounds.top + bounds.height / 2)) };
+    })());
+    updateDropTarget({
+      ...nearest.candidate.item,
+      position: clientY < nearest.bounds.top + nearest.bounds.height / 2 ? "before" : "after",
+    });
+  };
+
+  const startDrag = (event: React.DragEvent<HTMLButtonElement>, item: DragItem) => {
+    draggedItemRef.current = item;
+    setDraggedItem(item);
+    updateDropTarget(null);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", item.id);
+  };
+
+  const dragOver = (event: React.DragEvent<HTMLElement>, target: DragItem) => {
+    const source = draggedItemRef.current;
+    if (!sameDragScope(source, target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    if (!source || source.id === target.id) {
+      updateDropTarget(null);
+      return;
+    }
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const position: ReorderPosition = event.clientY < bounds.top + bounds.height / 2 ? "before" : "after";
+    updateDropTarget({ ...target, position });
+  };
+
+  const dropItem = (event: React.DragEvent<HTMLElement>, target: DragItem) => {
+    const source = draggedItemRef.current;
+    if (!sameDragScope(source, target) || !source) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const position: ReorderPosition = event.clientY < bounds.top + bounds.height / 2 ? "before" : "after";
+    commitDrop(source, target, position);
+    clearDrag();
+  };
+
+  const dragOverSidebar = (event: React.DragEvent<HTMLElement>) => {
+    const source = draggedItemRef.current;
+    if (!source) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const eventTarget = event.target instanceof Element ? event.target : null;
+    if (source.kind === "conversation") {
+      const group = eventTarget?.closest<HTMLElement>(".project-group");
+      if (!group || group.dataset.projectId !== source.projectId) {
+        updateDropTarget(null);
+        return;
+      }
+      const project = projects.find((item) => item.id === source.projectId);
+      if (!project) {
+        updateDropTarget(null);
+        return;
+      }
+      const rows = Array.from(group.querySelectorAll<HTMLElement>(".task-row"));
+      const candidates = rows.flatMap((element) => {
+        const conversation = project.conversations.find((item) => item.id === element.dataset.conversationId);
+        return conversation ? [{
+          element,
+          item: {
+            kind: "conversation" as const,
+            projectId: project.id,
+            id: conversation.id,
+            pinned: Boolean(conversation.pinned),
+          },
+        }] : [];
+      });
+      nearestDropTarget(event.clientY, candidates);
+      return;
+    }
+    if (!eventTarget?.closest(".sidebar-section-label, .project-list")) {
+      updateDropTarget(null);
+      return;
+    }
+    const groups = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(".project-list > .project-group"));
+    const candidates = groups.flatMap((group) => {
+      const project = projects.find((item) => item.id === group.dataset.projectId);
+      const row = group.querySelector<HTMLElement>(".project-row");
+      return project && row ? [{
+        element: row,
+        item: { kind: "project" as const, id: project.id, pinned: Boolean(project.pinned) },
+      }] : [];
+    });
+    nearestDropTarget(event.clientY, candidates);
+  };
+
+  const dropOnSidebar = (event: React.DragEvent<HTMLElement>) => {
+    const source = draggedItemRef.current;
+    const target = dropTargetRef.current;
+    if (!source) return;
+    event.preventDefault();
+    if (target) commitDrop(source, target, target.position);
     clearDrag();
   };
 
@@ -258,7 +356,7 @@ export default function Sidebar({
   }
 
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" onDragOver={dragOverSidebar} onDrop={dropOnSidebar}>
       <div className="sidebar-brand">
         <div className="brand-mark"><Sparkles size={16} /></div>
         <span>claude-cli-UI</span>
@@ -302,7 +400,7 @@ export default function Sidebar({
                     draggable
                     onDragEnd={clearDrag}
                     onDragStart={(event) => startDrag(event, projectDragItem)}
-                    title="拖动排序（置顶项目与普通项目分别排序）"
+                    title="拖动排序（拖到置顶区域可置顶，拖回普通区域可取消置顶）"
                     type="button"
                   >
                     <GripVertical size={13} />
@@ -323,10 +421,7 @@ export default function Sidebar({
                 ) : (
                   <button
                     className="project-toggle"
-                    onClick={() => {
-                      onSelectProject(project.id);
-                      toggleProject(project.id);
-                    }}
+                    onClick={() => toggleProject(project.id)}
                     title={project.workspace}
                   >
                     {closed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
@@ -400,7 +495,7 @@ export default function Sidebar({
                           draggable
                           onDragEnd={clearDrag}
                           onDragStart={(event) => startDrag(event, conversationDragItem)}
-                          title="拖动排序（仅限当前项目的同类置顶分组）"
+                          title="拖动排序（仅限当前项目，拖到置顶区域可置顶）"
                           type="button"
                         >
                           <GripVertical size={12} />

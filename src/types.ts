@@ -4,6 +4,7 @@ export type ReorderPosition = "before" | "after";
 export interface AppSettings {
   closeBehavior: "tray" | "quit";
   notifyOnCompletion: boolean;
+  ignoredUpdateVersion?: string;
 }
 
 export interface AppSelection {
@@ -49,6 +50,11 @@ export interface Attachment {
   mediaType: string;
   size: number;
   kind: "image" | "file";
+}
+
+export interface ComposerDraft {
+  prompt: string;
+  attachments: Attachment[];
 }
 
 export interface AttachmentUpload {
