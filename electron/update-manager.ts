@@ -35,6 +35,7 @@ export interface UpdateActionResult {
 interface PortableAsset {
   name: string;
   url: string;
+  fallbackUrl?: string;
   size: number;
   digest?: string;
 }
@@ -182,21 +183,44 @@ function portableAssetUrl(version: string, name: string) {
   return `${GITHUB_RELEASES_URL}/download/v${version}/${encodeURIComponent(name)}`;
 }
 
+function githubNormalizedAssetName(name: string) {
+  return name.replace(/[^a-z0-9._-]+/gi, ".");
+}
+
 function parsePortableManifest(value: unknown): PortableRelease {
   if (!value || typeof value !== "object") throw new Error("Portable 更新清单无效");
   const manifest = value as Record<string, unknown>;
   const version = typeof manifest.version === "string" ? clean(manifest.version) : null;
   const name = typeof manifest.fileName === "string" ? manifest.fileName : "";
+  const declaredAssetName = typeof manifest.assetName === "string" ? manifest.assetName : "";
   const size = typeof manifest.size === "number" && Number.isSafeInteger(manifest.size) && manifest.size > 0 ? manifest.size : 0;
   const digest = normalizeDigest(manifest.sha256);
   if (!version || !safeExecutableName(name) || !isPortableAssetName(name) || name !== `claude-cli-UI Portable ${version}.exe` || size <= 0 || !digest) {
     throw new Error("Portable 更新清单缺少有效的版本、文件大小或 SHA-256");
   }
+  const normalizedAssetName = githubNormalizedAssetName(name);
+  const expectedAssetNames = new Set([
+    name,
+    normalizedAssetName,
+    `claude-cli-UI-Portable-${version}.exe`,
+  ]);
+  const assetName = declaredAssetName || name;
+  if (!safeExecutableName(assetName) || !isPortableAssetName(assetName) || !expectedAssetNames.has(assetName)) {
+    throw new Error("Portable 更新清单包含无效的 GitHub 资产名");
+  }
   return {
     version,
     name: `claude-cli-UI v${version}`,
     url: `${GITHUB_RELEASES_URL}/tag/v${version}`,
-    asset: { name, url: portableAssetUrl(version, name), size, digest },
+    asset: {
+      name,
+      url: portableAssetUrl(version, assetName),
+      fallbackUrl: !declaredAssetName && normalizedAssetName !== name
+        ? portableAssetUrl(version, normalizedAssetName)
+        : undefined,
+      size,
+      digest,
+    },
   };
 }
 
@@ -526,9 +550,11 @@ export class UpdateManager {
       return this.stateWith({ phase: "ready", percent: 100, transferred: asset.size, total: asset.size });
     }
 
-    const response = await net.fetch(asset.url, {
-      headers: { "User-Agent": `claude-cli-UI/${app.getVersion()}` },
-    });
+    const requestHeaders = { "User-Agent": `claude-cli-UI/${app.getVersion()}` };
+    let response = await net.fetch(asset.url, { headers: requestHeaders });
+    if ((!response.ok || !response.body) && response.status === 404 && asset.fallbackUrl) {
+      response = await net.fetch(asset.fallbackUrl, { headers: requestHeaders });
+    }
     if (!response.ok || !response.body) throw new Error(`GitHub 下载返回 ${response.status}`);
 
     const total = Number(response.headers.get("content-length")) || asset.size;

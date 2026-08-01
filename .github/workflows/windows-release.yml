@@ -61,17 +61,21 @@ jobs:
         shell: pwsh
         run: |
           $packageVersion = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
-          $portableName = "claude-cli-UI Portable $packageVersion.exe"
-          $portablePath = Join-Path -Path release -ChildPath $portableName
+          $portableDisplayName = "claude-cli-UI Portable $packageVersion.exe"
+          $portablePath = Join-Path -Path release -ChildPath $portableDisplayName
           if (-not (Test-Path -LiteralPath $portablePath -PathType Leaf)) {
             throw "Portable package not found: $portablePath"
           }
-          $portableFile = Get-Item -LiteralPath $portablePath
+          $portableAssetName = "claude-cli-UI-Portable-$packageVersion.exe"
+          $portableAssetPath = Join-Path -Path release -ChildPath $portableAssetName
+          Move-Item -LiteralPath $portablePath -Destination $portableAssetPath
+          $portableFile = Get-Item -LiteralPath $portableAssetPath
           $manifest = [ordered]@{
             version = $packageVersion
-            fileName = $portableFile.Name
+            fileName = $portableDisplayName
+            assetName = $portableFile.Name
             size = $portableFile.Length
-            sha256 = (Get-FileHash -LiteralPath $portablePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            sha256 = (Get-FileHash -LiteralPath $portableAssetPath -Algorithm SHA256).Hash.ToLowerInvariant()
           }
           $manifest | ConvertTo-Json | Set-Content -LiteralPath release\portable-update.json -Encoding utf8
 

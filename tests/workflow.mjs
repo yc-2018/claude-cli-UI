@@ -6,6 +6,11 @@ import { basename, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const packageVersion = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")).version;
+const releaseWorkflow = await readFile(resolve(root, ".github", "workflows", "windows-release.yml"), "utf8");
+if (
+  !releaseWorkflow.includes('$portableAssetName = "claude-cli-UI-Portable-$packageVersion.exe"') ||
+  !releaseWorkflow.includes("assetName = $portableFile.Name")
+) throw new Error("release workflow did not publish a GitHub-safe Portable asset name");
 const workspaceDirectoryName = basename(root);
 const artifacts = resolve(root, "artifacts");
 const profile = resolve(artifacts, `workflow-profile-${Date.now()}`);
@@ -17,32 +22,54 @@ await mkdir(profile, { recursive: true });
 await mkdir(cliSessions, { recursive: true });
 const updateVersion = "9.9.9";
 const updateExecutableName = `claude-cli-UI Portable ${updateVersion}.exe`;
+const updateAssetName = `claude-cli-UI-Portable-${updateVersion}.exe`;
 const updateExecutable = Buffer.alloc(512 * 1024, 0x5a);
 updateExecutable.write("MZ claude-cli-UI portable update regression fixture\n", "utf8");
-const updateManifest = JSON.stringify({
+const updateManifest = {
   version: updateVersion,
   fileName: updateExecutableName,
+  assetName: updateAssetName,
   size: updateExecutable.byteLength,
   sha256: createHash("sha256").update(updateExecutable).digest("hex"),
-});
+};
+const legacyUpdateVersion = "9.9.10";
+const legacyUpdateExecutableName = `claude-cli-UI Portable ${legacyUpdateVersion}.exe`;
+const legacyUpdateAssetName = `claude-cli-UI.Portable.${legacyUpdateVersion}.exe`;
+const legacyUpdateExecutable = Buffer.alloc(384 * 1024, 0x6b);
+legacyUpdateExecutable.write("MZ legacy GitHub-normalized portable update fixture\n", "utf8");
+const legacyUpdateManifest = {
+  version: legacyUpdateVersion,
+  fileName: legacyUpdateExecutableName,
+  size: legacyUpdateExecutable.byteLength,
+  sha256: createHash("sha256").update(legacyUpdateExecutable).digest("hex"),
+};
+let useLegacyUpdateManifest = false;
+const updateAssetRequests = [];
 const updateServer = createServer((request, response) => {
   const requestPath = decodeURIComponent(new URL(request.url ?? "/", "http://127.0.0.1").pathname.slice(1));
   if (requestPath === "portable-update.json") {
-    response.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(updateManifest) });
-    response.end(updateManifest);
+    const manifest = JSON.stringify(useLegacyUpdateManifest ? legacyUpdateManifest : updateManifest);
+    response.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(manifest) });
+    response.end(manifest);
     return;
   }
-  if (requestPath === updateExecutableName) {
-    response.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": updateExecutable.byteLength });
+  updateAssetRequests.push(requestPath);
+  const executable = requestPath === updateAssetName
+    ? updateExecutable
+    : requestPath === legacyUpdateAssetName
+      ? legacyUpdateExecutable
+      : null;
+  if (executable) {
+    response.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": executable.byteLength });
     let offset = 0;
     const writeNextChunk = () => {
       if (response.destroyed) return;
-      if (offset >= updateExecutable.byteLength) {
+      if (offset >= executable.byteLength) {
         response.end();
         return;
       }
-      const nextOffset = Math.min(updateExecutable.byteLength, offset + 32 * 1024);
-      response.write(updateExecutable.subarray(offset, nextOffset));
+      const nextOffset = Math.min(executable.byteLength, offset + 32 * 1024);
+      response.write(executable.subarray(offset, nextOffset));
       offset = nextOffset;
       setTimeout(writeNextChunk, 25);
     };
@@ -200,7 +227,32 @@ try {
   }
   const downloadedUpdate = await readFile(resolve(profile, updateExecutableName));
   if (!downloadedUpdate.equals(updateExecutable)) throw new Error("Portable update bytes were not downloaded and verified correctly");
+  if (!updateAssetRequests.includes(updateAssetName) || updateAssetRequests.includes(updateExecutableName)) {
+    throw new Error(`Portable update did not use the manifest asset name: ${JSON.stringify(updateAssetRequests)}`);
+  }
   await page.locator(".update-install-button").click();
+  await page.waitForSelector(".update-dialog", { state: "detached" });
+
+  useLegacyUpdateManifest = true;
+  const legacyCheckState = await page.evaluate(() => window.claudeDesk.checkAppUpdate());
+  if (legacyCheckState.phase !== "available" || legacyCheckState.latestVersion !== legacyUpdateVersion) {
+    throw new Error(`legacy Portable manifest update check failed: ${JSON.stringify(legacyCheckState)}`);
+  }
+  await page.waitForSelector(".update-dialog");
+  if (!(await page.locator(".update-dialog").textContent())?.includes(`发现新版本 v${legacyUpdateVersion}`)) {
+    throw new Error("legacy Portable manifest update was not detected");
+  }
+  await page.locator(".update-download-button").click();
+  await page.waitForSelector(".update-progress-track");
+  await page.waitForSelector(".update-install-button");
+  const downloadedLegacyUpdate = await readFile(resolve(profile, legacyUpdateExecutableName));
+  if (!downloadedLegacyUpdate.equals(legacyUpdateExecutable)) {
+    throw new Error("GitHub-normalized legacy Portable asset was not downloaded and verified correctly");
+  }
+  if (!updateAssetRequests.includes(legacyUpdateExecutableName) || !updateAssetRequests.includes(legacyUpdateAssetName)) {
+    throw new Error(`legacy Portable download did not retry the GitHub-normalized asset name: ${JSON.stringify(updateAssetRequests)}`);
+  }
+  await page.locator(".update-later-button").click();
   await page.waitForSelector(".update-dialog", { state: "detached" });
   await page.keyboard.press("Escape");
 
@@ -1019,6 +1071,8 @@ try {
     legacyMigration: true,
     corruptDataRecovery: true,
     reorderingAndPinning: true,
+    portableAssetMapping: true,
+    legacyGithubAssetFallback: true,
   }, null, 2));
   if (errors.length > 0) process.exitCode = 1;
 } finally {
