@@ -362,8 +362,12 @@ try {
   await page.locator('.model-select .composer-select-option[data-value="fable"]').click();
 
   await page.locator('.project-action[title="重命名项目"]').evaluate((button) => button.click());
-  await page.locator('input[aria-label="项目名称"]').fill("我的 Claude 项目");
-  await page.locator('input[aria-label="项目名称"]').press("Enter");
+  const projectNameInput = page.locator('input[aria-label="项目名称"]');
+  await projectNameInput.waitFor({ state: "visible" });
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  if (!await projectNameInput.isVisible()) throw new Error("model picker stole focus from the project rename editor");
+  await projectNameInput.fill("我的 Claude 项目");
+  await projectNameInput.press("Enter");
   if (await page.locator(".project-name strong").textContent() !== "我的 Claude 项目") throw new Error("project custom name was not shown");
   if (await page.locator(".project-name small").textContent() !== workspaceDirectoryName) throw new Error("project real directory name was not shown");
 

@@ -48,7 +48,13 @@ const ComposerSelect = forwardRef<ComposerSelectHandle, ComposerSelectProps>(fun
 
   const closeMenu = (restoreFocus: boolean) => {
     setOpen(false);
-    if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
+    if (restoreFocus) {
+      requestAnimationFrame(() => {
+        const activeElement = document.activeElement;
+        if (activeElement !== document.body && !rootRef.current?.contains(activeElement)) return;
+        triggerRef.current?.focus();
+      });
+    }
   };
 
   const choose = (index: number) => {
