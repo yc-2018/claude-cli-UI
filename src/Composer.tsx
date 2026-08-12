@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CircleStop, FileText, Paperclip, Send, ShieldCheck, Sparkles, X } from "lucide-react";
+import { CircleStop, FileText, GripVertical, ListPlus, Paperclip, Pencil, Send, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
 import ComposerSelect, { type ComposerSelectHandle } from "./ComposerSelect";
-import type { Attachment, AttachmentUpload, ComposerDraft, Conversation, ModelConfig, PermissionMode } from "./types";
+import type { Attachment, AttachmentUpload, ComposerDraft, Conversation, ModelConfig, PermissionMode, QueuedPrompt, ReorderPosition } from "./types";
 
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES = 40 * 1024 * 1024;
@@ -26,11 +26,16 @@ interface Props {
   conversation: Conversation;
   modelConfig: ModelConfig;
   running: boolean;
+  queuedPrompts: QueuedPrompt[];
   loadingHistory?: boolean;
   focusRequest?: number;
   draft: ComposerDraft;
   onSend(prompt: string, attachments: Attachment[]): void;
+  onQueue(prompt: string, attachments: Attachment[]): void;
   onStop(): void;
+  onDeleteQueuedPrompt(promptId: string): void;
+  onEditQueuedPrompt(promptId: string): void;
+  onReorderQueuedPrompt(sourceId: string, targetId: string, position: ReorderPosition): void;
   onDraftChange(update: (current: ComposerDraft) => ComposerDraft): void;
   onModelChange(model: string): void;
   onLocalCommand(command: string): boolean;
@@ -41,11 +46,16 @@ export default function Composer({
   conversation,
   modelConfig,
   running,
+  queuedPrompts,
   loadingHistory = false,
   focusRequest = 0,
   draft,
   onSend,
+  onQueue,
   onStop,
+  onDeleteQueuedPrompt,
+  onEditQueuedPrompt,
+  onReorderQueuedPrompt,
   onDraftChange,
   onModelChange,
   onLocalCommand,
@@ -55,6 +65,8 @@ export default function Composer({
   const [stagingAttachments, setStagingAttachments] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [activeSuggestion, setActiveSuggestion] = useState(0);
+  const [draggedPromptId, setDraggedPromptId] = useState<string | null>(null);
+  const [promptDropTarget, setPromptDropTarget] = useState<{ id: string; position: ReorderPosition } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelSelectRef = useRef<ComposerSelectHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -83,10 +95,10 @@ export default function Composer({
   useEffect(() => setActiveSuggestion(0), [prompt]);
 
   useEffect(() => {
-    if (running || loadingHistory) return;
+    if (loadingHistory) return;
     const frame = requestAnimationFrame(() => textareaRef.current?.focus());
     return () => cancelAnimationFrame(frame);
-  }, [conversation.id, focusRequest, loadingHistory, running]);
+  }, [conversation.id, focusRequest, loadingHistory]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -125,7 +137,7 @@ export default function Composer({
   });
 
   const addFiles = async (files: File[]) => {
-    if (files.length === 0 || stagingAttachments || running || loadingHistory) return;
+    if (files.length === 0 || stagingAttachments || loadingHistory) return;
     setAttachmentError("");
     if (attachments.length + files.length > 10) {
       setAttachmentError("一次最多添加 10 个附件");
@@ -165,18 +177,26 @@ export default function Composer({
   };
 
   const submit = () => {
-    if ((!prompt.trim() && attachments.length === 0) || running || loadingHistory || stagingAttachments) return;
+    if ((!prompt.trim() && attachments.length === 0) || loadingHistory || stagingAttachments) return;
     const value = prompt.trim();
-    if (attachments.length === 0 && value === "/model") {
+    if (!running && attachments.length === 0 && value === "/model") {
       resetPrompt();
       openModelPicker();
       return;
     }
-    if (attachments.length === 0 && onLocalCommand(value)) {
+    if (!running && attachments.length === 0 && onLocalCommand(value)) {
       resetPrompt();
       return;
     }
     onSend(value, attachments);
+    setAttachments(() => []);
+    setAttachmentError("");
+    resetPrompt();
+  };
+
+  const queue = () => {
+    if ((!prompt.trim() && attachments.length === 0) || loadingHistory || stagingAttachments) return;
+    onQueue(prompt.trim(), attachments);
     setAttachments(() => []);
     setAttachmentError("");
     resetPrompt();
@@ -189,6 +209,62 @@ export default function Composer({
 
   return (
     <div className="composer-wrap">
+      {queuedPrompts.length > 0 ? (
+        <section className="prompt-queue" aria-label="待发送队列">
+          <div className="prompt-queue-heading">
+            <strong>待发送</strong>
+            <span>{queuedPrompts.length} 条</span>
+          </div>
+          <div className="prompt-queue-list">
+            {queuedPrompts.map((queuedPrompt, index) => {
+              const dropPosition = promptDropTarget?.id === queuedPrompt.id ? promptDropTarget.position : null;
+              return (
+                <div
+                  className={`prompt-queue-item ${draggedPromptId === queuedPrompt.id ? "dragging" : ""} ${dropPosition ? `drop-${dropPosition}` : ""}`}
+                  data-queue-id={queuedPrompt.id}
+                  draggable
+                  key={queuedPrompt.id}
+                  onDragEnd={() => {
+                    setDraggedPromptId(null);
+                    setPromptDropTarget(null);
+                  }}
+                  onDragOver={(event) => {
+                    if (!draggedPromptId || draggedPromptId === queuedPrompt.id) return;
+                    event.preventDefault();
+                    const bounds = event.currentTarget.getBoundingClientRect();
+                    setPromptDropTarget({
+                      id: queuedPrompt.id,
+                      position: event.clientY < bounds.top + bounds.height / 2 ? "before" : "after",
+                    });
+                  }}
+                  onDragStart={(event) => {
+                    setDraggedPromptId(queuedPrompt.id);
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", queuedPrompt.id);
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    if (draggedPromptId && dropPosition) onReorderQueuedPrompt(draggedPromptId, queuedPrompt.id, dropPosition);
+                    setDraggedPromptId(null);
+                    setPromptDropTarget(null);
+                  }}
+                >
+                  <span className="prompt-queue-handle" title="拖动排序"><GripVertical size={14} /></span>
+                  <span className="prompt-queue-index">{index + 1}</span>
+                  <span className="prompt-queue-content">
+                    <strong>{queuedPrompt.prompt || "查看附件"}</strong>
+                    {queuedPrompt.attachments.length > 0 ? <small>{queuedPrompt.attachments.length} 个附件</small> : null}
+                  </span>
+                  <span className="prompt-queue-actions">
+                    <button type="button" onClick={() => onEditQueuedPrompt(queuedPrompt.id)} title="移回输入框编辑" aria-label="移回输入框编辑"><Pencil size={13} /></button>
+                    <button type="button" onClick={() => onDeleteQueuedPrompt(queuedPrompt.id)} title="从队列删除" aria-label="从队列删除"><Trash2 size={13} /></button>
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
       <div
         className={`composer ${dragActive ? "drag-active" : ""}`}
         onDragEnter={(event) => {
@@ -290,9 +366,9 @@ export default function Composer({
               submit();
             }
           }}
-          placeholder={loadingHistory ? "正在载入历史记录…" : "给 Claude 分配任务…"}
+          placeholder={loadingHistory ? "正在载入历史记录…" : (running ? "继续输入，可直接追加或加入队列…" : "给 Claude 分配任务…")}
           rows={1}
-          disabled={running || loadingHistory}
+          disabled={loadingHistory}
         />
         {attachmentError ? <div className="attachment-error" role="alert">{attachmentError}</div> : null}
         <div className="composer-toolbar">
@@ -302,7 +378,7 @@ export default function Composer({
               type="button"
               title="添加图片或文件"
               onClick={() => fileInputRef.current?.click()}
-              disabled={running || loadingHistory || stagingAttachments}
+              disabled={loadingHistory || stagingAttachments}
             >
               {stagingAttachments ? <span className="mini-spinner" /> : <Paperclip size={15} />}
             </button>
@@ -336,9 +412,27 @@ export default function Composer({
               value={conversation.permissionMode}
             />
           </div>
-          {running
-            ? <button className="send-button stop" onClick={onStop} title="停止运行"><CircleStop size={17} /></button>
-            : <button className="send-button" onClick={submit} disabled={(!prompt.trim() && attachments.length === 0) || loadingHistory || stagingAttachments} title="发送"><Send size={17} /></button>}
+          <div className="composer-actions">
+            {running ? <button className="send-button stop" onClick={onStop} title="停止运行"><CircleStop size={17} /></button> : null}
+            {running ? (
+              <button
+                className="send-button queue-only"
+                onClick={queue}
+                disabled={(!prompt.trim() && attachments.length === 0) || loadingHistory || stagingAttachments}
+                title="加入待发送队列"
+              >
+                <ListPlus size={17} />
+              </button>
+            ) : null}
+            <button
+              className={`send-button ${running ? "queue-send" : ""}`}
+              onClick={submit}
+              disabled={(!prompt.trim() && attachments.length === 0) || loadingHistory || stagingAttachments}
+              title={running ? "直接追加发送" : "发送"}
+            >
+              <Send size={17} />
+            </button>
+          </div>
         </div>
       </div>
       <div className="composer-note">Claude 可能会犯错，请检查重要改动。</div>

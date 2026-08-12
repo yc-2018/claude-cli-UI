@@ -22,6 +22,7 @@ import type {
   ModelConfig,
   PermissionMode,
   Project,
+  QueuedPrompt,
   ReorderPosition,
   RunRequest,
   ToolPermissionRequest,
@@ -44,6 +45,11 @@ interface PendingPermission {
   responseId: string;
   sessionId?: string;
   requests: ToolPermissionRequest[];
+}
+
+function finishResponse(message: ChatMessage, now = Date.now()): Pick<ChatMessage, "responseDurationMs"> {
+  if (!message.responseStartedAt) return {};
+  return { responseDurationMs: Math.max(0, now - message.responseStartedAt) };
 }
 
 type PendingDeletion = {
@@ -336,6 +342,7 @@ export default function App() {
   const [branchingConversationId, setBranchingConversationId] = useState<string | null>(null);
   const [composerFocusRequest, setComposerFocusRequest] = useState(0);
   const [composerDrafts, setComposerDrafts] = useState<Record<string, ComposerDraft>>({});
+  const [promptQueues, setPromptQueues] = useState<Record<string, QueuedPrompt[]>>({});
   const [pendingDeletion, setPendingDeletion] = useState<PendingDeletion | null>(null);
   const [deletionBusy, setDeletionBusy] = useState(false);
   const [deletionError, setDeletionError] = useState("");
@@ -343,6 +350,7 @@ export default function App() {
   const activeConversationIdRef = useRef(activeConversationId);
   const appSettingsRef = useRef(appSettings);
   const runMeta = useRef(new Map<string, RunMeta>());
+  const processRunIds = useRef(new Map<string, string>());
   const scannedProjects = useRef(new Set<string>());
   const loadingHistories = useRef(new Set<string>());
   const sidebarResize = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
@@ -358,6 +366,7 @@ export default function App() {
     [activeProject, activeConversationId],
   );
   const activeRunId = activeConversationId ? activeRuns[activeConversationId] : undefined;
+  const activeResponseRunning = Boolean(activeConversation?.messages.some((message) => message.role === "assistant" && message.status === "running"));
   const pendingPermission = permissionQueue[0];
 
   useEffect(() => {
@@ -773,7 +782,20 @@ export default function App() {
 
   useEffect(() => window.claudeDesk.onEvent((event: ClaudeEvent) => {
     const meta = runMeta.current.get(event.runId);
-    if (!meta) return;
+    if (!meta) {
+      if (event.type === "exit") {
+        for (const [conversationId, processRunId] of processRunIds.current) {
+          if (processRunId !== event.runId) continue;
+          processRunIds.current.delete(conversationId);
+          setActiveRuns((current) => {
+            const next = { ...current };
+            delete next[conversationId];
+            return next;
+          });
+        }
+      }
+      return;
+    }
 
     if (event.type === "message" && event.data) {
       const data = event.data;
@@ -838,6 +860,7 @@ export default function App() {
           content: message.content || resultText,
           status: permissionRequests.length > 0 ? "stopped" : (isError ? "error" : "done"),
           error: isError ? resultText || "Claude 未能完成这次任务" : undefined,
+          ...finishResponse(message),
         }));
         if (permissionRequests.length > 0) {
           setPermissionQueue((current) => current.some((item) => item.responseId === meta.responseId)
@@ -849,6 +872,16 @@ export default function App() {
               requests: permissionRequests,
             }]);
         }
+        runMeta.current.delete(event.runId);
+        const hasPendingTurn = [...runMeta.current.values()].some((item) => item.conversationId === meta.conversationId && !item.completed);
+        if (!hasPendingTurn) {
+          setActiveRuns((current) => {
+            const next = { ...current };
+            delete next[meta.conversationId];
+            return next;
+          });
+        }
+        if (meta.successful) notifyConversationCompleted(meta.conversationId);
       }
     }
 
@@ -860,13 +893,13 @@ export default function App() {
       flushPendingText(meta);
       meta.completed = true;
       meta.successful = false;
-      updateResponse(meta, (message) => ({ ...message, status: "error", error: event.message ?? "无法启动 Claude CLI" }));
+      updateResponse(meta, (message) => ({ ...message, status: "error", error: event.message ?? "无法启动 Claude CLI", ...finishResponse(message) }));
     }
     if (event.type === "exit") {
       flushPendingText(meta);
       if (!meta.completed) {
         const detail = event.stderr || (event.code === 0 ? "Claude 已结束，但没有返回结果" : `Claude CLI 退出，代码 ${event.code ?? "未知"}`);
-        updateResponse(meta, (message) => ({ ...message, status: "error", error: detail }));
+        updateResponse(meta, (message) => ({ ...message, status: "error", error: detail, ...finishResponse(message) }));
       }
       setActiveRuns((current) => {
         const next = { ...current };
@@ -875,6 +908,7 @@ export default function App() {
       });
       if (meta.successful) notifyConversationCompleted(meta.conversationId);
       runMeta.current.delete(event.runId);
+      if (processRunIds.current.get(meta.conversationId) === event.runId) processRunIds.current.delete(meta.conversationId);
     }
   }), [flushPendingText, notifyConversationCompleted, updateConversation, updateResponse]);
 
@@ -991,6 +1025,12 @@ export default function App() {
           }
           : item));
         setPermissionQueue((current) => current.filter((item) => item.conversationId !== deletion.conversationId));
+        setPromptQueues((current) => {
+          if (!current[deletion.conversationId]) return current;
+          const next = { ...current };
+          delete next[deletion.conversationId];
+          return next;
+        });
         if (activeConversationId === deletion.conversationId) {
           setSelectedProjectId(deletion.projectId);
           setActiveConversationId(null);
@@ -1003,6 +1043,10 @@ export default function App() {
         }
         const remaining = projects.filter((item) => item.id !== deletion.projectId);
         setProjects(remaining);
+        const removedConversationIds = new Set(project.conversations.map((conversation) => conversation.id));
+        setPromptQueues((current) => Object.fromEntries(
+          Object.entries(current).filter(([conversationId]) => !removedConversationIds.has(conversationId)),
+        ));
         if (selectedProjectId === deletion.projectId) {
           const fallback = resolveSelection(remaining, null);
           setSelectedProjectId(fallback.projectId);
@@ -1032,7 +1076,7 @@ export default function App() {
 
   const renameConversation = async (conversationId: string, title: string) => {
     const trimmed = title.trim();
-    if (!trimmed || trimmed.length > 100 || activeRuns[conversationId]) return;
+    if (!trimmed || trimmed.length > 100 || [...runMeta.current.values()].some((meta) => meta.conversationId === conversationId && !meta.completed)) return;
     const project = projects.find((item) => item.conversations.some((conversation) => conversation.id === conversationId));
     const conversation = project?.conversations.find((item) => item.id === conversationId);
     if (!project || !conversation) return;
@@ -1080,7 +1124,7 @@ export default function App() {
     if (
       !activeProject ||
       !activeConversation?.sessionId ||
-      activeRunId ||
+      activeResponseRunning ||
       branchingConversation.current ||
       (activeConversation.source === "claude" && !activeConversation.historyLoaded)
     ) return;
@@ -1131,23 +1175,38 @@ export default function App() {
     }
   };
 
-  const sendPrompt = async (prompt: string, attachments: Attachment[]) => {
-    if (!activeProject || !activeConversation || activeRunId || (activeConversation.source === "claude" && !activeConversation.historyLoaded)) return;
+  const startPrompt = useCallback(async (conversationId: string, prompt: string, attachments: Attachment[]) => {
+    const project = projectsRef.current.find((item) => item.conversations.some((conversation) => conversation.id === conversationId));
+    const conversation = project?.conversations.find((item) => item.id === conversationId);
+    if (
+      !project ||
+      !conversation ||
+      [...runMeta.current.values()].some((meta) => meta.conversationId === conversationId) ||
+      (conversation.source === "claude" && !conversation.historyLoaded)
+    ) return false;
     const runId = makeId();
     const responseId = makeId();
     const now = Date.now();
     const userMessage: ChatMessage = { id: makeId(), role: "user", content: prompt, attachments, createdAt: now };
-    const response: ChatMessage = { id: responseId, role: "assistant", content: "", createdAt: now, status: "running", activities: [] };
-    const firstPrompt = activeConversation.messages.length === 0;
+    const response: ChatMessage = {
+      id: responseId,
+      role: "assistant",
+      content: "",
+      createdAt: now,
+      responseStartedAt: now,
+      status: "running",
+      activities: [],
+    };
+    const firstPrompt = conversation.messages.length === 0;
 
-    updateConversation(activeConversation.id, (conversation) => ({
-      ...conversation,
-      title: firstPrompt && conversation.title === "新对话" ? shorten(prompt || attachments[0]?.name || "附件", 28) : conversation.title,
+    updateConversation(conversationId, (current) => ({
+      ...current,
+      title: firstPrompt && current.title === "新对话" ? shorten(prompt || attachments[0]?.name || "附件", 28) : current.title,
       updatedAt: now,
-      messages: [...conversation.messages, userMessage, response],
+      messages: [...current.messages, userMessage, response],
     }));
     runMeta.current.set(runId, {
-      conversationId: activeConversation.id,
+      conversationId,
       responseId,
       completed: false,
       successful: false,
@@ -1156,39 +1215,187 @@ export default function App() {
       pendingText: "",
       pendingThinking: "",
     });
-    setActiveRuns((current) => ({ ...current, [activeConversation.id]: runId }));
+    setActiveRuns((current) => ({ ...current, [conversationId]: runId }));
+    processRunIds.current.set(conversationId, runId);
 
     const request: RunRequest = {
       runId,
       prompt,
-      cwd: activeProject.workspace,
-      sessionId: activeConversation.sessionId,
-      sessionName: activeConversation.sessionId
+      cwd: project.workspace,
+      sessionId: conversation.sessionId,
+      sessionName: conversation.sessionId
         ? undefined
-        : (activeConversation.title !== "新对话"
-          ? activeConversation.title.slice(0, 100)
-          : makeClaudeSessionName((activeConversation.messages.find((message) => message.role === "user")?.content ?? prompt) || attachments[0]?.name || "附件")),
-      model: getModelArgument(activeConversation, modelConfig),
-      allowedTools: activeConversation.allowedTools,
-      permissionMode: activeConversation.permissionMode,
+        : (conversation.title !== "新对话"
+          ? conversation.title.slice(0, 100)
+          : makeClaudeSessionName((conversation.messages.find((message) => message.role === "user")?.content ?? prompt) || attachments[0]?.name || "附件")),
+      model: getModelArgument(conversation, modelConfig),
+      allowedTools: conversation.allowedTools,
+      permissionMode: conversation.permissionMode,
       attachments,
     };
     try {
       await window.claudeDesk.startRun(request);
     } catch (error) {
       const meta = runMeta.current.get(runId);
-      if (meta) updateResponse(meta, (message) => ({ ...message, status: "error", error: error instanceof Error ? error.message : "启动失败" }));
+      if (meta) updateResponse(meta, (message) => ({ ...message, status: "error", error: error instanceof Error ? error.message : "启动失败", ...finishResponse(message) }));
       setActiveRuns((current) => {
         const next = { ...current };
-        delete next[activeConversation.id];
+        delete next[conversationId];
         return next;
       });
       runMeta.current.delete(runId);
+      processRunIds.current.delete(conversationId);
+      return false;
     }
+    return true;
+  }, [modelConfig, updateConversation, updateResponse]);
+
+  const appendPrompt = useCallback(async (conversationId: string, prompt: string, attachments: Attachment[]) => {
+    const runId = processRunIds.current.get(conversationId);
+    if (!runId) return false;
+    const turnRunId = makeId();
+    const responseId = makeId();
+    const now = Date.now();
+    updateConversation(conversationId, (conversation) => ({
+      ...conversation,
+      updatedAt: now,
+      messages: [
+        ...conversation.messages,
+        { id: makeId(), role: "user", content: prompt, attachments, createdAt: now },
+        { id: responseId, role: "assistant", content: "", createdAt: now, responseStartedAt: now, status: "running", activities: [] },
+      ],
+    }));
+    runMeta.current.set(turnRunId, {
+      conversationId,
+      responseId,
+      completed: false,
+      successful: false,
+      receivedText: false,
+      receivedThinking: false,
+      pendingText: "",
+      pendingThinking: "",
+    });
+    setActiveRuns((current) => ({ ...current, [conversationId]: runId }));
+    try {
+      const result = await window.claudeDesk.appendRun({ runId, turnRunId, prompt, attachments });
+      if (result.appended) return true;
+    } catch {
+      // The caller restores the message as a queued prompt below.
+    }
+    runMeta.current.delete(turnRunId);
+    updateConversation(conversationId, (conversation) => ({
+      ...conversation,
+      messages: conversation.messages.filter((message) => message.id !== responseId && message.createdAt !== now),
+    }));
+    return false;
+  }, [updateConversation]);
+
+  const sendPrompt = (prompt: string, attachments: Attachment[]) => {
+    if (!activeConversation || (activeConversation.source === "claude" && !activeConversation.historyLoaded)) return;
+    if (activeResponseRunning && processRunIds.current.has(activeConversation.id)) {
+      void appendPrompt(activeConversation.id, prompt, attachments).then((appended) => {
+        if (appended) return;
+        const queuedPrompt: QueuedPrompt = { id: makeId(), prompt, attachments };
+        setPromptQueues((current) => ({ ...current, [activeConversation.id]: [...(current[activeConversation.id] ?? []), queuedPrompt] }));
+      });
+      return;
+    }
+    const busy = [...runMeta.current.values()].some((meta) => meta.conversationId === activeConversation.id)
+      || permissionQueue.some((permission) => permission.conversationId === activeConversation.id);
+    if (!busy) {
+      void startPrompt(activeConversation.id, prompt, attachments);
+      return;
+    }
+    void appendPrompt(activeConversation.id, prompt, attachments).then((appended) => {
+      if (appended) return;
+      const queuedPrompt: QueuedPrompt = { id: makeId(), prompt, attachments };
+      setPromptQueues((current) => ({ ...current, [activeConversation.id]: [...(current[activeConversation.id] ?? []), queuedPrompt] }));
+    });
+  };
+
+  const queuePrompt = (prompt: string, attachments: Attachment[]) => {
+    if (!activeConversation) return;
+    const queuedPrompt: QueuedPrompt = { id: makeId(), prompt, attachments };
+    setPromptQueues((current) => ({ ...current, [activeConversation.id]: [...(current[activeConversation.id] ?? []), queuedPrompt] }));
+  };
+
+  useEffect(() => {
+    for (const [conversationId, queue] of Object.entries(promptQueues)) {
+      if (
+        queue.length === 0 ||
+        activeRuns[conversationId] ||
+        permissionQueue.some((permission) => permission.conversationId === conversationId) ||
+        [...runMeta.current.values()].some((meta) => meta.conversationId === conversationId)
+      ) continue;
+      const [nextPrompt, ...remaining] = queue;
+      setPromptQueues((current) => {
+        const latest = current[conversationId] ?? [];
+        if (latest[0]?.id !== nextPrompt.id) return current;
+        if (latest.length === 1) {
+          const next = { ...current };
+          delete next[conversationId];
+          return next;
+        }
+        return { ...current, [conversationId]: remaining };
+      });
+      void startPrompt(conversationId, nextPrompt.prompt, nextPrompt.attachments);
+    }
+  }, [activeRuns, permissionQueue, promptQueues, startPrompt]);
+
+  const reorderPromptQueue = (sourceId: string, targetId: string, position: ReorderPosition) => {
+    if (!activeConversation) return;
+    setPromptQueues((current) => ({
+      ...current,
+      [activeConversation.id]: reorderListItem(current[activeConversation.id] ?? [], sourceId, targetId, position),
+    }));
+  };
+
+  const deleteQueuedPrompt = (promptId: string) => {
+    if (!activeConversation) return;
+    const conversationId = activeConversation.id;
+    const removed = promptQueues[conversationId]?.find((prompt) => prompt.id === promptId);
+    setPromptQueues((current) => {
+      const remaining = (current[conversationId] ?? []).filter((prompt) => prompt.id !== promptId);
+      if (remaining.length === 0) {
+        const next = { ...current };
+        delete next[conversationId];
+        return next;
+      }
+      return { ...current, [conversationId]: remaining };
+    });
+    for (const attachment of removed?.attachments ?? []) void window.claudeDesk.deleteAttachment(attachment.storedName);
+  };
+
+  const editQueuedPrompt = (promptId: string) => {
+    if (!activeConversation) return;
+    const conversationId = activeConversation.id;
+    const queue = promptQueues[conversationId] ?? [];
+    const index = queue.findIndex((prompt) => prompt.id === promptId);
+    if (index < 0) return;
+    const queuedPrompt = queue[index];
+    const currentDraft = composerDrafts[conversationId] ?? EMPTY_COMPOSER_DRAFT;
+    const hasCurrentDraft = Boolean(currentDraft.prompt.trim() || currentDraft.attachments.length > 0);
+    const replacement = hasCurrentDraft ? { id: makeId(), ...currentDraft } : null;
+    const nextQueue = [...queue];
+    if (replacement) nextQueue[index] = replacement;
+    else nextQueue.splice(index, 1);
+    setPromptQueues((current) => {
+      if (nextQueue.length === 0) {
+        const next = { ...current };
+        delete next[conversationId];
+        return next;
+      }
+      return { ...current, [conversationId]: nextQueue };
+    });
+    setComposerDrafts((current) => ({
+      ...current,
+      [conversationId]: { prompt: queuedPrompt.prompt, attachments: queuedPrompt.attachments },
+    }));
+    setComposerFocusRequest((request) => request + 1);
   };
 
   const editAndResend = async (messageId: string, content: string) => {
-    if (!activeProject || !activeConversation || activeRunId || (activeConversation.source === "claude" && !activeConversation.historyLoaded)) return;
+    if (!activeProject || !activeConversation || activeResponseRunning || (activeConversation.source === "claude" && !activeConversation.historyLoaded)) return;
     const index = activeConversation.messages.findIndex((message) => message.id === messageId);
     if (index < 0) return;
     const target = activeConversation.messages[index];
@@ -1202,11 +1409,12 @@ export default function App() {
       updatedAt: Date.now(),
       messages: conversation.messages.slice(0, index),
     }));
-    await sendPrompt(content, attachments);
+    processRunIds.current.delete(activeConversation.id);
+    await startPrompt(activeConversation.id, content, attachments);
   };
 
   const resolvePermission = async (decision: "deny" | "once" | "conversation") => {
-    if (!pendingPermission || activeRuns[pendingPermission.conversationId]) return;
+    if (!pendingPermission || [...runMeta.current.values()].some((meta) => meta.conversationId === pendingPermission.conversationId && !meta.completed)) return;
     setPermissionQueue((current) => current.filter((item) => item.responseId !== pendingPermission.responseId));
 
     const names = [...new Set(pendingPermission.requests.map((request) => request.toolName))];
@@ -1249,7 +1457,16 @@ export default function App() {
       pendingText: "",
       pendingThinking: "",
     };
-    updateResponse(meta, (message) => ({ ...message, content: "", thinking: undefined, status: "running", error: undefined }));
+    const responseStartedAt = Date.now();
+    updateResponse(meta, (message) => ({
+      ...message,
+      content: "",
+      thinking: undefined,
+      responseStartedAt,
+      responseDurationMs: undefined,
+      status: "running",
+      error: undefined,
+    }));
     runMeta.current.set(runId, meta);
     setActiveRuns((current) => ({ ...current, [conversation.id]: runId }));
 
@@ -1280,22 +1497,24 @@ export default function App() {
   };
 
   const stopRun = async () => {
-    if (!activeConversation || !activeRunId) return;
-    const meta = runMeta.current.get(activeRunId);
+    if (!activeConversation) return;
+    const processRunId = processRunIds.current.get(activeConversation.id) ?? activeRunId;
+    if (!processRunId) return;
+    const meta = [...runMeta.current.values()].find((item) => item.conversationId === activeConversation.id && !item.completed);
     if (meta) {
       meta.completed = true;
-      updateResponse(meta, (message) => ({ ...message, status: "stopped" }));
+      updateResponse(meta, (message) => ({ ...message, status: "stopped", ...finishResponse(message) }));
     }
     try {
-      const stopped = await window.claudeDesk.stopRun(activeRunId);
+      const stopped = await window.claudeDesk.stopRun(processRunId);
       if (!stopped && meta) {
         meta.completed = false;
-        updateResponse(meta, (message) => ({ ...message, status: "running", error: "暂时无法停止 Claude CLI。" }));
+        updateResponse(meta, (message) => ({ ...message, status: "running", responseDurationMs: undefined, error: "暂时无法停止 Claude CLI。" }));
       }
     } catch (error) {
       if (meta) {
         meta.completed = false;
-        updateResponse(meta, (message) => ({ ...message, status: "running", error: error instanceof Error ? error.message : "停止失败" }));
+        updateResponse(meta, (message) => ({ ...message, status: "running", responseDurationMs: undefined, error: error instanceof Error ? error.message : "停止失败" }));
       }
     }
   };
@@ -1442,20 +1661,25 @@ export default function App() {
               messages={activeConversation.messages}
               loadingHistory={activeConversation.source === "claude" && !activeConversation.historyLoaded}
               onBranch={activeConversation.sessionId ? branchConversation : undefined}
-              branchDisabled={Boolean(activeRunId) || branchingConversationId === activeConversation.id}
+              branchDisabled={activeResponseRunning || branchingConversationId === activeConversation.id}
               onEditResend={editAndResend}
-              editDisabled={Boolean(activeRunId)}
+              editDisabled={activeResponseRunning}
             />
             <Composer
               key={`composer-${activeConversation.id}`}
               conversation={activeConversation}
               draft={composerDrafts[activeConversation.id] ?? EMPTY_COMPOSER_DRAFT}
               modelConfig={modelConfig}
-              running={Boolean(activeRunId)}
+              running={activeResponseRunning}
+              queuedPrompts={promptQueues[activeConversation.id] ?? []}
               loadingHistory={activeConversation.source === "claude" && !activeConversation.historyLoaded}
               focusRequest={composerFocusRequest}
               onSend={sendPrompt}
+              onQueue={queuePrompt}
               onStop={stopRun}
+              onDeleteQueuedPrompt={deleteQueuedPrompt}
+              onEditQueuedPrompt={editQueuedPrompt}
+              onReorderQueuedPrompt={reorderPromptQueue}
               onDraftChange={(update) => {
                 setComposerDrafts((current) => {
                   const nextDraft = update(current[activeConversation.id] ?? EMPTY_COMPOSER_DRAFT);
@@ -1498,7 +1722,7 @@ export default function App() {
       {pendingPermission ? (
         <PermissionDialog
           requests={pendingPermission.requests}
-          waitingForCli={Boolean(activeRuns[pendingPermission.conversationId])}
+          waitingForCli={[...runMeta.current.values()].some((meta) => meta.conversationId === pendingPermission.conversationId && !meta.completed)}
           onDeny={() => { void resolvePermission("deny"); }}
           onAllowOnce={() => { void resolvePermission("once"); }}
           onAllowConversation={() => { void resolvePermission("conversation"); }}

@@ -691,6 +691,7 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .thinking-block { margin: 0 0 13px; border-left: 2px solid #d7d7d0; }
 .thinking-toggle { display: flex; height: 28px; align-items: center; gap: 7px; padding: 0 8px; border: 0; background: transparent; color: #74746d; font-size: 11.5px; font-weight: 570; cursor: pointer; }
 .thinking-toggle:hover { color: #454540; }
+.response-duration { height: 20px; margin: 0 0 5px 8px; color: #96968e; font-size: 11.5px; font-variant-numeric: tabular-nums; line-height: 20px; }
 .thinking-chevron { transition: transform 140ms ease; }
 .thinking-block.open .thinking-chevron { transform: rotate(90deg); }
 .thinking-content.markdown { max-height: 280px; margin: 2px 8px 4px; padding: 5px 9px 7px; overflow: auto; color: #6e6e67; font-size: 12px; line-height: 1.6; }
@@ -820,6 +821,47 @@ button, select, textarea { -webkit-app-region: no-drag; }
   pointer-events: none;
 }
 
+.prompt-queue {
+  width: min(100%, 820px);
+  margin: 0 auto 8px;
+  padding: 7px;
+  border: 1px solid #d9d9d2;
+  border-radius: 8px;
+  background: #f7f7f4;
+  box-shadow: 0 3px 12px rgb(32 32 28 / 5%);
+  pointer-events: auto;
+}
+
+.prompt-queue-heading { display: flex; align-items: center; justify-content: space-between; padding: 1px 5px 6px; color: #777770; font-size: 10.5px; }
+.prompt-queue-heading strong { color: #555550; font-weight: 600; }
+.prompt-queue-list { display: grid; max-height: 164px; gap: 4px; overflow-y: auto; }
+.prompt-queue-item {
+  position: relative;
+  display: grid;
+  min-height: 36px;
+  grid-template-columns: 18px 19px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 5px 4px 2px;
+  border: 1px solid #deded7;
+  border-radius: 6px;
+  background: #fff;
+}
+.prompt-queue-item::before, .prompt-queue-item::after { position: absolute; right: 4px; left: 4px; height: 2px; border-radius: 1px; background: var(--accent); content: ""; opacity: 0; }
+.prompt-queue-item::before { top: -4px; }
+.prompt-queue-item::after { bottom: -4px; }
+.prompt-queue-item.drop-before::before, .prompt-queue-item.drop-after::after { opacity: 1; }
+.prompt-queue-item.dragging { opacity: .45; }
+.prompt-queue-handle { display: grid; height: 28px; place-items: center; color: #aaa9a1; cursor: grab; }
+.prompt-queue-handle:active { cursor: grabbing; }
+.prompt-queue-index { display: grid; width: 18px; height: 18px; place-items: center; border-radius: 50%; background: #efefeb; color: #777770; font-size: 10px; }
+.prompt-queue-content { display: flex; min-width: 0; align-items: baseline; gap: 7px; }
+.prompt-queue-content strong { overflow: hidden; color: #41413d; font-size: 11.5px; font-weight: 530; text-overflow: ellipsis; white-space: nowrap; }
+.prompt-queue-content small { flex: 0 0 auto; color: #92928b; font-size: 10px; }
+.prompt-queue-actions { display: flex; align-items: center; gap: 1px; }
+.prompt-queue-actions button { display: grid; width: 25px; height: 25px; place-items: center; padding: 0; border: 0; border-radius: 5px; background: transparent; color: #85857e; cursor: pointer; }
+.prompt-queue-actions button:hover { background: #eeeeea; color: #4d4d48; }
+
 .composer {
   position: relative;
   width: min(100%, 820px);
@@ -886,6 +928,7 @@ button, select, textarea { -webkit-app-region: no-drag; }
 
 .composer-toolbar { display: flex; min-height: 43px; align-items: center; justify-content: space-between; padding: 5px 7px 7px 10px; }
 .composer-options { display: flex; min-width: 0; align-items: center; gap: 2px; }
+.composer-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; }
 
 .attach-button { display: grid; width: 28px; height: 28px; flex: 0 0 auto; place-items: center; padding: 0; border: 0; border-radius: 5px; background: transparent; color: #71716a; cursor: pointer; }
 .attach-button:hover { background: #f1f1ee; color: #4d4d48; }
@@ -1009,6 +1052,12 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .send-button:disabled { background: #d8d8d3; color: #fafaf8; cursor: default; }
 .send-button.stop { background: #eee1de; color: var(--accent-dark); }
 .send-button.stop:hover { background: #ead6d1; }
+.send-button.queue-send { background: #353531; color: #fff; }
+.send-button.queue-send:hover { background: #22221f; }
+.send-button.queue-send:disabled { background: #d8d8d3; color: #fafaf8; }
+.send-button.queue-only { border: 1px solid #d8d8d2; background: #f2f2ee; color: #66665f; }
+.send-button.queue-only:hover { background: #e8e8e3; color: #44443f; }
+.send-button.queue-only:disabled { border-color: #e4e4df; background: #f4f4f1; color: #bab9b2; }
 
 .composer-note { width: min(100%, 820px); margin: 7px auto 0; color: #a1a19a; font-size: 10.5px; text-align: center; pointer-events: auto; }
 

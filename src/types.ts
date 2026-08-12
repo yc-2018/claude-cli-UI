@@ -57,6 +57,10 @@ export interface ComposerDraft {
   attachments: Attachment[];
 }
 
+export interface QueuedPrompt extends ComposerDraft {
+  id: string;
+}
+
 export interface AttachmentUpload {
   name: string;
   mediaType: string;
@@ -68,6 +72,8 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   thinking?: string;
+  responseStartedAt?: number;
+  responseDurationMs?: number;
   createdAt: number;
   status?: "running" | "done" | "error" | "stopped";
   activities?: Activity[];
@@ -147,6 +153,14 @@ export interface RunRequest {
   permissionMode: PermissionMode;
   attachments?: Attachment[];
 }
+
+export interface AppendRunRequest {
+  runId: string;
+  turnRunId: string;
+  prompt: string;
+  attachments?: Attachment[];
+}
+
 
 export interface ToolPermissionRequest {
   toolName: string;

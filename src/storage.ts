@@ -29,6 +29,7 @@ function pinnedFirst<T extends { pinned?: boolean }>(items: T[]) {
 function normalizeMessage(value: unknown): ChatMessage | null {
   if (!value || typeof value !== "object") return null;
   const message = value as Partial<ChatMessage>;
+  const legacyMessage = value as Record<string, unknown>;
   if (typeof message.id !== "string" || (message.role !== "user" && message.role !== "assistant")) return null;
   const validStatuses = new Set(["running", "done", "error", "stopped"]);
   const status = message.status && validStatuses.has(message.status) ? message.status : undefined;
@@ -56,6 +57,16 @@ function normalizeMessage(value: unknown): ChatMessage | null {
     role: message.role,
     content: typeof message.content === "string" ? message.content : "",
     thinking: typeof message.thinking === "string" ? message.thinking : undefined,
+    responseStartedAt: typeof message.responseStartedAt === "number" && Number.isFinite(message.responseStartedAt)
+      ? message.responseStartedAt
+      : (typeof legacyMessage.thinkingStartedAt === "number" && Number.isFinite(legacyMessage.thinkingStartedAt)
+        ? legacyMessage.thinkingStartedAt
+        : undefined),
+    responseDurationMs: typeof message.responseDurationMs === "number" && Number.isFinite(message.responseDurationMs) && message.responseDurationMs >= 0
+      ? message.responseDurationMs
+      : (typeof legacyMessage.thinkingDurationMs === "number" && Number.isFinite(legacyMessage.thinkingDurationMs) && legacyMessage.thinkingDurationMs >= 0
+        ? legacyMessage.thinkingDurationMs
+        : undefined),
     createdAt: typeof message.createdAt === "number" ? message.createdAt : Date.now(),
     status: wasInterrupted ? "stopped" : status,
     activities,

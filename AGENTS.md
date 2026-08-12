@@ -23,9 +23,12 @@ npm run dev
 npm run typecheck
 npm test
 npm run dist
+npm run dist:portable
 ```
 
 `npm test` 是合并前必须执行的检查。它会运行类型检查、构建 Electron main process 和 renderer process、执行 workflow 测试，并执行 visual smoke 测试。
+
+每次完成代码修改后，除非用户明确说明“先不打包”或同等含义，否则必须在验证完成后打包一个可供测试的新版本。默认只运行 `npm run dist:portable` 生成 Windows 便携版，不需要同时生成安装版。
 
 ## 架构规则
 
@@ -55,4 +58,4 @@ npm run dist
 
 ## 发布
 
-GitHub Actions workflow 会在 push 和 pull request 时运行完整测试，只有推送 `v*` tag 时才构建 Windows 产物并发布 GitHub Release。**每次打包都必须使用新版本号**：先升级 `package.json` 和 `package-lock.json` 中的版本（至少 patch），再构建产物；禁止用相同版本号重复打包、覆盖 `release/` 中已存在的同名产物。发布新版本时，先更新 `package.json` 和 `package-lock.json` 中的版本号并提交，然后推送匹配的 tag，例如 `v0.2.0`。tag 必须与 package version 完全一致。
+GitHub Actions workflow 会在 push 和 pull request 时运行完整测试，只有推送 `v*` tag 时才构建 Windows 产物并发布 GitHub Release。**每次打包都必须使用新版本号**：先升级 `package.json` 和 `package-lock.json` 中的版本（至少 patch），再构建产物；禁止用相同版本号重复打包、覆盖 `release/` 中已存在的同名产物。日常测试默认只构建便携版；只有用户明确要求时才构建安装版。发布新版本时，先更新 `package.json` 和 `package-lock.json` 中的版本号并提交，然后推送匹配的 tag，例如 `v0.2.0`。tag 必须与 package version 完全一致。

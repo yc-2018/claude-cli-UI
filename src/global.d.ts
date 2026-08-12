@@ -1,4 +1,4 @@
-import type { AppSelection, AppSettings, AppUpdateState, Attachment, AttachmentUpload, BranchClaudeSessionResult, ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ModelConfig, Project, RunRequest, UpdateActionResult } from "./types";
+import type { AppendRunRequest, AppSelection, AppSettings, AppUpdateState, Attachment, AttachmentUpload, BranchClaudeSessionResult, ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ModelConfig, Project, RunRequest, UpdateActionResult } from "./types";
 
 declare module "*.css";
 
@@ -35,6 +35,7 @@ declare global {
       notifyCompletion(conversationId: string, title: string): Promise<boolean>;
       reportError(message: string): void;
       startRun(request: RunRequest): Promise<{ started: boolean }>;
+      appendRun(request: AppendRunRequest): Promise<{ appended: boolean }>;
       stopRun(runId: string): Promise<boolean>;
       onEvent(callback: (event: ClaudeEvent) => void): () => void;
       onNavigateToConversation(callback: (conversationId: string) => void): () => void;

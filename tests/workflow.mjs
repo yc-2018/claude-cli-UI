@@ -592,6 +592,10 @@ try {
     container.dispatchEvent(new Event("scroll"));
   });
   await page.waitForFunction(() => (document.querySelector('.message.assistant[data-status="running"] .thinking-content')?.textContent?.length ?? 0) > 360);
+  await page.waitForFunction(() => Number(document.querySelector('.message.assistant[data-status="running"] .response-duration')?.getAttribute("data-elapsed-seconds")) >= 1);
+  if (!(await page.locator('.message.assistant[data-status="running"] .response-duration').textContent())?.includes("正在回答")) {
+    throw new Error("running response did not show an elapsed duration");
+  }
   const heldScrollTop = await page.locator(".conversation-scroll").evaluate((container) => container.scrollTop);
   if (heldScrollTop > 2) throw new Error(`streaming output stole the user's scroll position: ${heldScrollTop}px`);
   await page.locator(".conversation-scroll").evaluate((container) => {
@@ -599,6 +603,12 @@ try {
     container.dispatchEvent(new Event("scroll"));
   });
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  if (Number(await page.locator('.message.assistant:last-of-type .response-duration').getAttribute("data-elapsed-seconds")) < 1) {
+    throw new Error("completed response did not retain its elapsed duration");
+  }
+  if (!(await page.locator('.message.assistant:last-of-type .response-duration').textContent())?.includes("本次回答耗时")) {
+    throw new Error("completed response duration was not labeled clearly");
+  }
   const resumedBottomDistance = await page.locator(".conversation-scroll").evaluate((container) => container.scrollHeight - container.clientHeight - container.scrollTop);
   if (resumedBottomDistance > 2) throw new Error(`bottom-follow did not resume: ${resumedBottomDistance}px`);
 
@@ -782,8 +792,52 @@ try {
   await page.locator(".composer textarea").fill("慢任务");
   await page.locator(".composer textarea").press("Enter");
   await page.waitForSelector('.message.assistant[data-status="running"]');
+  if (await page.locator(".composer textarea").isDisabled()) throw new Error("composer was disabled while Claude was replying");
+  await page.locator(".composer textarea").fill("直接追加发送");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((element) => element.textContent === "直接追加发送"));
+  if (await page.locator(".prompt-queue-item", { hasText: "直接追加发送" }).count()) {
+    throw new Error("direct append was incorrectly placed in the local queue");
+  }
+  for (const prompt of ["队列第一条", "队列第二条", "队列第三条"]) {
+    await page.locator(".composer textarea").fill(prompt);
+    await page.locator(".send-button.queue-only").click();
+  }
+  await page.waitForFunction(() => document.querySelectorAll(".prompt-queue-item").length === 3);
+  if ((await page.locator(".prompt-queue-content strong").allTextContents()).join(",") !== "队列第一条,队列第二条,队列第三条") {
+    throw new Error("multiple prompts did not retain their queue order");
+  }
+  const queuedThird = page.locator(".prompt-queue-item", { hasText: "队列第三条" });
+  const queuedFirst = page.locator(".prompt-queue-item", { hasText: "队列第一条" });
+  await queuedThird.dragTo(queuedFirst, { targetPosition: { x: 80, y: 2 } });
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll(".prompt-queue-content strong")].map((element) => element.textContent).join(",") ===
+    "队列第三条,队列第一条,队列第二条"
+  ));
+  await page.locator(".prompt-queue-item", { hasText: "队列第一条" }).locator('[aria-label="从队列删除"]').click();
+  await page.waitForFunction(() => document.querySelectorAll(".prompt-queue-item").length === 2);
+  await page.locator(".prompt-queue-item", { hasText: "队列第二条" }).locator('[aria-label="移回输入框编辑"]').click();
+  if (await page.locator(".composer textarea").inputValue() !== "队列第二条") throw new Error("queued prompt did not return to the composer for editing");
+  if ((await page.locator(".prompt-queue-content strong").allTextContents()).join(",") !== "队列第三条") {
+    throw new Error("editing a queued prompt did not remove it from the queue");
+  }
+  await page.locator(".composer textarea").fill("队列第二条已编辑");
+  await page.locator(".send-button.queue-only").click();
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll(".prompt-queue-content strong")].map((element) => element.textContent).join(",") ===
+    "队列第三条,队列第二条已编辑"
+  ));
   await page.locator(".send-button.stop").click();
   await page.waitForSelector('.message.assistant[data-status="stopped"]');
+  await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((element) => element.textContent === "队列第三条"));
+  await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((element) => element.textContent === "队列第二条已编辑"));
+  await page.waitForFunction(() => document.querySelectorAll(".prompt-queue-item").length === 0);
+  const queuedUserMessages = await page.locator(".user-bubble").allTextContents();
+  const thirdIndex = queuedUserMessages.indexOf("队列第三条");
+  const editedSecondIndex = queuedUserMessages.indexOf("队列第二条已编辑");
+  if (thirdIndex < 0 || editedSecondIndex !== thirdIndex + 1 || queuedUserMessages.includes("队列第一条")) {
+    throw new Error(`queued prompts did not execute in the edited order: ${queuedUserMessages.join(" | ")}`);
+  }
   await page.locator(".task-select", { hasText: "来自终端的历史对话" }).click();
   await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "来自终端的历史对话");
   await page.waitForTimeout(500);

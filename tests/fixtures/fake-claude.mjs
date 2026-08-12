@@ -9,9 +9,7 @@ if (args.includes("--version")) {
 }
 
 process.stdin.setEncoding("utf8");
-let input = "";
-process.stdin.on("data", (chunk) => { input += chunk; });
-process.stdin.on("end", () => {
+const processPrompt = (input) => {
   const usesStreamInput = args.includes("--input-format") && args[args.indexOf("--input-format") + 1] === "stream-json";
   let streamContent = [];
   let prompt = input;
@@ -103,10 +101,13 @@ process.stdin.on("end", () => {
   }
   if (prompt.includes("模拟失败")) {
     process.stderr.write("模拟 CLI 错误");
-    process.exitCode = 2;
+    setImmediate(() => process.exit(2));
     return;
   }
-  if (prompt.includes("空响应")) return;
+  if (prompt.includes("空响应")) {
+    setImmediate(() => process.exit(0));
+    return;
+  }
   if (prompt.includes("后台提醒测试") || prompt.includes("后台托盘测试")) {
     const response = prompt.includes("后台提醒测试") ? "后台会话提醒测试完成。" : "托盘后台运行测试完成。";
     send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
@@ -118,7 +119,6 @@ process.stdin.on("end", () => {
   }
   if (prompt.includes("慢任务")) {
     send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
-    setTimeout(() => undefined, 10_000);
     return;
   }
 
@@ -217,4 +217,17 @@ process.stdin.on("end", () => {
     })}\n`, "utf8");
   }
   send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
+};
+
+let lineBuffer = "";
+process.stdin.on("data", (chunk) => {
+  lineBuffer += chunk;
+  const lines = lineBuffer.split(/\r?\n/);
+  lineBuffer = lines.pop() ?? "";
+  for (const line of lines) {
+    if (line.trim()) processPrompt(line);
+  }
+});
+process.stdin.on("end", () => {
+  if (lineBuffer.trim()) processPrompt(lineBuffer);
 });

@@ -76,6 +76,9 @@ await page.evaluate((workspace) => {
           content: "问题出在会话初始化顺序：页面在令牌恢复完成前就触发了未登录跳转。\n\n我调整了初始化状态，并补充了回归测试：\n\n```ts\nif (session.status === 'loading') return;\n```\n\n现在刷新页面会等待会话恢复后再判断路由。",
           createdAt: now - 1000,
           status: "done",
+          thinking: "先检查会话恢复状态，再验证令牌刷新顺序。",
+          responseStartedAt: now - 9000,
+          responseDurationMs: 8000,
           activities: [
             { id: "t1", name: "Grep", summary: "session status" },
             { id: "t2", name: "Read", summary: "src/auth/session.ts" },
@@ -105,6 +108,7 @@ if (await page.locator('[aria-label="已置顶项目"]').count() !== 1 || await 
   throw new Error("pinned project/conversation indicators were not rendered");
 }
 await page.screenshot({ path: resolve(artifacts, "conversation.png") });
+if (!(await page.locator(".response-duration").textContent())?.includes("本次回答耗时 · 8 秒")) throw new Error("completed response duration was not rendered");
 if (await page.locator(".composer-options select").count()) throw new Error("composer rendered native select controls");
 
 await page.locator(".model-select .composer-select-trigger").click();
@@ -324,7 +328,33 @@ if (compactUpdateDialogLayout.left < 0 || compactUpdateDialogLayout.top < 0 || c
 await page.screenshot({ path: resolve(artifacts, "update-dialog-compact.png") });
 await page.locator(".update-later-button").click();
 
-console.log(JSON.stringify({ errors, modelMenuLayout, permissionMenuLayout, compactModelMenuLayout, deleteDialogLayout, compactDeleteDialogLayout, updateDialogLayout, compactUpdateDialogLayout, settingsLayout, layout, compactLayout }, null, 2));
+await page.locator(".composer textarea").fill("慢任务");
+await page.locator(".composer textarea").press("Enter");
+await page.waitForSelector('.message.assistant[data-status="running"]');
+for (const prompt of ["紧凑队列第一条", "紧凑队列第二条", "紧凑队列第三条"]) {
+  await page.locator(".composer textarea").fill(prompt);
+  await page.locator(".send-button.queue-only").click();
+}
+await page.waitForFunction(() => document.querySelectorAll(".prompt-queue-item").length === 3);
+const compactQueueLayout = await page.evaluate(() => ({
+  body: { width: document.body.scrollWidth, height: document.body.scrollHeight },
+  viewport: { width: window.innerWidth, height: window.innerHeight },
+  queue: document.querySelector(".prompt-queue")?.getBoundingClientRect().toJSON(),
+  composer: document.querySelector(".composer")?.getBoundingClientRect().toJSON(),
+}));
+if (
+  compactQueueLayout.body.width !== compactQueueLayout.viewport.width ||
+  compactQueueLayout.body.height !== compactQueueLayout.viewport.height ||
+  !compactQueueLayout.queue ||
+  !compactQueueLayout.composer ||
+  compactQueueLayout.queue.left < 0 ||
+  compactQueueLayout.queue.right > compactQueueLayout.viewport.width ||
+  compactQueueLayout.composer.bottom > compactQueueLayout.viewport.height
+) throw new Error(`compact prompt queue overflow: ${JSON.stringify(compactQueueLayout)}`);
+await page.screenshot({ path: resolve(artifacts, "prompt-queue-compact.png") });
+await page.locator(".send-button.stop").click();
+
+console.log(JSON.stringify({ errors, modelMenuLayout, permissionMenuLayout, compactModelMenuLayout, deleteDialogLayout, compactDeleteDialogLayout, updateDialogLayout, compactUpdateDialogLayout, settingsLayout, layout, compactLayout, compactQueueLayout }, null, 2));
 await electronApp.close();
 
 if (errors.length > 0) process.exitCode = 1;

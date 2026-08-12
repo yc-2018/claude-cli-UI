@@ -52,6 +52,33 @@ function ActivityList({ activities, running }: { activities: Activity[]; running
   );
 }
 
+function formatElapsed(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return minutes > 0 ? `${minutes} 分 ${remainingSeconds.toString().padStart(2, "0")} 秒` : `${remainingSeconds} 秒`;
+}
+
+function ResponseDuration({ running, startedAt, durationMs }: { running: boolean; startedAt?: number; durationMs?: number }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!running) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [running, startedAt]);
+
+  const elapsedMs = durationMs ?? (running && startedAt ? Math.max(0, now - startedAt) : undefined);
+  const elapsedSeconds = elapsedMs === undefined ? undefined : Math.floor(elapsedMs / 1000);
+  if (elapsedSeconds === undefined) return null;
+
+  return (
+    <div className="response-duration" data-elapsed-seconds={elapsedSeconds}>
+      {running ? "正在回答" : "本次回答耗时"} · {formatElapsed(elapsedSeconds)}
+    </div>
+  );
+}
+
 function ThinkingBlock({ content, running }: { content: string; running: boolean }) {
   const [open, setOpen] = useState(running);
 
@@ -289,11 +316,21 @@ export default function ConversationView({ messages, loadingHistory = false, bra
                   <UserMessage canEdit={canEdit} message={message} onEditResend={onEditResend} />
                 ) : (
                   <>
-                    {message.thinking ? <ThinkingBlock content={message.thinking} running={message.status === "running"} /> : null}
+                    <ResponseDuration
+                      durationMs={message.responseDurationMs}
+                      running={message.status === "running"}
+                      startedAt={message.responseStartedAt}
+                    />
+                    {message.thinking ? (
+                      <ThinkingBlock
+                        content={message.thinking}
+                        running={message.status === "running"}
+                      />
+                    ) : null}
                     <ActivityList activities={message.activities ?? []} running={message.status === "running"} />
                     {message.content ? <div className="markdown"><MarkdownMessage content={message.content} /></div> : null}
                     {message.status === "running" && !message.content && !message.thinking && (message.activities?.length ?? 0) === 0
-                      ? <div className="thinking"><span className="spinner" />Claude 正在思考</div>
+                      ? <div className="thinking"><span className="spinner" />Claude 正在准备回答</div>
                       : null}
                     {message.error ? <div className="message-error">{message.error}</div> : null}
                     {hasActions ? (

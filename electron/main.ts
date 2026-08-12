@@ -34,6 +34,13 @@ interface RunRequest {
   attachments?: Attachment[];
 }
 
+interface AppendRunRequest {
+  runId: string;
+  turnRunId: string;
+  prompt: string;
+  attachments?: Attachment[];
+}
+
 interface Attachment {
   id: string;
   storedName: string;
@@ -83,7 +90,14 @@ interface ClaudeSessionSummary {
   messages?: ImportedMessage[];
 }
 
-const activeRuns = new Map<string, ChildProcessWithoutNullStreams>();
+interface ActiveRun {
+  child: ChildProcessWithoutNullStreams;
+  currentTurnRunId: string;
+  pendingTurnRunIds: string[];
+  unfinishedTurnRunIds: Set<string>;
+}
+
+const activeRuns = new Map<string, ActiveRun>();
 const activeNotifications = new Set<Notification>();
 const DEFAULT_APP_SETTINGS: AppSettings = { closeBehavior: "tray", notifyOnCompletion: true };
 let appSettings: AppSettings = DEFAULT_APP_SETTINGS;
@@ -205,7 +219,7 @@ function ensureTray() {
 
 function quitApplication() {
   isQuitting = true;
-  for (const child of activeRuns.values()) child.kill();
+  for (const { child } of activeRuns.values()) child.kill();
   app.quit();
 }
 
@@ -334,6 +348,20 @@ function isValidRunRequest(value: unknown): value is RunRequest {
     hasValidModel &&
     hasValidAllowedTools &&
     hasValidAttachments
+  );
+}
+
+function isValidAppendRunRequest(value: unknown): value is AppendRunRequest {
+  if (!value || typeof value !== "object") return false;
+  const request = value as Partial<AppendRunRequest>;
+  return (
+    typeof request.runId === "string" && request.runId.length > 0 &&
+    typeof request.turnRunId === "string" && request.turnRunId.length > 0 &&
+    request.runId !== request.turnRunId &&
+    typeof request.prompt === "string" && (request.prompt.trim().length > 0 || Boolean(request.attachments?.length)) &&
+    (request.attachments === undefined || (
+      Array.isArray(request.attachments) && request.attachments.length <= 10 && request.attachments.every(isAttachment)
+    ))
   );
 }
 
@@ -1227,16 +1255,18 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     "--verbose",
     "--output-format",
     "stream-json",
+    "--input-format",
+    "stream-json",
     "--include-partial-messages",
     "--permission-mode",
     request.permissionMode,
   ];
-  if (imageAttachments.length > 0) args.push("--input-format", "stream-json");
   if (request.sessionId) args.push("--resume", request.sessionId);
   if (request.sessionName) args.push("--name", request.sessionName);
   if (request.model) args.push("--model", request.model);
   if (request.allowedTools?.length) args.push("--allowedTools", [...new Set(request.allowedTools)].join(","));
-  if (fileAttachmentPaths.length > 0) args.push("--add-dir", attachmentsDirectory());
+  await mkdir(attachmentsDirectory(), { recursive: true });
+  args.push("--add-dir", attachmentsDirectory());
 
   const owner = BrowserWindow.fromWebContents(event.sender);
   if (!owner) throw new Error("窗口已经关闭");
@@ -1249,7 +1279,13 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     shell: invocation.shell,
     stdio: ["pipe", "pipe", "pipe"],
   });
-  activeRuns.set(request.runId, child);
+  const activeRun: ActiveRun = {
+    child,
+    currentTurnRunId: request.runId,
+    pendingTurnRunIds: [],
+    unfinishedTurnRunIds: new Set([request.runId]),
+  };
+  activeRuns.set(request.runId, activeRun);
 
   const output = createInterface({ input: child.stdout });
   let observedSessionId = request.sessionId;
@@ -1261,9 +1297,17 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
         const sessionId = (data as Record<string, unknown>).session_id;
         if (typeof sessionId === "string" && SESSION_ID_PATTERN.test(sessionId)) observedSessionId = sessionId;
       }
-      emit(owner, { runId: request.runId, type: "message", data });
+      emit(owner, { runId: activeRun.currentTurnRunId, type: "message", data });
+      if (data && typeof data === "object" && (data as Record<string, unknown>).type === "result") {
+        activeRun.unfinishedTurnRunIds.delete(activeRun.currentTurnRunId);
+        const nextTurnRunId = activeRun.pendingTurnRunIds.shift();
+        if (nextTurnRunId) activeRun.currentTurnRunId = nextTurnRunId;
+        if (observedSessionId) {
+          void normalizeClaudeDeskSession(request.cwd, observedSessionId, existingSessionPrefix).catch(() => undefined);
+        }
+      }
     } catch {
-      emit(owner, { runId: request.runId, type: "raw", text: line });
+      emit(owner, { runId: activeRun.currentTurnRunId, type: "raw", text: line });
     }
   });
 
@@ -1275,7 +1319,7 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
 
   child.on("error", (error) => {
     activeRuns.delete(request.runId);
-    emit(owner, { runId: request.runId, type: "error", message: error.message });
+    for (const turnRunId of activeRun.unfinishedTurnRunIds) emit(owner, { runId: turnRunId, type: "error", message: error.message });
   });
 
   child.on("close", async (code) => {
@@ -1288,36 +1332,61 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
         await appendFile(join(app.getPath("userData"), "renderer-errors.log"), `${new Date().toISOString()} session normalization failed: ${detail}\n`, "utf8").catch(() => undefined);
       }
     }
-    emit(owner, {
-      runId: request.runId,
-      type: "exit",
-      code,
-      stderr: stderr.trim(),
-    });
+    for (const turnRunId of activeRun.unfinishedTurnRunIds) {
+      emit(owner, { runId: turnRunId, type: "exit", code, stderr: stderr.trim() });
+    }
   });
 
   const attachmentContext = fileAttachmentPaths.length > 0
     ? `\n\n用户附加了以下本地文件，请根据请求读取并使用它们：\n${fileAttachmentPaths.map((path) => `- ${path}`).join("\n")}`
     : "";
   const inputPrompt = `${request.prompt.trim() || "请查看并说明这些附件。"}${attachmentContext}`;
-  if (imageAttachments.length > 0) {
-    child.stdin.end(`${JSON.stringify({
+  child.stdin.write(`${JSON.stringify({
       type: "user",
       message: {
         role: "user",
         content: [...imageContent, { type: "text", text: inputPrompt }],
       },
     })}\n`, "utf8");
-  } else {
-    child.stdin.end(inputPrompt, "utf8");
-  }
   return { started: true };
 });
 
+ipcMain.handle("claude:append", async (_event, value: unknown) => {
+  if (!isValidAppendRunRequest(value)) throw new Error("无效的追加参数");
+  const request = value;
+  const activeRun = activeRuns.get(request.runId);
+  if (!activeRun || activeRun.child.stdin.destroyed || activeRun.child.stdin.writableEnded) return { appended: false };
+  const resolvedAttachments = await Promise.all((request.attachments ?? []).map(async (attachment) => {
+    const filePath = attachmentPath(attachment.storedName);
+    if (!filePath) throw new Error("附件路径无效");
+    const details = await stat(filePath).catch(() => null);
+    if (!details?.isFile() || details.size !== attachment.size) throw new Error(`附件已丢失：${attachment.name}`);
+    return { attachment, filePath };
+  }));
+  const imageContent = await Promise.all(resolvedAttachments.filter(({ attachment }) => attachment.kind === "image").map(async ({ attachment, filePath }) => ({
+    type: "image",
+    source: { type: "base64", media_type: attachment.mediaType, data: (await readFile(filePath)).toString("base64") },
+  })));
+  const filePaths = resolvedAttachments.filter(({ attachment }) => attachment.kind === "file").map(({ filePath }) => filePath);
+  const attachmentContext = filePaths.length > 0
+    ? `\n\n用户附加了以下本地文件，请根据请求读取并使用它们：\n${filePaths.map((path) => `- ${path}`).join("\n")}`
+    : "";
+  activeRun.pendingTurnRunIds.push(request.turnRunId);
+  activeRun.unfinishedTurnRunIds.add(request.turnRunId);
+  activeRun.child.stdin.write(`${JSON.stringify({
+    type: "user",
+    message: {
+      role: "user",
+      content: [...imageContent, { type: "text", text: `${request.prompt.trim() || "请查看并说明这些附件。"}${attachmentContext}` }],
+    },
+  })}\n`, "utf8");
+  return { appended: true };
+});
+
 ipcMain.handle("claude:stop", (_event, runId: string) => {
-  const child = activeRuns.get(runId);
-  if (!child) return false;
-  return child.kill();
+  const activeRun = activeRuns.get(runId);
+  if (!activeRun) return false;
+  return activeRun.child.kill();
 });
 
 if (hasSingleInstanceLock) app.whenReady().then(async () => {
@@ -1343,7 +1412,7 @@ app.on("window-all-closed", () => {
 app.on("before-quit", () => {
   isQuitting = true;
   updateManager.dispose();
-  for (const child of activeRuns.values()) child.kill();
+  for (const { child } of activeRuns.values()) child.kill();
   tray?.destroy();
   tray = null;
   for (const notification of activeNotifications) notification.close();
