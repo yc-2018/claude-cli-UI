@@ -793,15 +793,19 @@ try {
   await page.locator(".composer textarea").press("Enter");
   await page.waitForSelector('.message.assistant[data-status="running"]');
   if (await page.locator(".composer textarea").isDisabled()) throw new Error("composer was disabled while Claude was replying");
-  await page.locator(".composer textarea").fill("直接追加发送");
+  await page.locator(".composer textarea").fill("引导当前任务");
   await page.locator(".composer textarea").press("Enter");
-  await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((element) => element.textContent === "直接追加发送"));
-  if (await page.locator(".prompt-queue-item", { hasText: "直接追加发送" }).count()) {
-    throw new Error("direct append was incorrectly placed in the local queue");
-  }
+  const guidedPrompt = page.locator(".prompt-queue-item", { hasText: "引导当前任务" });
+  await guidedPrompt.waitFor();
+  if (await page.locator('.message.assistant[data-status="running"]').count() !== 1) throw new Error("queued prompt created a second running response");
+  if (await page.locator('.message.assistant[data-status="running"] .response-duration').count() !== 1) throw new Error("queued prompt created a second response timer");
+  await guidedPrompt.locator('[aria-label="引导当前任务"]').click();
+  await page.waitForFunction(() => ![...document.querySelectorAll(".prompt-queue-item")].some((element) => element.textContent?.includes("引导当前任务")));
+  if (await page.locator(".user-bubble", { hasText: "引导当前任务" }).count() !== 1) throw new Error("guided prompt disappeared from the conversation");
+  if (await page.locator('.message.assistant[data-status="running"]').count() !== 1) throw new Error("guiding created a second running response");
   for (const prompt of ["队列第一条", "队列第二条", "队列第三条"]) {
     await page.locator(".composer textarea").fill(prompt);
-    await page.locator(".send-button.queue-only").click();
+    await page.locator(".send-button:not(.stop)").click();
   }
   await page.waitForFunction(() => document.querySelectorAll(".prompt-queue-item").length === 3);
   if ((await page.locator(".prompt-queue-content strong").allTextContents()).join(",") !== "队列第一条,队列第二条,队列第三条") {
@@ -822,13 +826,26 @@ try {
     throw new Error("editing a queued prompt did not remove it from the queue");
   }
   await page.locator(".composer textarea").fill("队列第二条已编辑");
-  await page.locator(".send-button.queue-only").click();
+  await page.locator(".send-button:not(.stop)").click();
   await page.waitForFunction(() => (
     [...document.querySelectorAll(".prompt-queue-content strong")].map((element) => element.textContent).join(",") ===
     "队列第三条,队列第二条已编辑"
   ));
-  await page.locator(".send-button.stop").click();
-  await page.waitForSelector('.message.assistant[data-status="stopped"]');
+  await page.waitForFunction(() => document.querySelectorAll('.message.assistant[data-status="running"]').length === 0);
+  const guidedResponse = await page.locator(".message.assistant .markdown").filter({ hasText: "引导当前任务" }).count();
+  if (guidedResponse !== 1) throw new Error("guided prompt did not continue in the current response");
+  const guidedTurnOrder = await page.locator(".conversation .message").evaluateAll((messages) => messages.map((message) => ({
+    role: message.classList.contains("user") ? "user" : "assistant",
+    text: message.textContent ?? "",
+  })).filter((message) => message.text.includes("慢任务") || message.text.includes("引导当前任务")));
+  if (
+    guidedTurnOrder.length !== 3 ||
+    guidedTurnOrder[0].role !== "user" ||
+    guidedTurnOrder[1].role !== "user" ||
+    guidedTurnOrder[2].role !== "assistant" ||
+    !guidedTurnOrder[2].text.includes("慢任务阶段完成") ||
+    !guidedTurnOrder[2].text.includes("引导当前任务")
+  ) throw new Error(`guided turn rendered in the wrong order: ${JSON.stringify(guidedTurnOrder)}`);
   await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((element) => element.textContent === "队列第三条"));
   await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((element) => element.textContent === "队列第二条已编辑"));
   await page.waitForFunction(() => document.querySelectorAll(".prompt-queue-item").length === 0);

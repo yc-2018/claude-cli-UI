@@ -718,25 +718,30 @@ button, select, textarea { -webkit-app-region: no-drag; }
 }
 
 .permission-dialog {
+  display: flex;
   width: min(100%, 510px);
+  max-height: calc(100dvh - 48px);
+  min-height: 0;
+  flex-direction: column;
   padding: 20px;
+  overflow: hidden;
   border: 1px solid #cfcfc8;
   border-radius: 8px;
   background: #fbfbfa;
   box-shadow: 0 18px 50px rgb(25 25 22 / 22%);
 }
 
-.permission-heading { display: flex; align-items: flex-start; gap: 11px; }
+.permission-heading { display: flex; flex: 0 0 auto; align-items: flex-start; gap: 11px; }
 .permission-icon { display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border-radius: 7px; background: #f1e8df; color: #a6533e; }
 .permission-heading h2 { margin: 1px 0 4px; color: #30302d; font-size: 15px; font-weight: 650; letter-spacing: 0; }
 .permission-heading p { margin: 0; color: #777770; font-size: 12px; line-height: 1.5; }
-.permission-tools { margin: 17px 0 14px; border-block: 1px solid #e0e0da; }
+.permission-tools { min-height: 0; margin: 17px 0 14px; overflow-y: auto; overscroll-behavior: contain; border-block: 1px solid #e0e0da; }
 .permission-tool { display: grid; grid-template-columns: 105px minmax(0, 1fr); align-items: center; min-height: 42px; gap: 10px; padding: 7px 2px; }
 .permission-tool + .permission-tool { border-top: 1px solid #e7e7e1; }
 .permission-tool strong { color: #40403b; font-size: 12.5px; font-weight: 620; }
 .permission-tool code { min-width: 0; overflow: hidden; color: #73736c; font-family: "Cascadia Code", Consolas, monospace; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.permission-scope { margin: 0 0 18px; color: #84847d; font-size: 11px; line-height: 1.55; }
-.permission-actions { display: flex; align-items: center; gap: 7px; }
+.permission-scope { flex: 0 0 auto; margin: 0 0 18px; color: #84847d; font-size: 11px; line-height: 1.55; }
+.permission-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; }
 .permission-action-spacer { flex: 1; }
 .permission-button { display: inline-flex; height: 32px; align-items: center; justify-content: center; gap: 6px; padding: 0 11px; border: 1px solid #d2d2cb; border-radius: 6px; font-size: 11.5px; font-weight: 570; cursor: pointer; }
 .permission-button.secondary { background: #fff; color: #555550; }
@@ -744,7 +749,7 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .permission-button.primary { border-color: #343430; background: #343430; color: #fff; }
 .permission-button.primary:hover { background: #22221f; }
 .permission-button:disabled { opacity: .55; cursor: wait; }
-.permission-waiting { display: flex; align-items: center; justify-content: flex-end; gap: 7px; margin-top: 10px; color: #8a8a83; font-size: 10.5px; }
+.permission-waiting { display: flex; flex: 0 0 auto; align-items: center; justify-content: flex-end; gap: 7px; margin-top: 10px; color: #8a8a83; font-size: 10.5px; }
 
 .delete-confirm-dialog {
   width: min(100%, 430px);
@@ -861,6 +866,7 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .prompt-queue-actions { display: flex; align-items: center; gap: 1px; }
 .prompt-queue-actions button { display: grid; width: 25px; height: 25px; place-items: center; padding: 0; border: 0; border-radius: 5px; background: transparent; color: #85857e; cursor: pointer; }
 .prompt-queue-actions button:hover { background: #eeeeea; color: #4d4d48; }
+.prompt-queue-actions .guide-prompt { width: auto; grid-auto-flow: column; gap: 3px; padding: 0 5px; color: var(--accent-dark); font-size: 10.5px; }
 
 .composer {
   position: relative;
@@ -1052,12 +1058,6 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .send-button:disabled { background: #d8d8d3; color: #fafaf8; cursor: default; }
 .send-button.stop { background: #eee1de; color: var(--accent-dark); }
 .send-button.stop:hover { background: #ead6d1; }
-.send-button.queue-send { background: #353531; color: #fff; }
-.send-button.queue-send:hover { background: #22221f; }
-.send-button.queue-send:disabled { background: #d8d8d3; color: #fafaf8; }
-.send-button.queue-only { border: 1px solid #d8d8d2; background: #f2f2ee; color: #66665f; }
-.send-button.queue-only:hover { background: #e8e8e3; color: #44443f; }
-.send-button.queue-only:disabled { border-color: #e4e4df; background: #f4f4f1; color: #bab9b2; }
 
 .composer-note { width: min(100%, 820px); margin: 7px auto 0; color: #a1a19a; font-size: 10.5px; text-align: center; pointer-events: auto; }
 

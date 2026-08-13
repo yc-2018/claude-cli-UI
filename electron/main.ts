@@ -1302,6 +1302,7 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
         activeRun.unfinishedTurnRunIds.delete(activeRun.currentTurnRunId);
         const nextTurnRunId = activeRun.pendingTurnRunIds.shift();
         if (nextTurnRunId) activeRun.currentTurnRunId = nextTurnRunId;
+        else activeRun.child.stdin.end();
         if (observedSessionId) {
           void normalizeClaudeDeskSession(request.cwd, observedSessionId, existingSessionPrefix).catch(() => undefined);
         }

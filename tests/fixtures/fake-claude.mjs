@@ -9,6 +9,8 @@ if (args.includes("--version")) {
 }
 
 process.stdin.setEncoding("utf8");
+let slowTaskActive = false;
+const deferredInputs = [];
 const processPrompt = (input) => {
   const usesStreamInput = args.includes("--input-format") && args[args.indexOf("--input-format") + 1] === "stream-json";
   let streamContent = [];
@@ -29,6 +31,10 @@ const processPrompt = (input) => {
       process.exitCode = 2;
       return;
     }
+  }
+  if (slowTaskActive) {
+    deferredInputs.push(input);
+    return;
   }
   const resumeIndex = args.indexOf("--resume");
   const resumedSessionId = resumeIndex >= 0 ? args[resumeIndex + 1] : undefined;
@@ -118,7 +124,33 @@ const processPrompt = (input) => {
     return;
   }
   if (prompt.includes("慢任务")) {
+    slowTaskActive = true;
     send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    setTimeout(() => {
+      const response = "慢任务阶段完成。";
+      send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: response }] }, session_id: sessionId });
+      send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
+      slowTaskActive = false;
+      for (const deferredInput of deferredInputs.splice(0)) processPrompt(deferredInput);
+    }, 3_000);
+    return;
+  }
+
+  if (prompt.includes("大量权限测试")) {
+    const permissionDenials = Array.from({ length: 30 }, (_, index) => ({
+      tool_name: "Bash",
+      tool_use_id: `tool-bash-${index}`,
+      tool_input: { command: `curl -sL -o artifact-${index}.zip https://example.com/assets/${index}` },
+    }));
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    send({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "需要授权批量工具调用。",
+      session_id: sessionId,
+      permission_denials: permissionDenials,
+    });
     return;
   }
 

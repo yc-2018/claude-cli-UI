@@ -31,6 +31,8 @@ import type {
 interface RunMeta {
   conversationId: string;
   responseId: string;
+  userMessageId?: string;
+  appendToResponse: boolean;
   completed: boolean;
   successful: boolean;
   receivedText: boolean;
@@ -367,6 +369,7 @@ export default function App() {
   );
   const activeRunId = activeConversationId ? activeRuns[activeConversationId] : undefined;
   const activeResponseRunning = Boolean(activeConversation?.messages.some((message) => message.role === "assistant" && message.status === "running"));
+  const activeProcessRunning = Boolean(activeRunId) || activeResponseRunning;
   const pendingPermission = permissionQueue[0];
 
   useEffect(() => {
@@ -816,6 +819,7 @@ export default function App() {
 
       const delta = getTextDelta(data);
       if (delta) {
+        if (meta.appendToResponse && !meta.receivedText) meta.pendingText += "\n\n";
         meta.receivedText = true;
         meta.pendingText += delta;
         if (meta.flushTimer === undefined) meta.flushTimer = window.setTimeout(() => flushPendingText(meta), 50);
@@ -823,6 +827,7 @@ export default function App() {
 
       const thinkingDelta = getThinkingDelta(data);
       if (thinkingDelta) {
+        if (meta.appendToResponse && !meta.receivedThinking) meta.pendingThinking += "\n\n";
         meta.receivedThinking = true;
         meta.pendingThinking += thinkingDelta;
         if (meta.flushTimer === undefined) meta.flushTimer = window.setTimeout(() => flushPendingText(meta), 50);
@@ -842,8 +847,8 @@ export default function App() {
         if (fullText || fullThinking) {
           updateResponse(meta, (message) => ({
             ...message,
-            content: fullText || message.content,
-            thinking: fullThinking || message.thinking,
+            content: fullText ? `${meta.appendToResponse && message.content ? `${message.content}\n\n` : ""}${fullText}` : message.content,
+            thinking: fullThinking ? `${meta.appendToResponse && message.thinking ? `${message.thinking}\n\n` : ""}${fullThinking}` : message.thinking,
           }));
         }
       }
@@ -851,6 +856,8 @@ export default function App() {
       if (data.type === "result") {
         flushPendingText(meta);
         meta.completed = true;
+        const nextMeta = [...runMeta.current.values()].find((item) => item !== meta && item.conversationId === meta.conversationId && !item.completed);
+        const hasPendingTurn = Boolean(nextMeta);
         const permissionRequests = getPermissionRequests(data);
         const isError = data.is_error === true;
         meta.successful = !isError && permissionRequests.length === 0;
@@ -858,9 +865,9 @@ export default function App() {
         updateResponse(meta, (message) => ({
           ...message,
           content: message.content || resultText,
-          status: permissionRequests.length > 0 ? "stopped" : (isError ? "error" : "done"),
+          status: permissionRequests.length > 0 ? "stopped" : (isError ? "error" : (hasPendingTurn ? "running" : "done")),
           error: isError ? resultText || "Claude 未能完成这次任务" : undefined,
-          ...finishResponse(message),
+          ...(!hasPendingTurn || isError || permissionRequests.length > 0 ? finishResponse(message) : {}),
         }));
         if (permissionRequests.length > 0) {
           setPermissionQueue((current) => current.some((item) => item.responseId === meta.responseId)
@@ -873,7 +880,6 @@ export default function App() {
             }]);
         }
         runMeta.current.delete(event.runId);
-        const hasPendingTurn = [...runMeta.current.values()].some((item) => item.conversationId === meta.conversationId && !item.completed);
         if (!hasPendingTurn) {
           setActiveRuns((current) => {
             const next = { ...current };
@@ -881,7 +887,7 @@ export default function App() {
             return next;
           });
         }
-        if (meta.successful) notifyConversationCompleted(meta.conversationId);
+        if (meta.successful && !hasPendingTurn) notifyConversationCompleted(meta.conversationId);
       }
     }
 
@@ -1208,6 +1214,7 @@ export default function App() {
     runMeta.current.set(runId, {
       conversationId,
       responseId,
+      appendToResponse: false,
       completed: false,
       successful: false,
       receivedText: false,
@@ -1254,20 +1261,31 @@ export default function App() {
     const runId = processRunIds.current.get(conversationId);
     if (!runId) return false;
     const turnRunId = makeId();
-    const responseId = makeId();
+    const activeMeta = [...runMeta.current.values()].find((meta) => meta.conversationId === conversationId && !meta.completed);
+    if (!activeMeta) return false;
+    const userMessageId = makeId();
     const now = Date.now();
-    updateConversation(conversationId, (conversation) => ({
-      ...conversation,
-      updatedAt: now,
-      messages: [
-        ...conversation.messages,
-        { id: makeId(), role: "user", content: prompt, attachments, createdAt: now },
-        { id: responseId, role: "assistant", content: "", createdAt: now, responseStartedAt: now, status: "running", activities: [] },
-      ],
-    }));
+    updateConversation(conversationId, (conversation) => {
+      const responseIndex = conversation.messages.findIndex((message) => message.id === activeMeta.responseId);
+      const userMessage: ChatMessage = { id: userMessageId, role: "user", content: prompt, attachments, createdAt: now };
+      if (responseIndex < 0) return { ...conversation, updatedAt: now, messages: [...conversation.messages, userMessage] };
+      const response = conversation.messages[responseIndex];
+      return {
+        ...conversation,
+        updatedAt: now,
+        messages: [
+          ...conversation.messages.slice(0, responseIndex),
+          userMessage,
+          response,
+          ...conversation.messages.slice(responseIndex + 1),
+        ],
+      };
+    });
     runMeta.current.set(turnRunId, {
       conversationId,
-      responseId,
+      responseId: activeMeta.responseId,
+      userMessageId,
+      appendToResponse: true,
       completed: false,
       successful: false,
       receivedText: false,
@@ -1285,38 +1303,46 @@ export default function App() {
     runMeta.current.delete(turnRunId);
     updateConversation(conversationId, (conversation) => ({
       ...conversation,
-      messages: conversation.messages.filter((message) => message.id !== responseId && message.createdAt !== now),
+      messages: conversation.messages.filter((message) => message.id !== userMessageId),
     }));
     return false;
   }, [updateConversation]);
 
   const sendPrompt = (prompt: string, attachments: Attachment[]) => {
     if (!activeConversation || (activeConversation.source === "claude" && !activeConversation.historyLoaded)) return;
-    if (activeResponseRunning && processRunIds.current.has(activeConversation.id)) {
-      void appendPrompt(activeConversation.id, prompt, attachments).then((appended) => {
-        if (appended) return;
-        const queuedPrompt: QueuedPrompt = { id: makeId(), prompt, attachments };
-        setPromptQueues((current) => ({ ...current, [activeConversation.id]: [...(current[activeConversation.id] ?? []), queuedPrompt] }));
-      });
-      return;
-    }
     const busy = [...runMeta.current.values()].some((meta) => meta.conversationId === activeConversation.id)
       || permissionQueue.some((permission) => permission.conversationId === activeConversation.id);
     if (!busy) {
       void startPrompt(activeConversation.id, prompt, attachments);
       return;
     }
-    void appendPrompt(activeConversation.id, prompt, attachments).then((appended) => {
-      if (appended) return;
-      const queuedPrompt: QueuedPrompt = { id: makeId(), prompt, attachments };
-      setPromptQueues((current) => ({ ...current, [activeConversation.id]: [...(current[activeConversation.id] ?? []), queuedPrompt] }));
-    });
+    queuePrompt(prompt, attachments);
   };
 
   const queuePrompt = (prompt: string, attachments: Attachment[]) => {
     if (!activeConversation) return;
     const queuedPrompt: QueuedPrompt = { id: makeId(), prompt, attachments };
     setPromptQueues((current) => ({ ...current, [activeConversation.id]: [...(current[activeConversation.id] ?? []), queuedPrompt] }));
+  };
+
+  const guideQueuedPrompt = (promptId: string) => {
+    if (!activeConversation) return;
+    const conversationId = activeConversation.id;
+    const queuedPrompt = promptQueues[conversationId]?.find((item) => item.id === promptId);
+    if (!queuedPrompt) return;
+    setPromptQueues((current) => {
+      const remaining = (current[conversationId] ?? []).filter((item) => item.id !== promptId);
+      if (remaining.length === 0) {
+        const next = { ...current };
+        delete next[conversationId];
+        return next;
+      }
+      return { ...current, [conversationId]: remaining };
+    });
+    void appendPrompt(conversationId, queuedPrompt.prompt, queuedPrompt.attachments).then((appended) => {
+      if (appended) return;
+      setPromptQueues((current) => ({ ...current, [conversationId]: [queuedPrompt, ...(current[conversationId] ?? [])] }));
+    });
   };
 
   useEffect(() => {
@@ -1422,6 +1448,7 @@ export default function App() {
       const meta: RunMeta = {
         conversationId: pendingPermission.conversationId,
         responseId: pendingPermission.responseId,
+        appendToResponse: false,
         completed: true,
         successful: false,
         receivedText: false,
@@ -1450,6 +1477,7 @@ export default function App() {
     const meta: RunMeta = {
       conversationId: conversation.id,
       responseId: pendingPermission.responseId,
+      appendToResponse: false,
       completed: false,
       successful: false,
       receivedText: false,
@@ -1500,21 +1528,21 @@ export default function App() {
     if (!activeConversation) return;
     const processRunId = processRunIds.current.get(activeConversation.id) ?? activeRunId;
     if (!processRunId) return;
-    const meta = [...runMeta.current.values()].find((item) => item.conversationId === activeConversation.id && !item.completed);
-    if (meta) {
-      meta.completed = true;
-      updateResponse(meta, (message) => ({ ...message, status: "stopped", ...finishResponse(message) }));
+    const metas = [...runMeta.current.values()].filter((item) => item.conversationId === activeConversation.id && !item.completed);
+    if (metas.length > 0) {
+      for (const meta of metas) meta.completed = true;
+      updateResponse(metas[0], (message) => ({ ...message, status: "stopped", ...finishResponse(message) }));
     }
     try {
       const stopped = await window.claudeDesk.stopRun(processRunId);
-      if (!stopped && meta) {
-        meta.completed = false;
-        updateResponse(meta, (message) => ({ ...message, status: "running", responseDurationMs: undefined, error: "暂时无法停止 Claude CLI。" }));
+      if (!stopped && metas.length > 0) {
+        for (const meta of metas) meta.completed = false;
+        updateResponse(metas[0], (message) => ({ ...message, status: "running", responseDurationMs: undefined, error: "暂时无法停止 Claude CLI。" }));
       }
     } catch (error) {
-      if (meta) {
-        meta.completed = false;
-        updateResponse(meta, (message) => ({ ...message, status: "running", responseDurationMs: undefined, error: error instanceof Error ? error.message : "停止失败" }));
+      if (metas.length > 0) {
+        for (const meta of metas) meta.completed = false;
+        updateResponse(metas[0], (message) => ({ ...message, status: "running", responseDurationMs: undefined, error: error instanceof Error ? error.message : "停止失败" }));
       }
     }
   };
@@ -1661,21 +1689,22 @@ export default function App() {
               messages={activeConversation.messages}
               loadingHistory={activeConversation.source === "claude" && !activeConversation.historyLoaded}
               onBranch={activeConversation.sessionId ? branchConversation : undefined}
-              branchDisabled={activeResponseRunning || branchingConversationId === activeConversation.id}
+              branchDisabled={activeProcessRunning || branchingConversationId === activeConversation.id}
               onEditResend={editAndResend}
-              editDisabled={activeResponseRunning}
+              editDisabled={activeProcessRunning}
             />
             <Composer
               key={`composer-${activeConversation.id}`}
               conversation={activeConversation}
               draft={composerDrafts[activeConversation.id] ?? EMPTY_COMPOSER_DRAFT}
               modelConfig={modelConfig}
-              running={activeResponseRunning}
+              running={activeProcessRunning}
               queuedPrompts={promptQueues[activeConversation.id] ?? []}
               loadingHistory={activeConversation.source === "claude" && !activeConversation.historyLoaded}
               focusRequest={composerFocusRequest}
               onSend={sendPrompt}
               onQueue={queuePrompt}
+              onGuideQueuedPrompt={guideQueuedPrompt}
               onStop={stopRun}
               onDeleteQueuedPrompt={deleteQueuedPrompt}
               onEditQueuedPrompt={editQueuedPrompt}

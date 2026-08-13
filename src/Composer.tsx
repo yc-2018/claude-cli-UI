@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CircleStop, FileText, GripVertical, ListPlus, Paperclip, Pencil, Send, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
+import { CircleStop, CornerDownRight, FileText, GripVertical, Paperclip, Pencil, Send, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
 import ComposerSelect, { type ComposerSelectHandle } from "./ComposerSelect";
 import type { Attachment, AttachmentUpload, ComposerDraft, Conversation, ModelConfig, PermissionMode, QueuedPrompt, ReorderPosition } from "./types";
 
@@ -32,6 +32,7 @@ interface Props {
   draft: ComposerDraft;
   onSend(prompt: string, attachments: Attachment[]): void;
   onQueue(prompt: string, attachments: Attachment[]): void;
+  onGuideQueuedPrompt(promptId: string): void;
   onStop(): void;
   onDeleteQueuedPrompt(promptId: string): void;
   onEditQueuedPrompt(promptId: string): void;
@@ -52,6 +53,7 @@ export default function Composer({
   draft,
   onSend,
   onQueue,
+  onGuideQueuedPrompt,
   onStop,
   onDeleteQueuedPrompt,
   onEditQueuedPrompt,
@@ -188,15 +190,8 @@ export default function Composer({
       resetPrompt();
       return;
     }
-    onSend(value, attachments);
-    setAttachments(() => []);
-    setAttachmentError("");
-    resetPrompt();
-  };
-
-  const queue = () => {
-    if ((!prompt.trim() && attachments.length === 0) || loadingHistory || stagingAttachments) return;
-    onQueue(prompt.trim(), attachments);
+    if (running) onQueue(value, attachments);
+    else onSend(value, attachments);
     setAttachments(() => []);
     setAttachmentError("");
     resetPrompt();
@@ -256,6 +251,7 @@ export default function Composer({
                     {queuedPrompt.attachments.length > 0 ? <small>{queuedPrompt.attachments.length} 个附件</small> : null}
                   </span>
                   <span className="prompt-queue-actions">
+                    {running ? <button className="guide-prompt" type="button" onClick={() => onGuideQueuedPrompt(queuedPrompt.id)} title="提交，但不中断当前任务" aria-label="引导当前任务"><CornerDownRight size={14} /><span>引导</span></button> : null}
                     <button type="button" onClick={() => onEditQueuedPrompt(queuedPrompt.id)} title="移回输入框编辑" aria-label="移回输入框编辑"><Pencil size={13} /></button>
                     <button type="button" onClick={() => onDeleteQueuedPrompt(queuedPrompt.id)} title="从队列删除" aria-label="从队列删除"><Trash2 size={13} /></button>
                   </span>
@@ -366,7 +362,7 @@ export default function Composer({
               submit();
             }
           }}
-          placeholder={loadingHistory ? "正在载入历史记录…" : (running ? "继续输入，可直接追加或加入队列…" : "给 Claude 分配任务…")}
+          placeholder={loadingHistory ? "正在载入历史记录…" : (running ? "继续输入，发送后加入队列…" : "给 Claude 分配任务…")}
           rows={1}
           disabled={loadingHistory}
         />
@@ -414,21 +410,11 @@ export default function Composer({
           </div>
           <div className="composer-actions">
             {running ? <button className="send-button stop" onClick={onStop} title="停止运行"><CircleStop size={17} /></button> : null}
-            {running ? (
-              <button
-                className="send-button queue-only"
-                onClick={queue}
-                disabled={(!prompt.trim() && attachments.length === 0) || loadingHistory || stagingAttachments}
-                title="加入待发送队列"
-              >
-                <ListPlus size={17} />
-              </button>
-            ) : null}
             <button
-              className={`send-button ${running ? "queue-send" : ""}`}
+              className="send-button"
               onClick={submit}
               disabled={(!prompt.trim() && attachments.length === 0) || loadingHistory || stagingAttachments}
-              title={running ? "直接追加发送" : "发送"}
+              title={running ? "加入待发送队列" : "发送"}
             >
               <Send size={17} />
             </button>

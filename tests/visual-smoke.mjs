@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 const root = resolve(import.meta.dirname, "..");
 const artifacts = resolve(root, "artifacts");
 const profile = resolve(artifacts, `visual-profile-${Date.now()}`);
+const fakeCli = resolve(root, "tests", "fixtures", "fake-claude.mjs");
 await mkdir(artifacts, { recursive: true });
 
 const electronApp = await electron.launch({
@@ -19,6 +20,8 @@ const electronApp = await electron.launch({
     CLAUDE_DESK_TEST_UPDATE_VERSION: "9.9.9",
     CLAUDE_DESK_TEST_UPDATE_NOTES: "<h2>更新内容</h2><ul><li>修复 &amp; 优化 Portable 更新</li></ul>",
     CLAUDE_DESK_TEST_PORTABLE: "1",
+    CLAUDE_DESK_CLAUDE_EXECUTABLE: process.execPath,
+    CLAUDE_DESK_CLAUDE_PREFIX_ARGS: JSON.stringify([fakeCli]),
     CLAUDE_DESK_TEST_MODELS: JSON.stringify({
       Sonnet: "LongCat-2.0",
       Opus: "LongCat-2.0",
@@ -328,12 +331,38 @@ if (compactUpdateDialogLayout.left < 0 || compactUpdateDialogLayout.top < 0 || c
 await page.screenshot({ path: resolve(artifacts, "update-dialog-compact.png") });
 await page.locator(".update-later-button").click();
 
+await page.locator(".composer textarea").fill("大量权限测试");
+await page.locator(".composer textarea").press("Enter");
+await page.waitForSelector(".permission-dialog");
+const longPermissionLayout = await page.evaluate(() => ({
+  viewport: { width: window.innerWidth, height: window.innerHeight },
+  dialog: document.querySelector(".permission-dialog")?.getBoundingClientRect().toJSON(),
+  tools: (() => {
+    const element = document.querySelector(".permission-tools");
+    return element ? { ...element.getBoundingClientRect().toJSON(), clientHeight: element.clientHeight, scrollHeight: element.scrollHeight } : null;
+  })(),
+  actions: document.querySelector(".permission-actions")?.getBoundingClientRect().toJSON(),
+}));
+if (
+  !longPermissionLayout.dialog ||
+  !longPermissionLayout.tools ||
+  !longPermissionLayout.actions ||
+  longPermissionLayout.dialog.top < 0 ||
+  longPermissionLayout.dialog.bottom > longPermissionLayout.viewport.height ||
+  longPermissionLayout.actions.bottom > longPermissionLayout.dialog.bottom ||
+  longPermissionLayout.tools.scrollHeight <= longPermissionLayout.tools.clientHeight
+) throw new Error(`long permission dialog did not keep its actions visible: ${JSON.stringify(longPermissionLayout)}`);
+if (await page.locator(".permission-actions .permission-button").count() !== 3) throw new Error("long permission dialog hid an action button");
+await page.screenshot({ path: resolve(artifacts, "permission-dialog-long-compact.png") });
+await page.locator(".permission-deny").click();
+await page.waitForSelector(".permission-dialog", { state: "detached" });
+
 await page.locator(".composer textarea").fill("慢任务");
 await page.locator(".composer textarea").press("Enter");
 await page.waitForSelector('.message.assistant[data-status="running"]');
 for (const prompt of ["紧凑队列第一条", "紧凑队列第二条", "紧凑队列第三条"]) {
   await page.locator(".composer textarea").fill(prompt);
-  await page.locator(".send-button.queue-only").click();
+  await page.locator(".send-button:not(.stop)").click();
 }
 await page.waitForFunction(() => document.querySelectorAll(".prompt-queue-item").length === 3);
 const compactQueueLayout = await page.evaluate(() => ({
@@ -354,7 +383,7 @@ if (
 await page.screenshot({ path: resolve(artifacts, "prompt-queue-compact.png") });
 await page.locator(".send-button.stop").click();
 
-console.log(JSON.stringify({ errors, modelMenuLayout, permissionMenuLayout, compactModelMenuLayout, deleteDialogLayout, compactDeleteDialogLayout, updateDialogLayout, compactUpdateDialogLayout, settingsLayout, layout, compactLayout, compactQueueLayout }, null, 2));
+console.log(JSON.stringify({ errors, modelMenuLayout, permissionMenuLayout, compactModelMenuLayout, deleteDialogLayout, compactDeleteDialogLayout, updateDialogLayout, compactUpdateDialogLayout, settingsLayout, layout, compactLayout, compactQueueLayout, longPermissionLayout }, null, 2));
 await electronApp.close();
 
 if (errors.length > 0) process.exitCode = 1;
