@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
-import { CheckCircle2, Folder, FolderOpen, Plus, TerminalSquare } from "lucide-react";
+import { Check, CheckCircle2, Copy, Folder, FolderOpen, Plus, TerminalSquare, X } from "lucide-react";
 import Composer from "./Composer";
 import ConversationView from "./ConversationView";
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
@@ -50,6 +50,12 @@ interface PendingPermission {
   requests: ToolPermissionRequest[];
 }
 
+interface CliCommandNotice {
+  conversationId: string;
+  command: string;
+  copied: boolean;
+}
+
 function finishResponse(message: ChatMessage, now = Date.now()): Pick<ChatMessage, "responseDurationMs"> {
   if (!message.responseStartedAt) return {};
   return { responseDurationMs: Math.max(0, now - message.responseStartedAt) };
@@ -59,6 +65,10 @@ function appendResponseContent(current: string | undefined, addition: string) {
   if (!addition) return current ?? "";
   if (!current) return addition;
   return `${current}\n\n${addition}`;
+}
+
+function createCliResumeCommand(workspace: string, sessionId: string) {
+  return `cd /d "${workspace}" && claude --resume "${sessionId}"`;
 }
 
 type PendingDeletion = {
@@ -348,6 +358,7 @@ export default function App() {
   const [cliInfo, setCliInfo] = useState<{ available: boolean; version?: string } | null>(null);
   const [modelConfig, setModelConfig] = useState<ModelConfig>({ options: [] });
   const [permissionQueue, setPermissionQueue] = useState<PendingPermission[]>([]);
+  const [cliCommandNotice, setCliCommandNotice] = useState<CliCommandNotice | null>(null);
   const [branchingConversationId, setBranchingConversationId] = useState<string | null>(null);
   const [composerFocusRequest, setComposerFocusRequest] = useState(0);
   const [composerDrafts, setComposerDrafts] = useState<Record<string, ComposerDraft>>({});
@@ -366,6 +377,7 @@ export default function App() {
   const branchingConversation = useRef(false);
   const previousUpdatePhase = useRef(updateState.phase);
   const notifiedPermissionIds = useRef(new Set<string>());
+  const cliCommandNoticeTimer = useRef<number | undefined>(undefined);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -518,6 +530,8 @@ export default function App() {
     )), 8_000);
     return () => window.clearTimeout(timer);
   }, [completionNotice]);
+
+  useEffect(() => () => window.clearTimeout(cliCommandNoticeTimer.current), []);
 
   useEffect(() => {
     if (!pendingPermission) return;
@@ -1648,6 +1662,25 @@ export default function App() {
     document.body.classList.remove("resizing-sidebar");
   };
 
+  const copyCliResumeCommand = async (command: string, conversationId: string) => {
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(command);
+      copied = true;
+    } catch {
+      // Keep the command visible so it can still be selected manually.
+    }
+    setCliCommandNotice({ conversationId, command, copied });
+    window.clearTimeout(cliCommandNoticeTimer.current);
+    cliCommandNoticeTimer.current = window.setTimeout(() => setCliCommandNotice(null), 8_000);
+  };
+
+  const showCliResumeCommand = () => {
+    if (!activeConversation?.sessionId || !activeProject) return;
+    const command = createCliResumeCommand(activeProject.workspace, activeConversation.sessionId);
+    void copyCliResumeCommand(command, activeConversation.id);
+  };
+
   if (!storageReady) {
     return (
       <div className="app-shell">
@@ -1720,13 +1753,45 @@ export default function App() {
           <>
             <header className="task-header">
               <div className="task-heading">
-                <h2>{activeConversation.title}</h2>
+                {activeConversation.sessionId ? (
+                  <button
+                    className="task-title-command"
+                    onClick={showCliResumeCommand}
+                    title="复制 CMD 恢复命令"
+                    type="button"
+                  >
+                    <h2>{activeConversation.title}</h2>
+                    <TerminalSquare className="title-command-icon" size={13} />
+                  </button>
+                ) : <h2>{activeConversation.title}</h2>}
                 <button className="workspace-chip" onClick={() => { void openProject(activeProject.workspace); }} title="在文件管理器中打开项目">
                   <Folder size={13} />
                   <strong>{activeProject.customName ?? activeProject.name}</strong>
                   {activeProject.customName ? <small>{activeProject.name}</small> : null}
                 </button>
               </div>
+              {cliCommandNotice?.conversationId === activeConversation.id ? (
+                <div className="cli-command-popover" role="status">
+                  <TerminalSquare size={14} />
+                  <code>{cliCommandNotice.command}</code>
+                  <button
+                    aria-label={cliCommandNotice.copied ? "CMD 命令已复制" : "复制 CMD 命令"}
+                    onClick={() => { void copyCliResumeCommand(cliCommandNotice.command, activeConversation.id); }}
+                    title={cliCommandNotice.copied ? "已复制" : "复制"}
+                    type="button"
+                  >
+                    {cliCommandNotice.copied ? <Check size={14} /> : <Copy size={14} />}
+                  </button>
+                  <button
+                    aria-label="关闭 CMD 命令"
+                    onClick={() => setCliCommandNotice(null)}
+                    title="关闭"
+                    type="button"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              ) : null}
             </header>
             <ConversationView
               key={`conversation-${activeConversation.id}`}

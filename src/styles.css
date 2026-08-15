@@ -515,6 +515,46 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .task-heading { display: flex; min-width: 0; align-items: center; gap: 9px; }
 .task-heading h2 { overflow: hidden; max-width: min(48vw, 620px); margin: 0; font-size: 13.5px; font-weight: 620; letter-spacing: 0; text-overflow: ellipsis; white-space: nowrap; }
 
+.task-title-command {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  margin: -3px -4px;
+  padding: 3px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.task-title-command:hover { background: #efefec; }
+.title-command-icon { flex: 0 0 auto; color: #8a8a83; opacity: 0; transition: opacity 120ms ease; }
+.task-title-command:hover .title-command-icon, .task-title-command:focus-visible .title-command-icon { opacity: 1; }
+
+.cli-command-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 26px;
+  display: grid;
+  width: min(760px, calc(100% - 48px));
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr) 28px 28px;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 8px;
+  border: 1px solid #d5d5ce;
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 6px 18px rgb(35 35 31 / 12%);
+  color: #6d6d66;
+}
+
+.cli-command-popover code { overflow-x: auto; color: #454540; font-family: "Cascadia Code", Consolas, monospace; font-size: 10.5px; line-height: 22px; white-space: nowrap; }
+.cli-command-popover button { display: grid; width: 28px; height: 28px; padding: 0; place-items: center; border: 0; border-radius: 4px; background: transparent; color: #74746d; cursor: pointer; }
+.cli-command-popover button:hover { background: #f0f0ec; color: #3f3f3a; }
+
 .workspace-chip {
   display: flex;
   min-width: 0;

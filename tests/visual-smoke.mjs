@@ -114,6 +114,18 @@ await page.screenshot({ path: resolve(artifacts, "conversation.png") });
 if (!(await page.locator(".response-duration").textContent())?.includes("本次回答耗时 · 8 秒")) throw new Error("completed response duration was not rendered");
 if (await page.locator(".composer-options select").count()) throw new Error("composer rendered native select controls");
 
+await page.locator(".task-title-command").click();
+await page.waitForSelector(".cli-command-popover");
+const commandPopoverLayout = await page.locator(".cli-command-popover").evaluate((element) => element.getBoundingClientRect().toJSON());
+if (commandPopoverLayout.left < 0 || commandPopoverLayout.top < 0 || commandPopoverLayout.right > 1320 || commandPopoverLayout.bottom > 860) {
+  throw new Error(`CMD command popover escaped the desktop viewport: ${JSON.stringify(commandPopoverLayout)}`);
+}
+if (!(await page.locator(".cli-command-popover code").textContent())?.includes('claude --resume "11111111-1111-4111-8111-111111111111"')) {
+  throw new Error("CMD command popover did not include the complete session resume command");
+}
+await page.screenshot({ path: resolve(artifacts, "cli-resume-command.png") });
+await page.locator('[aria-label="关闭 CMD 命令"]').click();
+
 await page.locator(".model-select .composer-select-trigger").click();
 const modelMenuLayout = await page.locator(".model-select .composer-select-menu").evaluate((element) => element.getBoundingClientRect().toJSON());
 if (modelMenuLayout.left < 0 || modelMenuLayout.top < 0 || modelMenuLayout.right > 1320 || modelMenuLayout.bottom > 860) {
@@ -269,6 +281,13 @@ const layout = await page.evaluate(() => ({
 
 await page.setViewportSize({ width: 900, height: 640 });
 await page.waitForTimeout(100);
+await page.locator(".task-title-command").click();
+const compactCommandPopoverLayout = await page.locator(".cli-command-popover").evaluate((element) => element.getBoundingClientRect().toJSON());
+if (compactCommandPopoverLayout.left < 0 || compactCommandPopoverLayout.top < 0 || compactCommandPopoverLayout.right > 900 || compactCommandPopoverLayout.bottom > 640) {
+  throw new Error(`CMD command popover escaped the compact viewport: ${JSON.stringify(compactCommandPopoverLayout)}`);
+}
+await page.screenshot({ path: resolve(artifacts, "cli-resume-command-compact.png") });
+await page.locator('[aria-label="关闭 CMD 命令"]').click();
 const restingProjectActions = await page.locator(".project-row .project-action").evaluateAll((elements) => (
   elements.filter((element) => getComputedStyle(element).display !== "none").length
 ));

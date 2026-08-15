@@ -434,6 +434,20 @@ try {
   if (!normalizedSession.includes('"entrypoint":"cli"') || !normalizedSession.includes('"promptSource":"typed"')) {
     throw new Error("claude-cli-UI session was not normalized for the CLI resume picker");
   }
+  await page.evaluate(() => {
+    window.__cliCommandClipboardWrites = [];
+    navigator.clipboard.writeText = async (text) => { window.__cliCommandClipboardWrites.push(text); };
+  });
+  await page.locator(".task-title-command").click();
+  await page.waitForSelector(".cli-command-popover");
+  const expectedCliCommand = `cd /d "${root}" && claude --resume "22222222-2222-4222-8222-222222222222"`;
+  if (await page.locator(".cli-command-popover code").textContent() !== expectedCliCommand) {
+    throw new Error("conversation title did not generate the complete CMD resume command");
+  }
+  if (await page.evaluate(() => window.__cliCommandClipboardWrites.at(-1)) !== expectedCliCommand) {
+    throw new Error("CMD resume command was not copied from the conversation title");
+  }
+  await page.locator('[aria-label="关闭 CMD 命令"]').click();
   await page.locator('.task-row.active .task-rename[title="重命名对话"]').evaluate((button) => button.click());
   await page.locator('input[aria-label="对话名称"]').fill("UI 同步会话名");
   await page.locator('input[aria-label="对话名称"]').press("Enter");
