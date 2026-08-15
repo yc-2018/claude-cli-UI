@@ -389,7 +389,7 @@ export default function Composer({
             <ComposerSelect
               ariaLabel="选择模型"
               className="model-select"
-              disabled={running || loadingHistory || modelConfig.options.length === 0}
+              disabled={loadingHistory || modelConfig.options.length === 0}
               icon={<Sparkles size={14} />}
               onChange={onModelChange}
               options={modelConfig.options.map((option) => ({ value: option.value, label: option.role, detail: option.actualModel }))}

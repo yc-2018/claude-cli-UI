@@ -865,6 +865,21 @@ try {
   await page.locator(".composer textarea").press("Enter");
   await page.waitForSelector('.message.assistant[data-status="running"]');
   if (await page.locator(".composer textarea").isDisabled()) throw new Error("composer was disabled while Claude was replying");
+  const runningModelTrigger = page.locator(".model-select .composer-select-trigger");
+  if (await runningModelTrigger.isDisabled()) throw new Error("model picker was disabled while Claude was replying");
+  await runningModelTrigger.click();
+  const originalRunningModel = await page.locator('.model-select .composer-select-option[aria-selected="true"]').getAttribute("data-value");
+  const alternateRunningModel = await page.locator(".model-select .composer-select-option").evaluateAll((options, original) => (
+    options.find((option) => option.getAttribute("data-value") !== original)?.getAttribute("data-value") ?? null
+  ), originalRunningModel);
+  if (!originalRunningModel || !alternateRunningModel) throw new Error("model picker did not expose an alternate model during a run");
+  await page.locator(`.model-select .composer-select-option[data-value="${alternateRunningModel}"]`).click();
+  await runningModelTrigger.click();
+  if (await page.locator(`.model-select .composer-select-option[data-value="${alternateRunningModel}"]`).getAttribute("aria-selected") !== "true") {
+    throw new Error("model selection did not change while Claude was replying");
+  }
+  await page.locator(`.model-select .composer-select-option[data-value="${originalRunningModel}"]`).click();
+  if (await page.locator('.message.assistant[data-status="running"]').count() !== 1) throw new Error("changing models interrupted the active response");
   await page.locator(".composer textarea").fill("引导当前任务");
   await page.locator(".composer textarea").press("Enter");
   const guidedPrompt = page.locator(".prompt-queue-item", { hasText: "引导当前任务" });

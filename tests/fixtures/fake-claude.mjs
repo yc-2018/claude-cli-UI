@@ -134,7 +134,7 @@ const processPrompt = (input) => {
       send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
       slowTaskActive = false;
       for (const deferredInput of deferredInputs.splice(0)) processPrompt(deferredInput);
-    }, 3_000);
+    }, 5_000);
     return;
   }
 
