@@ -54,6 +54,12 @@ function finishResponse(message: ChatMessage, now = Date.now()): Pick<ChatMessag
   return { responseDurationMs: Math.max(0, now - message.responseStartedAt) };
 }
 
+function appendResponseContent(current: string | undefined, addition: string) {
+  if (!addition) return current ?? "";
+  if (!current) return addition;
+  return `${current}\n\n${addition}`;
+}
+
 type PendingDeletion = {
   kind: "conversation";
   projectId: string;
@@ -847,8 +853,8 @@ export default function App() {
         if (fullText || fullThinking) {
           updateResponse(meta, (message) => ({
             ...message,
-            content: fullText ? `${meta.appendToResponse && message.content ? `${message.content}\n\n` : ""}${fullText}` : message.content,
-            thinking: fullThinking ? `${meta.appendToResponse && message.thinking ? `${message.thinking}\n\n` : ""}${fullThinking}` : message.thinking,
+            content: fullText ? appendResponseContent(message.content, fullText) : message.content,
+            thinking: fullThinking ? appendResponseContent(message.thinking, fullThinking) : message.thinking,
           }));
         }
       }
@@ -1477,7 +1483,7 @@ export default function App() {
     const meta: RunMeta = {
       conversationId: conversation.id,
       responseId: pendingPermission.responseId,
-      appendToResponse: false,
+      appendToResponse: true,
       completed: false,
       successful: false,
       receivedText: false,
@@ -1488,8 +1494,6 @@ export default function App() {
     const responseStartedAt = Date.now();
     updateResponse(meta, (message) => ({
       ...message,
-      content: "",
-      thinking: undefined,
       responseStartedAt,
       responseDurationMs: undefined,
       status: "running",

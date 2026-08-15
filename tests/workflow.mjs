@@ -668,6 +668,11 @@ try {
   if (!(await page.locator(".permission-dialog").textContent())?.includes("WebSearch") || !(await page.locator(".permission-dialog").textContent())?.includes("LongCat-2.0")) {
     throw new Error("permission dialog did not show the requested tool and input");
   }
+  const deniedPermissionResponse = page.locator(".message.assistant").last();
+  const deniedPermissionText = await deniedPermissionResponse.textContent();
+  if (!deniedPermissionText?.includes("我先保留这段阶段性说明") || !deniedPermissionText.includes("需要你授权网络搜索后才能继续")) {
+    throw new Error("multiple assistant updates before permission were not preserved");
+  }
   await page.screenshot({ path: resolve(artifacts, "permission-dialog.png") });
   await page.locator(".permission-deny").click();
   await page.waitForSelector(".permission-dialog", { state: "detached" });
@@ -679,6 +684,10 @@ try {
   await page.locator(".permission-allow-once").click();
   await page.waitForSelector(".permission-dialog", { state: "detached" });
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  const allowedPermissionText = await page.locator(".message.assistant").last().textContent();
+  if (!allowedPermissionText?.includes("我先保留这段阶段性说明") || !allowedPermissionText.includes("需要你授权网络搜索后才能继续") || !allowedPermissionText.includes("测试通过")) {
+    throw new Error("permission retry replaced output that was already visible");
+  }
   let permissionConversation = await page.evaluate(() => JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0]?.conversations?.find((conversation) => conversation.sessionId === "22222222-2222-4222-8222-222222222222"));
   if (permissionConversation.allowedTools?.includes("WebSearch")) throw new Error("allow once persisted the tool permission");
 

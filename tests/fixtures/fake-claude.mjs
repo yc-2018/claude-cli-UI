@@ -158,6 +158,11 @@ const processPrompt = (input) => {
     send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
     send({
       type: "assistant",
+      message: { role: "assistant", content: [{ type: "text", text: "我先保留这段阶段性说明，再申请搜索权限。" }] },
+      session_id: sessionId,
+    });
+    send({
+      type: "assistant",
       message: { role: "assistant", content: [{ type: "tool_use", id: "tool-web-search", name: "WebSearch", input: { query: "LongCat-2.0 发布公司" } }] },
       session_id: sessionId,
     });

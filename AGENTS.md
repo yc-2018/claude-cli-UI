@@ -59,3 +59,5 @@ npm run dist:portable
 ## 发布
 
 GitHub Actions workflow 会在 push 和 pull request 时运行完整测试，只有推送 `v*` tag 时才构建 Windows 产物并发布 GitHub Release。**每次打包都必须使用新版本号**：先升级 `package.json` 和 `package-lock.json` 中的版本（至少 patch），再构建产物；禁止用相同版本号重复打包、覆盖 `release/` 中已存在的同名产物。日常测试默认只构建便携版；只有用户明确要求时才构建安装版。发布新版本时，先更新 `package.json` 和 `package-lock.json` 中的版本号并提交，然后推送匹配的 tag，例如 `v0.2.0`。tag 必须与 package version 完全一致。
+
+每次代码修改完成并按上述规则打包后，都必须创建并推送与 `package.json` 版本完全一致的 annotated tag（格式为 `vX.Y.Z`）到 `origin`，以触发对应的 GitHub Release 构建；推送前确认该版本号和 tag 尚未使用，推送后核对远端 tag 已指向本次提交。除非用户明确要求仅做本地验证或暂不推送，否则不能只生成便携包而遗漏版本标签。
