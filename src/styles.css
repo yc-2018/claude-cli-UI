@@ -738,6 +738,9 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .thinking-content.markdown p { margin-bottom: 8px; }
 
 .activity-list { display: grid; gap: 2px; margin: 0 0 12px; }
+.response-timeline { display: grid; gap: 10px; }
+.response-timeline .activity-row { margin: -1px 0; }
+.response-text-block { min-width: 0; }
 .activity-row { display: flex; min-width: 0; height: 28px; align-items: center; gap: 7px; color: #6f6f68; font-size: 12px; }
 .activity-icon { display: grid; width: 20px; height: 20px; flex: 0 0 auto; place-items: center; color: #777770; }
 .activity-name { flex: 0 0 auto; color: #555550; font-weight: 570; }

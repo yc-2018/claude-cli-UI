@@ -40,6 +40,7 @@ interface RunMeta {
   receivedThinking: boolean;
   pendingText: string;
   pendingThinking: string;
+  activeTextBlockId?: string;
   flushTimer?: number;
 }
 
@@ -186,6 +187,13 @@ function getThinkingDelta(data: Record<string, unknown>) {
   return delta.type === "thinking_delta" && typeof delta.thinking === "string" ? delta.thinking : "";
 }
 
+function getStreamBlockStart(data: Record<string, unknown>) {
+  if (data.type !== "stream_event" || !data.event || typeof data.event !== "object") return null;
+  const streamEvent = data.event as Record<string, unknown>;
+  if (streamEvent.type !== "content_block_start" || !streamEvent.content_block || typeof streamEvent.content_block !== "object") return null;
+  return streamEvent.content_block as Record<string, unknown>;
+}
+
 function summarizeToolInput(input: unknown) {
   if (!input || typeof input !== "object") return "";
   const value = input as Record<string, unknown>;
@@ -228,42 +236,50 @@ function getPermissionRequests(data: Record<string, unknown>): ToolPermissionReq
   });
 }
 
-function getActivities(data: Record<string, unknown>): Activity[] {
+function getAssistantContent(data: Record<string, unknown>): Record<string, unknown>[] {
   if (data.type !== "assistant" || !data.message || typeof data.message !== "object") return [];
   const content = (data.message as Record<string, unknown>).content;
   if (!Array.isArray(content)) return [];
-  return content.flatMap((block) => {
-    if (!block || typeof block !== "object") return [];
-    const item = block as Record<string, unknown>;
-    if (item.type !== "tool_use" || typeof item.name !== "string") return [];
-    return [{
-      id: typeof item.id === "string" ? item.id : makeId(),
-      name: item.name,
-      summary: summarizeToolInput(item.input),
-    }];
-  });
+  return content.filter((block): block is Record<string, unknown> => Boolean(block && typeof block === "object"));
 }
 
-function getAssistantText(data: Record<string, unknown>) {
-  if (data.type !== "assistant" || !data.message || typeof data.message !== "object") return "";
-  const content = (data.message as Record<string, unknown>).content;
-  if (!Array.isArray(content)) return "";
-  return content.flatMap((block) => {
-    if (!block || typeof block !== "object") return [];
-    const item = block as Record<string, unknown>;
-    return item.type === "text" && typeof item.text === "string" ? [item.text] : [];
-  }).join("");
+function appendTimelineText(message: ChatMessage, id: string, text: string): ChatMessage {
+  if (!text) return message;
+  const timeline = message.timeline ?? [];
+  const existingIndex = timeline.findIndex((item) => item.type === "text" && item.id === id);
+  if (existingIndex >= 0) {
+    return {
+      ...message,
+      content: message.content + text,
+      timeline: timeline.map((item, index) => index === existingIndex && item.type === "text"
+        ? { ...item, content: item.content + text }
+        : item),
+    };
+  }
+  return {
+    ...message,
+    content: appendResponseContent(message.content, text),
+    timeline: [...timeline, { id, type: "text", content: text }],
+  };
 }
 
-function getAssistantThinking(data: Record<string, unknown>) {
-  if (data.type !== "assistant" || !data.message || typeof data.message !== "object") return "";
-  const content = (data.message as Record<string, unknown>).content;
-  if (!Array.isArray(content)) return "";
-  return content.flatMap((block) => {
-    if (!block || typeof block !== "object") return [];
-    const item = block as Record<string, unknown>;
-    return item.type === "thinking" && typeof item.thinking === "string" ? [item.thinking] : [];
-  }).join("\n\n");
+function upsertTimelineActivity(message: ChatMessage, activity: Activity): ChatMessage {
+  const activities = message.activities ?? [];
+  const existingActivity = activities.find((item) => item.id === activity.id);
+  const nextActivity = existingActivity ? { ...existingActivity, ...activity } : activity;
+  const timeline = message.timeline ?? [];
+  const existingTimelineIndex = timeline.findIndex((item) => item.type === "activity" && item.activity.id === activity.id);
+  return {
+    ...message,
+    activities: existingActivity
+      ? activities.map((item) => item.id === activity.id ? nextActivity : item)
+      : [...activities, nextActivity],
+    timeline: existingTimelineIndex >= 0
+      ? timeline.map((item, index) => index === existingTimelineIndex && item.type === "activity"
+        ? { ...item, activity: nextActivity }
+        : item)
+      : [...timeline, { id: `activity-${activity.id}`, type: "activity", activity: nextActivity }],
+  };
 }
 
 function createConversation(): Conversation {
@@ -836,11 +852,16 @@ export default function App() {
     const thinking = meta.pendingThinking;
     meta.pendingText = "";
     meta.pendingThinking = "";
-    updateResponse(meta, (message) => ({
-      ...message,
-      content: message.content + text,
-      thinking: `${message.thinking ?? ""}${thinking}` || undefined,
-    }));
+    const textBlockId = text ? meta.activeTextBlockId ?? (meta.activeTextBlockId = makeId()) : undefined;
+    updateResponse(meta, (message) => {
+      const withText = text && textBlockId
+        ? appendTimelineText(message, textBlockId, text)
+        : message;
+      return {
+        ...withText,
+        thinking: `${withText.thinking ?? ""}${thinking}` || undefined,
+      };
+    });
   }, [updateResponse]);
 
   useEffect(() => window.claudeDesk.onEvent((event: ClaudeEvent) => {
@@ -877,9 +898,27 @@ export default function App() {
         }));
       }
 
+      const blockStart = getStreamBlockStart(data);
+      if (blockStart?.type === "text" || blockStart?.type === "thinking") {
+        flushPendingText(meta);
+        if (blockStart.type === "text") meta.activeTextBlockId = makeId();
+        updateResponse(meta, (message) => ({ ...message, activeActivityId: undefined }));
+      }
+      if (blockStart?.type === "tool_use" && typeof blockStart.name === "string") {
+        flushPendingText(meta);
+        const activity: Activity = {
+          id: typeof blockStart.id === "string" ? blockStart.id : makeId(),
+          name: blockStart.name,
+          summary: summarizeToolInput(blockStart.input),
+        };
+        updateResponse(meta, (message) => ({ ...upsertTimelineActivity(message, activity), activeActivityId: activity.id }));
+        meta.activeTextBlockId = undefined;
+      }
+
       const delta = getTextDelta(data);
       if (delta) {
-        if (meta.appendToResponse && !meta.receivedText) meta.pendingText += "\n\n";
+        if (!meta.receivedText) updateResponse(meta, (message) => ({ ...message, activeActivityId: undefined }));
+        if (!meta.activeTextBlockId) meta.activeTextBlockId = makeId();
         meta.receivedText = true;
         meta.pendingText += delta;
         if (meta.flushTimer === undefined) meta.flushTimer = window.setTimeout(() => flushPendingText(meta), 50);
@@ -887,30 +926,43 @@ export default function App() {
 
       const thinkingDelta = getThinkingDelta(data);
       if (thinkingDelta) {
+        if (!meta.receivedThinking) updateResponse(meta, (message) => ({ ...message, activeActivityId: undefined }));
         if (meta.appendToResponse && !meta.receivedThinking) meta.pendingThinking += "\n\n";
         meta.receivedThinking = true;
         meta.pendingThinking += thinkingDelta;
         if (meta.flushTimer === undefined) meta.flushTimer = window.setTimeout(() => flushPendingText(meta), 50);
       }
 
-      const activities = getActivities(data);
-      if (activities.length > 0) {
-        updateResponse(meta, (message) => {
-          const known = new Set((message.activities ?? []).map((item) => item.id));
-          return { ...message, activities: [...(message.activities ?? []), ...activities.filter((item) => !known.has(item.id))] };
-        });
-      }
-
       if (data.type === "assistant") {
-        const fullText = meta.receivedText ? "" : getAssistantText(data);
-        const fullThinking = meta.receivedThinking ? "" : getAssistantThinking(data);
-        if (fullText || fullThinking) {
-          updateResponse(meta, (message) => ({
-            ...message,
-            content: fullText ? appendResponseContent(message.content, fullText) : message.content,
-            thinking: fullThinking ? appendResponseContent(message.thinking, fullThinking) : message.thinking,
-          }));
-        }
+        flushPendingText(meta);
+        const receivedText = meta.receivedText;
+        const receivedThinking = meta.receivedThinking;
+        updateResponse(meta, (message) => {
+          let next = message;
+          for (const block of getAssistantContent(data)) {
+            if (block.type === "text" && typeof block.text === "string") {
+              next = { ...next, activeActivityId: undefined };
+              if (!receivedText) next = appendTimelineText(next, makeId(), block.text);
+            }
+            if (block.type === "thinking" && typeof block.thinking === "string") {
+              next = { ...next, activeActivityId: undefined };
+              if (!receivedThinking) next = { ...next, thinking: appendResponseContent(next.thinking, block.thinking) };
+            }
+            if (block.type === "tool_use" && typeof block.name === "string") {
+              const activityId = typeof block.id === "string" ? block.id : makeId();
+              next = upsertTimelineActivity(next, {
+                id: activityId,
+                name: block.name,
+                summary: summarizeToolInput(block.input),
+              });
+              next = { ...next, activeActivityId: activityId };
+            }
+          }
+          return next;
+        });
+        meta.receivedText = false;
+        meta.receivedThinking = false;
+        meta.activeTextBlockId = undefined;
       }
 
       if (data.type === "result") {
@@ -922,9 +974,10 @@ export default function App() {
         const isError = data.is_error === true;
         meta.successful = !isError && permissionRequests.length === 0;
         const resultText = typeof data.result === "string" ? data.result : "";
+        const resultBlockId = makeId();
         updateResponse(meta, (message) => ({
-          ...message,
-          content: message.content || resultText,
+          ...(message.content || !resultText ? message : appendTimelineText(message, resultBlockId, resultText)),
+          activeActivityId: undefined,
           status: permissionRequests.length > 0 ? "stopped" : (isError ? "error" : (hasPendingTurn ? "running" : "done")),
           error: isError ? resultText || "Claude 未能完成这次任务" : undefined,
           ...(!hasPendingTurn || isError || permissionRequests.length > 0 ? finishResponse(message) : {}),
@@ -952,6 +1005,7 @@ export default function App() {
     }
 
     if (event.type === "raw" && event.text) {
+      if (!meta.activeTextBlockId) meta.activeTextBlockId = makeId();
       meta.pendingText += event.text + "\n";
       if (meta.flushTimer === undefined) meta.flushTimer = window.setTimeout(() => flushPendingText(meta), 50);
     }
@@ -959,13 +1013,13 @@ export default function App() {
       flushPendingText(meta);
       meta.completed = true;
       meta.successful = false;
-      updateResponse(meta, (message) => ({ ...message, status: "error", error: event.message ?? "无法启动 Claude CLI", ...finishResponse(message) }));
+      updateResponse(meta, (message) => ({ ...message, status: "error", activeActivityId: undefined, error: event.message ?? "无法启动 Claude CLI", ...finishResponse(message) }));
     }
     if (event.type === "exit") {
       flushPendingText(meta);
       if (!meta.completed) {
         const detail = event.stderr || (event.code === 0 ? "Claude 已结束，但没有返回结果" : `Claude CLI 退出，代码 ${event.code ?? "未知"}`);
-        updateResponse(meta, (message) => ({ ...message, status: "error", error: detail, ...finishResponse(message) }));
+        updateResponse(meta, (message) => ({ ...message, status: "error", activeActivityId: undefined, error: detail, ...finishResponse(message) }));
       }
       setActiveRuns((current) => {
         const next = { ...current };
@@ -1262,6 +1316,7 @@ export default function App() {
       responseStartedAt: now,
       status: "running",
       activities: [],
+      timeline: [],
     };
     const firstPrompt = conversation.messages.length === 0;
 

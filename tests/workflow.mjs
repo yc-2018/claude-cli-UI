@@ -121,6 +121,7 @@ await writeFile(resolve(cliSessions, `${importedSessionId}.jsonl`), [
       model: "ThirdParty-A",
       content: [
         { type: "thinking", thinking: "读取终端历史并整理上下文。" },
+        { type: "text", text: "先核对 CLI 历史。" },
         { type: "tool_use", id: "history-tool", name: "Read", input: { file_path: "README.md" } },
         { type: "text", text: "这是从 Claude CLI 会话文件恢复的回答。" },
       ],
@@ -280,6 +281,9 @@ try {
   await importedRow.locator(".task-select").click();
   await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "来自终端的历史对话");
   if (!(await page.locator(".markdown").last().textContent())?.includes("恢复的回答")) throw new Error("CLI session response was not loaded");
+  if ((await page.locator(".message.assistant [data-timeline-kind]").evaluateAll((items) => items.map((item) => item.getAttribute("data-timeline-kind")).join(","))) !== "text,activity,text") {
+    throw new Error("CLI session history did not preserve text and tool event order");
+  }
   if (!(await page.locator(".thinking-toggle").last().textContent())?.includes("思考过程")) throw new Error("CLI session thinking was not loaded");
   if (await page.locator(".composer textarea").inputValue() !== "") throw new Error("draft leaked into another conversation");
   await localRow.locator(".task-select").click();
@@ -423,7 +427,7 @@ try {
   await page.locator(".composer textarea").press("Enter");
   await page.waitForSelector('.message.assistant[data-status="done"]', { timeout: 15_000 });
   await page.waitForFunction(() => {
-    const responses = document.querySelectorAll(".message.assistant .message-body > .markdown");
+    const responses = document.querySelectorAll(".message.assistant .markdown");
     return responses.item(responses.length - 1)?.textContent?.includes("流式输出稳定");
   });
   await page.waitForTimeout(500);
@@ -823,6 +827,24 @@ try {
   await page.locator(".composer textarea").fill("空响应");
   await page.locator(".composer textarea").press("Enter");
   await page.waitForFunction(() => document.querySelectorAll('.message.assistant[data-status="error"]').length === 2);
+
+  await page.locator(".composer textarea").fill("时间线排序测试");
+  await page.locator(".composer textarea").press("Enter");
+  const timelineResponse = page.locator(".message.assistant").last();
+  await timelineResponse.waitFor({ state: "attached" });
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  const timelineKinds = await timelineResponse.locator("[data-timeline-kind]").evaluateAll((items) => items.map((item) => item.getAttribute("data-timeline-kind")));
+  if (timelineKinds.join(",") !== "text,activity,text,activity,text") {
+    throw new Error(`assistant output was grouped instead of preserving CLI event order: ${timelineKinds.join(",")}`);
+  }
+  const timelineText = await timelineResponse.locator('[data-timeline-kind="text"]').allTextContents();
+  if (timelineText.join("|") !== "先说明当前处理方案。|编辑已经完成，继续检查。|最终总结已经完成。") {
+    throw new Error(`assistant text phases were merged or lost: ${timelineText.join("|")}`);
+  }
+  if ((await timelineResponse.locator('[data-timeline-kind="activity"] .activity-name').allTextContents()).join(",") !== "Edit,Bash") {
+    throw new Error("assistant tool calls did not remain in their original timeline positions");
+  }
+  if (await timelineResponse.locator(".mini-spinner").count()) throw new Error("completed timeline activity still appeared to be running");
 
   await page.locator(".composer textarea").fill("后台托盘测试");
   await page.locator(".composer textarea").press("Enter");

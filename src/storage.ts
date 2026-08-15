@@ -1,4 +1,4 @@
-import type { Activity, Attachment, ChatMessage, Conversation, PermissionMode, Project } from "./types";
+import type { Activity, Attachment, ChatMessage, Conversation, PermissionMode, Project, ResponseTimelineItem } from "./types";
 
 export const PROJECTS_STORAGE_KEY = "claude-desk.projects.v2";
 export const LEGACY_TASKS_STORAGE_KEY = "claude-desk.tasks.v1";
@@ -39,6 +39,23 @@ function normalizeMessage(value: unknown): ChatMessage | null {
       activity && typeof activity.id === "string" && typeof activity.name === "string" && typeof activity.summary === "string",
     ))
     : [];
+  const timeline = Array.isArray(message.timeline)
+    ? message.timeline.flatMap((item): ResponseTimelineItem[] => {
+      if (!item || typeof item !== "object") return [];
+      const candidate = item as Partial<ResponseTimelineItem>;
+      if (candidate.type === "text" && typeof candidate.id === "string" && typeof candidate.content === "string") {
+        return [{ id: candidate.id, type: "text", content: candidate.content }];
+      }
+      if (
+        candidate.type === "activity" && typeof candidate.id === "string" &&
+        candidate.activity && typeof candidate.activity.id === "string" &&
+        typeof candidate.activity.name === "string" && typeof candidate.activity.summary === "string"
+      ) {
+        return [{ id: candidate.id, type: "activity", activity: candidate.activity }];
+      }
+      return [];
+    })
+    : undefined;
   const attachments = Array.isArray(message.attachments)
     ? message.attachments.filter((attachment): attachment is Attachment => Boolean(
       attachment &&
@@ -70,6 +87,7 @@ function normalizeMessage(value: unknown): ChatMessage | null {
     createdAt: typeof message.createdAt === "number" ? message.createdAt : Date.now(),
     status: wasInterrupted ? "stopped" : status,
     activities,
+    timeline,
     attachments,
     error: wasInterrupted ? "上次运行已中断，可以重新发送任务。" : (typeof message.error === "string" ? message.error : undefined),
   };

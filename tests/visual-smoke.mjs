@@ -86,6 +86,14 @@ await page.evaluate((workspace) => {
             { id: "t1", name: "Grep", summary: "session status" },
             { id: "t2", name: "Read", summary: "src/auth/session.ts" },
             { id: "t3", name: "Edit", summary: "src/router/guard.ts" }
+          ],
+          timeline: [
+            { id: "phase-1", type: "text", content: "问题出在会话初始化顺序：页面在令牌恢复完成前就触发了未登录跳转。" },
+            { id: "activity-t1", type: "activity", activity: { id: "t1", name: "Grep", summary: "session status" } },
+            { id: "activity-t2", type: "activity", activity: { id: "t2", name: "Read", summary: "src/auth/session.ts" } },
+            { id: "phase-2", type: "text", content: "我调整了初始化状态，并补充了回归测试：\n\n```ts\nif (session.status === 'loading') return;\n```" },
+            { id: "activity-t3", type: "activity", activity: { id: "t3", name: "Edit", summary: "src/router/guard.ts" } },
+            { id: "phase-3", type: "text", content: "现在刷新页面会等待会话恢复后再判断路由。" }
           ]
         }
       ]
@@ -112,6 +120,9 @@ if (await page.locator('[aria-label="已置顶项目"]').count() !== 1 || await 
 }
 await page.screenshot({ path: resolve(artifacts, "conversation.png") });
 if (!(await page.locator(".response-duration").textContent())?.includes("本次回答耗时 · 8 秒")) throw new Error("completed response duration was not rendered");
+if ((await page.locator("[data-timeline-kind]").evaluateAll((items) => items.map((item) => item.getAttribute("data-timeline-kind")).join(","))) !== "text,activity,activity,text,activity,text") {
+  throw new Error("visual fixture did not render assistant text and tools as one ordered timeline");
+}
 if (await page.locator(".composer-options select").count()) throw new Error("composer rendered native select controls");
 
 await page.locator(".task-title-command").click();

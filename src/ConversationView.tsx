@@ -4,7 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import type { Activity, ChatMessage } from "./types";
+import type { Activity, ChatMessage, ResponseTimelineItem } from "./types";
 
 function getToolIcon(name: string) {
   const normalized = name.toLowerCase();
@@ -30,24 +30,48 @@ function MarkdownMessage({ content }: { content: string }) {
   );
 }
 
+function ActivityRow({ activity, working }: { activity: Activity; working: boolean }) {
+  const Icon = getToolIcon(activity.name);
+  return (
+    <div className="activity-row" data-timeline-kind="activity">
+      <span className={`activity-icon ${working ? "working" : ""}`}>
+        {working ? <span className="mini-spinner" /> : <Icon size={14} />}
+      </span>
+      <span className="activity-name">{activity.name}</span>
+      {activity.summary ? <span className="activity-summary">{activity.summary}</span> : null}
+      {!working ? <Check className="activity-check" size={13} /> : null}
+    </div>
+  );
+}
+
 function ActivityList({ activities, running }: { activities: Activity[]; running: boolean }) {
   if (activities.length === 0) return null;
   return (
     <div className="activity-list">
       {activities.map((activity, index) => {
-        const Icon = getToolIcon(activity.name);
         const isCurrent = running && index === activities.length - 1;
-        return (
-          <div className="activity-row" key={activity.id}>
-            <span className={`activity-icon ${isCurrent ? "working" : ""}`}>
-              {isCurrent ? <span className="mini-spinner" /> : <Icon size={14} />}
-            </span>
-            <span className="activity-name">{activity.name}</span>
-            {activity.summary ? <span className="activity-summary">{activity.summary}</span> : null}
-            {!isCurrent ? <Check className="activity-check" size={13} /> : null}
-          </div>
-        );
+        return <ActivityRow activity={activity} key={activity.id} working={isCurrent} />;
       })}
+    </div>
+  );
+}
+
+function ResponseTimeline({ activeActivityId, items, running }: { activeActivityId?: string; items: ResponseTimelineItem[]; running: boolean }) {
+  return (
+    <div className="response-timeline">
+      {items.map((item) => item.type === "text" ? (
+        item.content ? (
+          <div className="markdown response-text-block" data-timeline-kind="text" key={item.id}>
+            <MarkdownMessage content={item.content} />
+          </div>
+        ) : null
+      ) : (
+        <ActivityRow
+          activity={item.activity}
+          key={item.id}
+          working={running && activeActivityId === item.activity.id}
+        />
+      ))}
     </div>
   );
 }
@@ -327,8 +351,18 @@ export default function ConversationView({ messages, loadingHistory = false, bra
                         running={message.status === "running"}
                       />
                     ) : null}
-                    <ActivityList activities={message.activities ?? []} running={message.status === "running"} />
-                    {message.content ? <div className="markdown"><MarkdownMessage content={message.content} /></div> : null}
+                    {message.timeline ? (
+                      <ResponseTimeline
+                        activeActivityId={message.activeActivityId}
+                        items={message.timeline}
+                        running={message.status === "running"}
+                      />
+                    ) : (
+                      <>
+                        <ActivityList activities={message.activities ?? []} running={message.status === "running"} />
+                        {message.content ? <div className="markdown"><MarkdownMessage content={message.content} /></div> : null}
+                      </>
+                    )}
                     {message.status === "running" && !message.content && !message.thinking && (message.activities?.length ?? 0) === 0
                       ? <div className="thinking"><span className="spinner" />Claude 正在准备回答</div>
                       : null}

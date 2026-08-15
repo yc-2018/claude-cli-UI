@@ -40,6 +40,8 @@ const processPrompt = (input) => {
   const resumedSessionId = resumeIndex >= 0 ? args[resumeIndex + 1] : undefined;
   const sessionId = resumedSessionId ?? (prompt.includes("第二个")
     ? "33333333-3333-4333-8333-333333333333"
+    : prompt.includes("时间线排序测试")
+      ? "66666666-6666-4666-8666-666666666666"
     : prompt.includes("后台托盘测试")
       ? "55555555-5555-4555-8555-555555555555"
       : "22222222-2222-4222-8222-222222222222");
@@ -202,6 +204,56 @@ const processPrompt = (input) => {
       send({ type: "assistant", message: { role: "assistant", content: [{ type: "thinking", thinking }, { type: "text", text: response }] }, session_id: sessionId });
       send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
     }, 20);
+    return;
+  }
+
+  if (prompt.includes("时间线排序测试")) {
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    const phases = [
+      {
+        text: "先说明当前处理方案。",
+        tool: { id: "tool-edit-order", name: "Edit", input: { file_path: "src/App.tsx" } },
+      },
+      {
+        text: "编辑已经完成，继续检查。",
+        tool: { id: "tool-bash-order", name: "Bash", input: { command: "npm test" } },
+      },
+    ];
+    for (const phase of phases) {
+      send({
+        type: "stream_event",
+        event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        session_id: sessionId,
+      });
+      send({
+        type: "stream_event",
+        event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: phase.text } },
+        session_id: sessionId,
+      });
+      send({
+        type: "stream_event",
+        event: { type: "content_block_start", index: 1, content_block: { type: "tool_use", ...phase.tool } },
+        session_id: sessionId,
+      });
+      send({
+        type: "assistant",
+        message: { role: "assistant", content: [{ type: "text", text: phase.text }, { type: "tool_use", ...phase.tool }] },
+        session_id: sessionId,
+      });
+    }
+    const summary = "最终总结已经完成。";
+    send({
+      type: "stream_event",
+      event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      session_id: sessionId,
+    });
+    send({
+      type: "stream_event",
+      event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: summary } },
+      session_id: sessionId,
+    });
+    send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: summary }] }, session_id: sessionId });
+    send({ type: "result", subtype: "success", is_error: false, result: summary, session_id: sessionId });
     return;
   }
 

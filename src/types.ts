@@ -50,6 +50,16 @@ export interface Activity {
   summary: string;
 }
 
+export type ResponseTimelineItem = {
+  id: string;
+  type: "text";
+  content: string;
+} | {
+  id: string;
+  type: "activity";
+  activity: Activity;
+};
+
 export interface Attachment {
   id: string;
   storedName: string;
@@ -84,6 +94,8 @@ export interface ChatMessage {
   createdAt: number;
   status?: "running" | "done" | "error" | "stopped";
   activities?: Activity[];
+  timeline?: ResponseTimelineItem[];
+  activeActivityId?: string;
   error?: string;
   attachments?: Attachment[];
 }

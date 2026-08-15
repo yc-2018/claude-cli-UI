@@ -67,6 +67,16 @@ interface ImportedActivity {
   summary: string;
 }
 
+type ImportedTimelineItem = {
+  id: string;
+  type: "text";
+  content: string;
+} | {
+  id: string;
+  type: "activity";
+  activity: ImportedActivity;
+};
+
 interface ImportedMessage {
   id: string;
   role: "user" | "assistant";
@@ -75,6 +85,7 @@ interface ImportedMessage {
   createdAt: number;
   status?: "done";
   activities?: ImportedActivity[];
+  timeline?: ImportedTimelineItem[];
 }
 
 interface ClaudeSessionSummary {
@@ -697,20 +708,30 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
         createdAt: timestamp ?? updatedAt ?? Date.now(),
         status: "done",
         activities: [],
+        timeline: [],
       };
       messages.push(currentAssistant);
     }
     for (const block of message.content) {
       if (!block || typeof block !== "object") continue;
       const item = block as Record<string, unknown>;
-      if (item.type === "text" && typeof item.text === "string") currentAssistant.content += item.text;
+      if (item.type === "text" && typeof item.text === "string") {
+        currentAssistant.content += item.text;
+        currentAssistant.timeline?.push({
+          id: `${currentAssistant.id}-text-${currentAssistant.timeline.length}`,
+          type: "text",
+          content: item.text,
+        });
+      }
       if (item.type === "thinking" && typeof item.thinking === "string") {
         currentAssistant.thinking = `${currentAssistant.thinking ?? ""}${item.thinking}`;
       }
       if (item.type === "tool_use" && typeof item.name === "string") {
         const id = typeof item.id === "string" ? item.id : `${currentAssistant.id}-tool-${currentAssistant.activities?.length ?? 0}`;
         if (!currentAssistant.activities?.some((activity) => activity.id === id)) {
-          currentAssistant.activities?.push({ id, name: item.name, summary: summarizeImportedTool(item.input) });
+          const activity = { id, name: item.name, summary: summarizeImportedTool(item.input) };
+          currentAssistant.activities?.push(activity);
+          currentAssistant.timeline?.push({ id: `${currentAssistant.id}-activity-${id}`, type: "activity", activity });
         }
       }
     }
