@@ -21,6 +21,7 @@ import type {
   Conversation,
   ModelConfig,
   PermissionMode,
+  PermissionNotificationRequest,
   Project,
   QueuedPrompt,
   ReorderPosition,
@@ -364,6 +365,7 @@ export default function App() {
   const sidebarResize = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
   const branchingConversation = useRef(false);
   const previousUpdatePhase = useRef(updateState.phase);
+  const notifiedPermissionIds = useRef(new Set<string>());
 
   const activeProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -516,6 +518,44 @@ export default function App() {
     )), 8_000);
     return () => window.clearTimeout(timer);
   }, [completionNotice]);
+
+  useEffect(() => {
+    if (!pendingPermission) return;
+    let notificationTimer: number | undefined;
+    const notifyIfBackground = () => {
+      if (
+        notifiedPermissionIds.current.has(pendingPermission.responseId) ||
+        (document.visibilityState === "visible" && document.hasFocus())
+      ) return;
+      window.clearTimeout(notificationTimer);
+      notificationTimer = window.setTimeout(() => {
+        if (
+          notifiedPermissionIds.current.has(pendingPermission.responseId) ||
+          (document.visibilityState === "visible" && document.hasFocus())
+        ) return;
+        const conversation = projectsRef.current
+          .flatMap((project) => project.conversations)
+          .find((item) => item.id === pendingPermission.conversationId);
+        if (!conversation) return;
+        const request: PermissionNotificationRequest = {
+          requestId: pendingPermission.responseId,
+          conversationId: pendingPermission.conversationId,
+          title: conversation.title,
+          tools: [...new Set(pendingPermission.requests.map((item) => item.toolName))],
+        };
+        notifiedPermissionIds.current.add(pendingPermission.responseId);
+        void window.claudeDesk.notifyPermission(request).catch(() => false);
+      }, 100);
+    };
+    notifyIfBackground();
+    window.addEventListener("blur", notifyIfBackground);
+    document.addEventListener("visibilitychange", notifyIfBackground);
+    return () => {
+      window.clearTimeout(notificationTimer);
+      window.removeEventListener("blur", notifyIfBackground);
+      document.removeEventListener("visibilitychange", notifyIfBackground);
+    };
+  }, [pendingPermission]);
 
   useEffect(() => {
     localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));

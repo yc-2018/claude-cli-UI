@@ -12,6 +12,13 @@ export interface AppSelection {
   conversationId: string | null;
 }
 
+export interface PermissionNotificationRequest {
+  requestId: string;
+  conversationId: string;
+  title: string;
+  tools: string[];
+}
+
 export type AppUpdatePhase = "idle" | "checking" | "available" | "downloading" | "ready" | "up-to-date" | "error";
 
 export interface AppUpdateState {

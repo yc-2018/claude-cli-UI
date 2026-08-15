@@ -662,6 +662,14 @@ try {
   await page.screenshot({ path: resolve(artifacts, "slash-menu.png") });
   await page.locator(".composer textarea").fill("");
 
+  await electronApp.evaluate(({ ipcMain }) => {
+    globalThis.__permissionNotifyCalls = [];
+    ipcMain.removeHandler("app:notify-permission");
+    ipcMain.handle("app:notify-permission", (_event, request) => {
+      globalThis.__permissionNotifyCalls.push(request);
+      return true;
+    });
+  });
   await page.locator(".composer textarea").fill("权限测试");
   await page.locator(".composer textarea").press("Enter");
   await page.waitForSelector(".permission-dialog");
@@ -673,6 +681,25 @@ try {
   if (!deniedPermissionText?.includes("我先保留这段阶段性说明") || !deniedPermissionText.includes("需要你授权网络搜索后才能继续")) {
     throw new Error("multiple assistant updates before permission were not preserved");
   }
+  await page.waitForTimeout(200);
+  if (await electronApp.evaluate(() => globalThis.__permissionNotifyCalls.length) !== 0) {
+    throw new Error("focused permission request triggered a background notification");
+  }
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hasFocus", { configurable: true, value: () => false });
+    window.dispatchEvent(new Event("blur"));
+  });
+  await electronApp.evaluate(async () => {
+    const deadline = Date.now() + 5_000;
+    while (globalThis.__permissionNotifyCalls.length !== 1 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  });
+  const permissionNotifyCall = await electronApp.evaluate(() => globalThis.__permissionNotifyCalls[0]);
+  if (permissionNotifyCall?.title !== "CLI 外部改名" || !permissionNotifyCall?.tools?.includes("WebSearch")) {
+    throw new Error("background permission notification did not identify the conversation and tool");
+  }
+  await page.evaluate(() => { delete document.hasFocus; });
   await page.screenshot({ path: resolve(artifacts, "permission-dialog.png") });
   await page.locator(".permission-deny").click();
   await page.waitForSelector(".permission-dialog", { state: "detached" });

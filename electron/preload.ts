@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld("claudeDesk", {
   setAppSettings: (settings: unknown) => ipcRenderer.invoke("app:settings:set", settings),
   focusWindow: () => ipcRenderer.invoke("app:focus-window"),
   notifyCompletion: (conversationId: string, title: string) => ipcRenderer.invoke("app:notify-completion", { conversationId, title }),
+  notifyPermission: (request: { requestId: string; conversationId: string; title: string; tools: string[] }) => ipcRenderer.invoke("app:notify-permission", request),
   reportError: (message: string) => ipcRenderer.send("app:renderer-error", message),
   startRun: (request: unknown) => ipcRenderer.invoke("claude:start", request),
   appendRun: (request: unknown) => ipcRenderer.invoke("claude:append", request),

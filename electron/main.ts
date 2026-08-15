@@ -171,6 +171,7 @@ function createWindow() {
     void appendFile(join(app.getPath("userData"), "renderer-errors.log"), line, "utf8");
   });
 
+  window.on("focus", () => window.flashFrame(false));
   window.on("close", (event) => {
     if (isQuitting) return;
     event.preventDefault();
@@ -191,6 +192,7 @@ function trayIconPath() {
 
 function showMainWindow(conversationId?: string) {
   const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createWindow();
+  window.flashFrame(false);
   if (window.isMinimized()) window.restore();
   window.show();
   window.focus();
@@ -977,6 +979,45 @@ ipcMain.handle("app:notify-completion", (_event, value: unknown) => {
     title: "会话已完成",
     body: `“${request.title}”已完成`,
     icon: trayIconPath(),
+  });
+  activeNotifications.add(notification);
+  notification.on("click", () => {
+    activeNotifications.delete(notification);
+    showMainWindow(request.conversationId as string);
+  });
+  notification.on("close", () => activeNotifications.delete(notification));
+  notification.on("failed", () => activeNotifications.delete(notification));
+  notification.show();
+  return true;
+});
+
+ipcMain.handle("app:notify-permission", (event, value: unknown) => {
+  if (!value || typeof value !== "object") return false;
+  const request = value as Record<string, unknown>;
+  const requestedTools = Array.isArray(request.tools) ? request.tools : [];
+  const tools = requestedTools.filter((tool): tool is string => (
+    typeof tool === "string" && /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(tool)
+  ));
+  if (
+    typeof request.requestId !== "string" || request.requestId.length === 0 || request.requestId.length > 200 ||
+    typeof request.conversationId !== "string" || request.conversationId.length === 0 || request.conversationId.length > 200 ||
+    typeof request.title !== "string" || request.title.length === 0 || request.title.length > 100 ||
+    tools.length === 0 || tools.length !== requestedTools.length
+  ) return false;
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  if (!owner || owner.isDestroyed()) return false;
+  if (owner.isVisible() && owner.isFocused() && !owner.isMinimized()) return false;
+
+  owner.flashFrame(true);
+  if (process.env.CLAUDE_DESK_DISABLE_NOTIFICATIONS === "1" || !Notification.isSupported()) return true;
+
+  const visibleTools = tools.slice(0, 3).join("、");
+  const remainingCount = tools.length - 3;
+  const notification = new Notification({
+    title: "Claude 正在等待授权",
+    body: `“${request.title}”请求使用 ${visibleTools}${remainingCount > 0 ? ` 等 ${tools.length} 个工具` : ""}`,
+    icon: trayIconPath(),
+    urgency: "critical",
   });
   activeNotifications.add(notification);
   notification.on("click", () => {
