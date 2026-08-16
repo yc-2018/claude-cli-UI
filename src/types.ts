@@ -48,6 +48,23 @@ export interface Activity {
   id: string;
   name: string;
   summary: string;
+  detail?: ActivityDetail;
+}
+
+export interface ActivityDiffLine {
+  type: "context" | "add" | "remove";
+  text: string;
+  oldLine?: number;
+  newLine?: number;
+}
+
+export interface ActivityDetail {
+  path?: string;
+  command?: string;
+  oldText?: string;
+  newText?: string;
+  output?: string;
+  diff?: ActivityDiffLine[];
 }
 
 export type ResponseTimelineItem = {

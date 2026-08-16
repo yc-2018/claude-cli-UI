@@ -9,6 +9,8 @@ import UpdateDialog from "./UpdateDialog";
 import { hasLegacyProjectsToMigrate, loadProjects, makeId, parseProjects, pathName, saveProjects, shorten } from "./storage";
 import type {
   Activity,
+  ActivityDetail,
+  ActivityDiffLine,
   AppSelection,
   AppSettings,
   AppUpdateState,
@@ -201,6 +203,93 @@ function summarizeToolInput(input: unknown) {
   return typeof preferred === "string" ? shorten(preferred, 90) : "";
 }
 
+const MAX_ACTIVITY_DETAIL_LENGTH = 200_000;
+
+function activityDetailText(value: unknown) {
+  return typeof value === "string" ? value.slice(0, MAX_ACTIVITY_DETAIL_LENGTH) : undefined;
+}
+
+function getActivityDetail(name: string, input: unknown): ActivityDetail | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const value = input as Record<string, unknown>;
+  const path = activityDetailText(value.file_path ?? value.path);
+  const command = activityDetailText(value.command);
+  const oldText = activityDetailText(value.old_string ?? value.oldText);
+  let newText = activityDetailText(value.new_string ?? value.newText);
+  if (newText === undefined && /write|create/i.test(name)) newText = activityDetailText(value.content);
+  if (!path && !command && oldText === undefined && newText === undefined) return undefined;
+  return { path, command, oldText, newText };
+}
+
+function toolResultText(value: unknown): string | undefined {
+  if (typeof value === "string") return value.slice(0, MAX_ACTIVITY_DETAIL_LENGTH);
+  if (!Array.isArray(value)) return undefined;
+  const text = value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const block = item as Record<string, unknown>;
+    return block.type === "text" && typeof block.text === "string" ? [block.text] : [];
+  }).join("\n");
+  return text ? text.slice(0, MAX_ACTIVITY_DETAIL_LENGTH) : undefined;
+}
+
+function structuredDiffLines(value: unknown): ActivityDiffLine[] | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const result = value as Record<string, unknown>;
+  if (!Array.isArray(result.structuredPatch)) return undefined;
+  const diff: ActivityDiffLine[] = [];
+  for (const rawHunk of result.structuredPatch.slice(0, 100)) {
+    if (!rawHunk || typeof rawHunk !== "object") continue;
+    const hunk = rawHunk as Record<string, unknown>;
+    if (!Array.isArray(hunk.lines)) continue;
+    let oldLine = typeof hunk.oldStart === "number" ? hunk.oldStart : 1;
+    let newLine = typeof hunk.newStart === "number" ? hunk.newStart : 1;
+    for (const rawLine of hunk.lines) {
+      if (typeof rawLine !== "string" || rawLine.startsWith("\\ No newline")) continue;
+      const marker = rawLine[0];
+      const text = marker === "+" || marker === "-" || marker === " " ? rawLine.slice(1) : rawLine;
+      if (marker === "+") {
+        diff.push({ type: "add", text, newLine });
+        newLine += 1;
+      } else if (marker === "-") {
+        diff.push({ type: "remove", text, oldLine });
+        oldLine += 1;
+      } else {
+        diff.push({ type: "context", text, oldLine, newLine });
+        oldLine += 1;
+        newLine += 1;
+      }
+      if (diff.length >= 4_000) return diff;
+    }
+  }
+  return diff.length > 0 ? diff : undefined;
+}
+
+interface ActivityResult {
+  id: string;
+  output?: string;
+  path?: string;
+  diff?: ActivityDiffLine[];
+}
+
+function getActivityResults(data: Record<string, unknown>): ActivityResult[] {
+  if (data.type !== "user" || !data.message || typeof data.message !== "object") return [];
+  const content = (data.message as Record<string, unknown>).content;
+  if (!Array.isArray(content)) return [];
+  const rawResult = data.tool_use_result ?? data.toolUseResult;
+  const resultObject = rawResult && typeof rawResult === "object" ? rawResult as Record<string, unknown> : undefined;
+  const diff = structuredDiffLines(rawResult);
+  const path = activityDetailText(resultObject?.filePath ?? resultObject?.file_path);
+  return content.flatMap((block) => {
+    if (!block || typeof block !== "object") return [];
+    const item = block as Record<string, unknown>;
+    if (item.type !== "tool_result" || typeof item.tool_use_id !== "string") return [];
+    const output = toolResultText(item.content)
+      ?? activityDetailText(resultObject?.stdout)
+      ?? activityDetailText(resultObject?.stderr);
+    return [{ id: item.tool_use_id, output, path, diff }];
+  });
+}
+
 function makeClaudeSessionName(prompt: string) {
   const normalized = prompt.trim().replace(/\s+/g, " ");
   const firstTenCharacters = Array.from(normalized).slice(0, 10).join("");
@@ -266,7 +355,15 @@ function appendTimelineText(message: ChatMessage, id: string, text: string): Cha
 function upsertTimelineActivity(message: ChatMessage, activity: Activity): ChatMessage {
   const activities = message.activities ?? [];
   const existingActivity = activities.find((item) => item.id === activity.id);
-  const nextActivity = existingActivity ? { ...existingActivity, ...activity } : activity;
+  const nextActivity = existingActivity
+    ? {
+      ...existingActivity,
+      ...activity,
+      detail: existingActivity.detail || activity.detail
+        ? { ...existingActivity.detail, ...activity.detail }
+        : undefined,
+    }
+    : activity;
   const timeline = message.timeline ?? [];
   const existingTimelineIndex = timeline.findIndex((item) => item.type === "activity" && item.activity.id === activity.id);
   return {
@@ -279,6 +376,23 @@ function upsertTimelineActivity(message: ChatMessage, activity: Activity): ChatM
         ? { ...item, activity: nextActivity }
         : item)
       : [...timeline, { id: `activity-${activity.id}`, type: "activity", activity: nextActivity }],
+  };
+}
+
+function applyActivityResult(message: ChatMessage, result: ActivityResult): ChatMessage {
+  const activity = (message.activities ?? []).find((item) => item.id === result.id);
+  if (!activity) return message;
+  return {
+    ...upsertTimelineActivity(message, {
+      ...activity,
+      detail: {
+        ...activity.detail,
+        path: result.path ?? activity.detail?.path,
+        output: result.output ?? activity.detail?.output,
+        diff: result.diff ?? activity.detail?.diff,
+      },
+    }),
+    activeActivityId: message.activeActivityId === result.id ? undefined : message.activeActivityId,
   };
 }
 
@@ -906,10 +1020,12 @@ export default function App() {
       }
       if (blockStart?.type === "tool_use" && typeof blockStart.name === "string") {
         flushPendingText(meta);
+        const detail = getActivityDetail(blockStart.name, blockStart.input);
         const activity: Activity = {
           id: typeof blockStart.id === "string" ? blockStart.id : makeId(),
           name: blockStart.name,
           summary: summarizeToolInput(blockStart.input),
+          ...(detail ? { detail } : {}),
         };
         updateResponse(meta, (message) => ({ ...upsertTimelineActivity(message, activity), activeActivityId: activity.id }));
         meta.activeTextBlockId = undefined;
@@ -950,10 +1066,12 @@ export default function App() {
             }
             if (block.type === "tool_use" && typeof block.name === "string") {
               const activityId = typeof block.id === "string" ? block.id : makeId();
+              const detail = getActivityDetail(block.name, block.input);
               next = upsertTimelineActivity(next, {
                 id: activityId,
                 name: block.name,
                 summary: summarizeToolInput(block.input),
+                ...(detail ? { detail } : {}),
               });
               next = { ...next, activeActivityId: activityId };
             }
@@ -963,6 +1081,11 @@ export default function App() {
         meta.receivedText = false;
         meta.receivedThinking = false;
         meta.activeTextBlockId = undefined;
+      }
+
+      const activityResults = getActivityResults(data);
+      if (activityResults.length > 0) {
+        updateResponse(meta, (message) => activityResults.reduce(applyActivityResult, message));
       }
 
       if (data.type === "result") {

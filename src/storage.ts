@@ -1,4 +1,4 @@
-import type { Activity, Attachment, ChatMessage, Conversation, PermissionMode, Project, ResponseTimelineItem } from "./types";
+import type { Activity, ActivityDetail, ActivityDiffLine, Attachment, ChatMessage, Conversation, PermissionMode, Project, ResponseTimelineItem } from "./types";
 
 export const PROJECTS_STORAGE_KEY = "claude-desk.projects.v2";
 export const LEGACY_TASKS_STORAGE_KEY = "claude-desk.tasks.v1";
@@ -26,6 +26,42 @@ function pinnedFirst<T extends { pinned?: boolean }>(items: T[]) {
   ];
 }
 
+function normalizeActivityDetail(value: unknown): ActivityDetail | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const detail = value as Partial<ActivityDetail>;
+  const boundedText = (text: unknown) => typeof text === "string" ? text.slice(0, 200_000) : undefined;
+  const diff = Array.isArray(detail.diff)
+    ? detail.diff.slice(0, 4_000).flatMap((line): ActivityDiffLine[] => {
+      if (!line || typeof line !== "object") return [];
+      const item = line as Partial<ActivityDiffLine>;
+      if ((item.type !== "context" && item.type !== "add" && item.type !== "remove") || typeof item.text !== "string") return [];
+      return [{
+        type: item.type,
+        text: item.text,
+        oldLine: typeof item.oldLine === "number" && Number.isSafeInteger(item.oldLine) ? item.oldLine : undefined,
+        newLine: typeof item.newLine === "number" && Number.isSafeInteger(item.newLine) ? item.newLine : undefined,
+      }];
+    })
+    : undefined;
+  const normalized = {
+    path: boundedText(detail.path),
+    command: boundedText(detail.command),
+    oldText: boundedText(detail.oldText),
+    newText: boundedText(detail.newText),
+    output: boundedText(detail.output),
+    diff: diff?.length ? diff : undefined,
+  };
+  return Object.values(normalized).some((item) => item !== undefined) ? normalized : undefined;
+}
+
+function normalizeActivity(value: unknown): Activity | null {
+  if (!value || typeof value !== "object") return null;
+  const activity = value as Partial<Activity>;
+  if (typeof activity.id !== "string" || typeof activity.name !== "string" || typeof activity.summary !== "string") return null;
+  const detail = normalizeActivityDetail(activity.detail);
+  return { id: activity.id, name: activity.name, summary: activity.summary, ...(detail ? { detail } : {}) };
+}
+
 function normalizeMessage(value: unknown): ChatMessage | null {
   if (!value || typeof value !== "object") return null;
   const message = value as Partial<ChatMessage>;
@@ -35,9 +71,7 @@ function normalizeMessage(value: unknown): ChatMessage | null {
   const status = message.status && validStatuses.has(message.status) ? message.status : undefined;
   const wasInterrupted = status === "running";
   const activities = Array.isArray(message.activities)
-    ? message.activities.filter((activity): activity is Activity => Boolean(
-      activity && typeof activity.id === "string" && typeof activity.name === "string" && typeof activity.summary === "string",
-    ))
+    ? message.activities.map(normalizeActivity).filter((activity): activity is Activity => activity !== null)
     : [];
   const timeline = Array.isArray(message.timeline)
     ? message.timeline.flatMap((item): ResponseTimelineItem[] => {
@@ -46,12 +80,9 @@ function normalizeMessage(value: unknown): ChatMessage | null {
       if (candidate.type === "text" && typeof candidate.id === "string" && typeof candidate.content === "string") {
         return [{ id: candidate.id, type: "text", content: candidate.content }];
       }
-      if (
-        candidate.type === "activity" && typeof candidate.id === "string" &&
-        candidate.activity && typeof candidate.activity.id === "string" &&
-        typeof candidate.activity.name === "string" && typeof candidate.activity.summary === "string"
-      ) {
-        return [{ id: candidate.id, type: "activity", activity: candidate.activity }];
+      if (candidate.type === "activity" && typeof candidate.id === "string") {
+        const activity = normalizeActivity(candidate.activity);
+        if (activity) return [{ id: candidate.id, type: "activity", activity }];
       }
       return [];
     })

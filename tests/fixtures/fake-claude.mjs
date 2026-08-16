@@ -212,11 +212,31 @@ const processPrompt = (input) => {
     const phases = [
       {
         text: "先说明当前处理方案。",
-        tool: { id: "tool-edit-order", name: "Edit", input: { file_path: "src/App.tsx" } },
+        tool: {
+          id: "tool-edit-order",
+          name: "Edit",
+          input: {
+            file_path: "src/App.tsx",
+            old_string: "const before = true;",
+            new_string: "const after = true;\nconst checked = true;",
+          },
+        },
+        result: {
+          content: "Updated src/App.tsx",
+          tool_use_result: {
+            type: "update",
+            filePath: "src/App.tsx",
+            structuredPatch: [{ oldStart: 12, oldLines: 1, newStart: 12, newLines: 2, lines: ["-const before = true;", "+const after = true;", "+const checked = true;"] }],
+          },
+        },
       },
       {
         text: "编辑已经完成，继续检查。",
         tool: { id: "tool-bash-order", name: "Bash", input: { command: "npm test" } },
+        result: {
+          content: "All tests passed.",
+          tool_use_result: { stdout: "All tests passed.", stderr: "" },
+        },
       },
     ];
     for (const phase of phases) {
@@ -238,6 +258,12 @@ const processPrompt = (input) => {
       send({
         type: "assistant",
         message: { role: "assistant", content: [{ type: "text", text: phase.text }, { type: "tool_use", ...phase.tool }] },
+        session_id: sessionId,
+      });
+      send({
+        type: "user",
+        message: { role: "user", content: [{ type: "tool_result", tool_use_id: phase.tool.id, content: phase.result.content }] },
+        tool_use_result: phase.result.tool_use_result,
         session_id: sessionId,
       });
     }

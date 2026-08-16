@@ -65,6 +65,23 @@ interface ImportedActivity {
   id: string;
   name: string;
   summary: string;
+  detail?: ImportedActivityDetail;
+}
+
+interface ImportedDiffLine {
+  type: "context" | "add" | "remove";
+  text: string;
+  oldLine?: number;
+  newLine?: number;
+}
+
+interface ImportedActivityDetail {
+  path?: string;
+  command?: string;
+  oldText?: string;
+  newText?: string;
+  output?: string;
+  diff?: ImportedDiffLine[];
 }
 
 type ImportedTimelineItem = {
@@ -548,6 +565,56 @@ function summarizeImportedTool(input: unknown) {
   }
 }
 
+const MAX_IMPORTED_ACTIVITY_DETAIL = 200_000;
+
+function importedDetailText(value: unknown) {
+  return typeof value === "string" ? value.slice(0, MAX_IMPORTED_ACTIVITY_DETAIL) : undefined;
+}
+
+function importedActivityDetail(name: string, input: unknown): ImportedActivityDetail | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const value = input as Record<string, unknown>;
+  const path = importedDetailText(value.file_path ?? value.path);
+  const command = importedDetailText(value.command);
+  const oldText = importedDetailText(value.old_string ?? value.oldText);
+  let newText = importedDetailText(value.new_string ?? value.newText);
+  if (newText === undefined && /write|create/i.test(name)) newText = importedDetailText(value.content);
+  if (!path && !command && oldText === undefined && newText === undefined) return undefined;
+  return { path, command, oldText, newText };
+}
+
+function importedStructuredDiff(value: unknown): ImportedDiffLine[] | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const result = value as Record<string, unknown>;
+  if (!Array.isArray(result.structuredPatch)) return undefined;
+  const diff: ImportedDiffLine[] = [];
+  for (const rawHunk of result.structuredPatch.slice(0, 100)) {
+    if (!rawHunk || typeof rawHunk !== "object") continue;
+    const hunk = rawHunk as Record<string, unknown>;
+    if (!Array.isArray(hunk.lines)) continue;
+    let oldLine = typeof hunk.oldStart === "number" ? hunk.oldStart : 1;
+    let newLine = typeof hunk.newStart === "number" ? hunk.newStart : 1;
+    for (const rawLine of hunk.lines) {
+      if (typeof rawLine !== "string" || rawLine.startsWith("\\ No newline")) continue;
+      const marker = rawLine[0];
+      const text = marker === "+" || marker === "-" || marker === " " ? rawLine.slice(1) : rawLine;
+      if (marker === "+") {
+        diff.push({ type: "add", text, newLine });
+        newLine += 1;
+      } else if (marker === "-") {
+        diff.push({ type: "remove", text, oldLine });
+        oldLine += 1;
+      } else {
+        diff.push({ type: "context", text, oldLine, newLine });
+        oldLine += 1;
+        newLine += 1;
+      }
+      if (diff.length >= 4_000) return diff;
+    }
+  }
+  return diff.length > 0 ? diff : undefined;
+}
+
 function importedTitle(text: string) {
   const title = text.replace(/\s+/g, " ").trim();
   return title.length > 38 ? `${title.slice(0, 38)}…` : title;
@@ -571,6 +638,17 @@ function importedUserText(content: unknown) {
     const item = block as Record<string, unknown>;
     return item.type === "text" && typeof item.text === "string" ? [item.text] : [];
   }).join("\n").trim();
+}
+
+function importedToolResultText(content: unknown) {
+  if (typeof content === "string") return content.slice(0, MAX_IMPORTED_ACTIVITY_DETAIL);
+  if (!Array.isArray(content)) return undefined;
+  const text = content.flatMap((block) => {
+    if (!block || typeof block !== "object") return [];
+    const item = block as Record<string, unknown>;
+    return item.type === "text" && typeof item.text === "string" ? [item.text] : [];
+  }).join("\n");
+  return text ? text.slice(0, MAX_IMPORTED_ACTIVITY_DETAIL) : undefined;
 }
 
 async function normalizeClaudeDeskSession(workspace: string, sessionId: string, existingPrefix: string) {
@@ -678,6 +756,28 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
 
     if (record.type === "user" && record.message && typeof record.message === "object") {
       const message = record.message as Record<string, unknown>;
+      if (includeMessages && currentAssistant && Array.isArray(message.content)) {
+        const rawResult = record.toolUseResult ?? record.tool_use_result;
+        const resultObject = rawResult && typeof rawResult === "object" ? rawResult as Record<string, unknown> : undefined;
+        const diff = importedStructuredDiff(rawResult);
+        const resultPath = importedDetailText(resultObject?.filePath ?? resultObject?.file_path);
+        for (const block of message.content) {
+          if (!block || typeof block !== "object") continue;
+          const toolResult = block as Record<string, unknown>;
+          if (toolResult.type !== "tool_result" || typeof toolResult.tool_use_id !== "string") continue;
+          const activity = currentAssistant.activities?.find((item) => item.id === toolResult.tool_use_id);
+          if (!activity) continue;
+          const output = importedToolResultText(toolResult.content)
+            ?? importedDetailText(resultObject?.stdout)
+            ?? importedDetailText(resultObject?.stderr);
+          activity.detail = {
+            ...activity.detail,
+            path: resultPath ?? activity.detail?.path,
+            output: output ?? activity.detail?.output,
+            diff: diff ?? activity.detail?.diff,
+          };
+        }
+      }
       const prompt = importedUserText(message.content);
       if (!prompt) continue;
       if (!firstPrompt) firstPrompt = prompt;
@@ -729,7 +829,13 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
       if (item.type === "tool_use" && typeof item.name === "string") {
         const id = typeof item.id === "string" ? item.id : `${currentAssistant.id}-tool-${currentAssistant.activities?.length ?? 0}`;
         if (!currentAssistant.activities?.some((activity) => activity.id === id)) {
-          const activity = { id, name: item.name, summary: summarizeImportedTool(item.input) };
+          const detail = importedActivityDetail(item.name, item.input);
+          const activity = {
+            id,
+            name: item.name,
+            summary: summarizeImportedTool(item.input),
+            ...(detail ? { detail } : {}),
+          };
           currentAssistant.activities?.push(activity);
           currentAssistant.timeline?.push({ id: `${currentAssistant.id}-activity-${id}`, type: "activity", activity });
         }

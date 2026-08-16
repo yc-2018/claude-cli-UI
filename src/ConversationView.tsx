@@ -4,14 +4,14 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import type { Activity, ChatMessage, ResponseTimelineItem } from "./types";
+import type { Activity, ActivityDetail, ActivityDiffLine, ChatMessage, ResponseTimelineItem } from "./types";
 
 function getToolIcon(name: string) {
   const normalized = name.toLowerCase();
   if (normalized.includes("read") || normalized.includes("file")) return FileCode2;
   if (normalized.includes("grep") || normalized.includes("search") || normalized.includes("glob")) return Search;
   if (normalized.includes("bash") || normalized.includes("terminal")) return TerminalSquare;
-  if (normalized.includes("edit") || normalized.includes("write")) return Code2;
+  if (normalized.includes("edit") || normalized.includes("write") || normalized.includes("update")) return Code2;
   return Wrench;
 }
 
@@ -30,16 +30,113 @@ function MarkdownMessage({ content }: { content: string }) {
   );
 }
 
-function ActivityRow({ activity, working }: { activity: Activity; working: boolean }) {
-  const Icon = getToolIcon(activity.name);
+function fallbackDiffLines(detail: ActivityDetail): ActivityDiffLine[] {
+  if (detail.oldText === undefined && detail.newText === undefined) return [];
+  const oldLines = (detail.oldText ?? "").split("\n");
+  const newLines = (detail.newText ?? "").split("\n");
+  if (detail.oldText === "") oldLines.length = 0;
+  if (detail.newText === "") newLines.length = 0;
+  let prefix = 0;
+  while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) prefix += 1;
+  let suffix = 0;
+  while (
+    suffix < oldLines.length - prefix && suffix < newLines.length - prefix &&
+    oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]
+  ) suffix += 1;
+  const lines: ActivityDiffLine[] = [];
+  const prefixStart = Math.max(0, prefix - 3);
+  for (let index = prefixStart; index < prefix; index += 1) {
+    lines.push({ type: "context", text: oldLines[index], oldLine: index + 1, newLine: index + 1 });
+  }
+  for (let index = prefix; index < oldLines.length - suffix; index += 1) {
+    lines.push({ type: "remove", text: oldLines[index], oldLine: index + 1 });
+  }
+  for (let index = prefix; index < newLines.length - suffix; index += 1) {
+    lines.push({ type: "add", text: newLines[index], newLine: index + 1 });
+  }
+  for (let offset = 0; offset < Math.min(3, suffix); offset += 1) {
+    const oldIndex = oldLines.length - suffix + offset;
+    const newIndex = newLines.length - suffix + offset;
+    lines.push({ type: "context", text: oldLines[oldIndex], oldLine: oldIndex + 1, newLine: newIndex + 1 });
+  }
+  return lines.slice(0, 4_000);
+}
+
+function ActivityDetails({ detail }: { detail: ActivityDetail }) {
+  const diff = detail.diff ?? fallbackDiffLines(detail);
+  const additions = diff.filter((line) => line.type === "add").length;
+  const removals = diff.filter((line) => line.type === "remove").length;
   return (
-    <div className="activity-row" data-timeline-kind="activity">
+    <div className="activity-detail">
+      {detail.path ? <div className="activity-detail-path"><FileCode2 size={13} /><span>{detail.path}</span></div> : null}
+      {diff.length > 0 ? (
+        <div className="tool-diff">
+          <div className="tool-diff-summary">
+            {additions > 0 ? <span className="diff-added">+{additions}</span> : null}
+            {removals > 0 ? <span className="diff-removed">-{removals}</span> : null}
+          </div>
+          <div className="tool-diff-lines">
+            {diff.map((line, index) => (
+              <div className={`tool-diff-line ${line.type}`} key={`${line.oldLine ?? ""}-${line.newLine ?? ""}-${index}`}>
+                <span className="diff-old-line">{line.oldLine ?? ""}</span>
+                <span className="diff-new-line">{line.newLine ?? ""}</span>
+                <span className="diff-marker">{line.type === "add" ? "+" : line.type === "remove" ? "−" : " "}</span>
+                <code>{line.text || " "}</code>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {detail.command ? (
+        <div className="activity-detail-section">
+          <span>命令</span>
+          <pre><code>{detail.command}</code></pre>
+        </div>
+      ) : null}
+      {detail.output ? (
+        <div className="activity-detail-section">
+          <span>输出</span>
+          <pre><code>{detail.output}</code></pre>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ActivityRow({ activity, working }: { activity: Activity; working: boolean }) {
+  const [open, setOpen] = useState(false);
+  const entryRef = useRef<HTMLDivElement>(null);
+  const Icon = getToolIcon(activity.name);
+  const expandable = Boolean(activity.detail && (
+    activity.detail.path || activity.detail.command || activity.detail.output || activity.detail.diff?.length ||
+    activity.detail.oldText !== undefined || activity.detail.newText !== undefined
+  ));
+  const rowContent = (
+    <>
       <span className={`activity-icon ${working ? "working" : ""}`}>
         {working ? <span className="mini-spinner" /> : <Icon size={14} />}
       </span>
       <span className="activity-name">{activity.name}</span>
       {activity.summary ? <span className="activity-summary">{activity.summary}</span> : null}
       {!working ? <Check className="activity-check" size={13} /> : null}
+      {expandable ? <ChevronRight className="activity-chevron" size={13} /> : null}
+    </>
+  );
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = requestAnimationFrame(() => entryRef.current?.scrollIntoView({ block: "nearest" }));
+    return () => cancelAnimationFrame(frame);
+  }, [activity.detail?.diff?.length, activity.detail?.output, open]);
+
+  return (
+    <div className={`activity-entry ${open ? "open" : ""}`} data-timeline-kind="activity" ref={entryRef}>
+      {expandable ? (
+        <button className="activity-row" type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+          {rowContent}
+        </button>
+      ) : <div className="activity-row">{rowContent}</div>}
+      {open && activity.detail ? <ActivityDetails detail={activity.detail} /> : null}
     </div>
   );
 }

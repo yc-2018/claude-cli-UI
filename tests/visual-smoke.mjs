@@ -85,14 +85,46 @@ await page.evaluate((workspace) => {
           activities: [
             { id: "t1", name: "Grep", summary: "session status" },
             { id: "t2", name: "Read", summary: "src/auth/session.ts" },
-            { id: "t3", name: "Edit", summary: "src/router/guard.ts" }
+            {
+              id: "t3",
+              name: "Edit",
+              summary: "src/router/guard.ts",
+              detail: {
+                path: "src/router/guard.ts",
+                oldText: "if (!session) redirect('/login');",
+                newText: "if (session.status === 'loading') return;\nif (!session) redirect('/login');",
+                diff: [
+                  { type: "remove", text: "if (!session) redirect('/login');", oldLine: 42 },
+                  { type: "add", text: "if (session.status === 'loading') return;", newLine: 42 },
+                  { type: "add", text: "if (!session) redirect('/login');", newLine: 43 }
+                ]
+              }
+            }
           ],
           timeline: [
             { id: "phase-1", type: "text", content: "问题出在会话初始化顺序：页面在令牌恢复完成前就触发了未登录跳转。" },
             { id: "activity-t1", type: "activity", activity: { id: "t1", name: "Grep", summary: "session status" } },
             { id: "activity-t2", type: "activity", activity: { id: "t2", name: "Read", summary: "src/auth/session.ts" } },
             { id: "phase-2", type: "text", content: "我调整了初始化状态，并补充了回归测试：\n\n```ts\nif (session.status === 'loading') return;\n```" },
-            { id: "activity-t3", type: "activity", activity: { id: "t3", name: "Edit", summary: "src/router/guard.ts" } },
+            {
+              id: "activity-t3",
+              type: "activity",
+              activity: {
+                id: "t3",
+                name: "Edit",
+                summary: "src/router/guard.ts",
+                detail: {
+                  path: "src/router/guard.ts",
+                  oldText: "if (!session) redirect('/login');",
+                  newText: "if (session.status === 'loading') return;\nif (!session) redirect('/login');",
+                  diff: [
+                    { type: "remove", text: "if (!session) redirect('/login');", oldLine: 42 },
+                    { type: "add", text: "if (session.status === 'loading') return;", newLine: 42 },
+                    { type: "add", text: "if (!session) redirect('/login');", newLine: 43 }
+                  ]
+                }
+              }
+            },
             { id: "phase-3", type: "text", content: "现在刷新页面会等待会话恢复后再判断路由。" }
           ]
         }
@@ -123,6 +155,18 @@ if (!(await page.locator(".response-duration").textContent())?.includes("本次�
 if ((await page.locator("[data-timeline-kind]").evaluateAll((items) => items.map((item) => item.getAttribute("data-timeline-kind")).join(","))) !== "text,activity,activity,text,activity,text") {
   throw new Error("visual fixture did not render assistant text and tools as one ordered timeline");
 }
+const editActivity = page.locator('[data-timeline-kind="activity"]', { hasText: "Edit" });
+await editActivity.locator(".activity-row").click();
+const activityDetailLayout = await editActivity.locator(".activity-detail").evaluate((element) => element.getBoundingClientRect().toJSON());
+const assistantBodyLayout = await page.locator(".message.assistant .message-body").evaluate((element) => element.getBoundingClientRect().toJSON());
+if (activityDetailLayout.left < assistantBodyLayout.left || activityDetailLayout.right > assistantBodyLayout.right) {
+  throw new Error(`expanded tool diff escaped the assistant message: ${JSON.stringify({ activityDetailLayout, assistantBodyLayout })}`);
+}
+if (await editActivity.locator(".tool-diff-line.add").count() !== 2 || await editActivity.locator(".tool-diff-line.remove").count() !== 1 || !(await editActivity.textContent())?.includes("loading")) {
+  throw new Error("expanded tool diff did not render red/green source changes");
+}
+await page.screenshot({ path: resolve(artifacts, "expanded-tool-diff.png") });
+await editActivity.locator(".activity-row").click();
 if (await page.locator(".composer-options select").count()) throw new Error("composer rendered native select controls");
 
 await page.locator(".task-title-command").click();
@@ -292,6 +336,13 @@ const layout = await page.evaluate(() => ({
 
 await page.setViewportSize({ width: 900, height: 640 });
 await page.waitForTimeout(100);
+await editActivity.locator(".activity-row").click();
+const compactActivityDetailLayout = await editActivity.locator(".activity-detail").evaluate((element) => element.getBoundingClientRect().toJSON());
+if (compactActivityDetailLayout.left < 0 || compactActivityDetailLayout.right > 900 || compactActivityDetailLayout.width <= 0) {
+  throw new Error(`expanded tool diff escaped the compact viewport: ${JSON.stringify(compactActivityDetailLayout)}`);
+}
+await page.screenshot({ path: resolve(artifacts, "expanded-tool-diff-compact.png") });
+await editActivity.locator(".activity-row").click();
 await page.locator(".task-title-command").click();
 const compactCommandPopoverLayout = await page.locator(".cli-command-popover").evaluate((element) => element.getBoundingClientRect().toJSON());
 if (compactCommandPopoverLayout.left < 0 || compactCommandPopoverLayout.top < 0 || compactCommandPopoverLayout.right > 900 || compactCommandPopoverLayout.bottom > 640) {

@@ -122,9 +122,27 @@ await writeFile(resolve(cliSessions, `${importedSessionId}.jsonl`), [
       content: [
         { type: "thinking", thinking: "读取终端历史并整理上下文。" },
         { type: "text", text: "先核对 CLI 历史。" },
-        { type: "tool_use", id: "history-tool", name: "Read", input: { file_path: "README.md" } },
+        {
+          type: "tool_use",
+          id: "history-tool",
+          name: "Edit",
+          input: { file_path: "README.md", old_string: "旧说明", new_string: "新说明" },
+        },
         { type: "text", text: "这是从 Claude CLI 会话文件恢复的回答。" },
       ],
+    },
+  },
+  {
+    type: "user",
+    uuid: "history-tool-result",
+    timestamp: new Date(importedTime + 1_050).toISOString(),
+    cwd: root,
+    sessionId: importedSessionId,
+    message: { role: "user", content: [{ type: "tool_result", tool_use_id: "history-tool", content: "Updated README.md" }] },
+    toolUseResult: {
+      type: "update",
+      filePath: "README.md",
+      structuredPatch: [{ oldStart: 8, oldLines: 1, newStart: 8, newLines: 1, lines: ["-旧说明", "+新说明"] }],
     },
   },
   {
@@ -283,6 +301,10 @@ try {
   if (!(await page.locator(".markdown").last().textContent())?.includes("恢复的回答")) throw new Error("CLI session response was not loaded");
   if ((await page.locator(".message.assistant [data-timeline-kind]").evaluateAll((items) => items.map((item) => item.getAttribute("data-timeline-kind")).join(","))) !== "text,activity,text") {
     throw new Error("CLI session history did not preserve text and tool event order");
+  }
+  await page.locator('.message.assistant [data-timeline-kind="activity"] .activity-row').click();
+  if ((await page.locator(".message.assistant .tool-diff-line.add").textContent())?.includes("新说明") !== true) {
+    throw new Error("CLI session history did not restore expandable edit details");
   }
   if (!(await page.locator(".thinking-toggle").last().textContent())?.includes("思考过程")) throw new Error("CLI session thinking was not loaded");
   if (await page.locator(".composer textarea").inputValue() !== "") throw new Error("draft leaked into another conversation");
@@ -845,6 +867,28 @@ try {
     throw new Error("assistant tool calls did not remain in their original timeline positions");
   }
   if (await timelineResponse.locator(".mini-spinner").count()) throw new Error("completed timeline activity still appeared to be running");
+  const timelineActivities = timelineResponse.locator('[data-timeline-kind="activity"]');
+  await timelineActivities.nth(0).locator(".activity-row").click();
+  const editDetail = timelineActivities.nth(0).locator(".activity-detail");
+  await editDetail.waitFor();
+  if (!(await editDetail.locator(".activity-detail-path").textContent())?.includes("src/App.tsx")) throw new Error("edit detail did not show the full file path");
+  if ((await editDetail.locator(".tool-diff-line.remove").allTextContents()).join("").includes("const before = true;") === false) {
+    throw new Error("edit detail did not show removed lines");
+  }
+  if ((await editDetail.locator(".tool-diff-line.add").allTextContents()).join("").includes("const checked = true;") === false) {
+    throw new Error("edit detail did not show added lines");
+  }
+  const diffColors = await editDetail.locator(".tool-diff-line.remove, .tool-diff-line.add").evaluateAll((lines) => lines.map((line) => getComputedStyle(line).backgroundColor));
+  if (diffColors.length < 2 || new Set(diffColors).size < 2) throw new Error("edit diff did not distinguish removed and added lines with red/green colors");
+  if ((await editDetail.locator(".diff-old-line, .diff-new-line").allTextContents()).every((value) => !value.trim())) {
+    throw new Error("edit diff did not show line numbers");
+  }
+  await timelineActivities.nth(0).locator(".activity-row").click();
+  await timelineActivities.nth(1).locator(".activity-row").click();
+  const bashDetail = timelineActivities.nth(1).locator(".activity-detail");
+  if (!(await bashDetail.textContent())?.includes("npm test") || !(await bashDetail.textContent())?.includes("All tests passed.")) {
+    throw new Error("bash detail did not show the complete command and output");
+  }
 
   await page.locator(".composer textarea").fill("后台托盘测试");
   await page.locator(".composer textarea").press("Enter");
