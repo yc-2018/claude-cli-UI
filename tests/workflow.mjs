@@ -432,6 +432,8 @@ try {
   await page.locator(".composer textarea").fill("/");
   await page.waitForSelector(".command-menu");
   if (await page.locator(".command-option").count() < 6) throw new Error("local slash commands missing");
+  const compactOption = page.locator(".command-option", { hasText: "/compact" });
+  if (!(await compactOption.textContent())?.includes("压缩当前对话上下文")) throw new Error("slash command descriptions were not specific");
   await page.locator(".composer textarea").fill("/plan");
   await page.locator(".composer textarea").press("Enter");
   if (!(await page.locator(".permission-select .composer-select-value").textContent())?.includes("计划模式")) {
@@ -452,6 +454,14 @@ try {
     const responses = document.querySelectorAll(".message.assistant .markdown");
     return responses.item(responses.length - 1)?.textContent?.includes("流式输出稳定");
   });
+  if (!(await page.locator(".context-status").textContent())?.includes("上下文")) throw new Error("context usage status was not shown");
+  const compactButton = page.locator('[aria-label="压缩上下文"]');
+  if (await compactButton.isDisabled()) throw new Error("context compact button was unexpectedly disabled");
+  await compactButton.click();
+  await page.waitForSelector(".context-compaction.done", { timeout: 15_000 });
+  if (!(await page.locator(".context-compaction.done").last().textContent())?.includes("120,000")) throw new Error("compact token reduction was not shown");
+  await page.locator(".context-compaction.done summary").last().click();
+  if (!(await page.locator(".context-compaction-summary").last().textContent())?.includes("已保留项目目标")) throw new Error("compact summary was not displayed");
   await page.waitForTimeout(500);
   const normalizedSession = await readFile(resolve(cliSessions, "22222222-2222-4222-8222-222222222222.jsonl"), "utf8");
   if (normalizedSession.includes('"entrypoint":"sdk-cli"') || normalizedSession.includes('"promptSource":"sdk"')) {

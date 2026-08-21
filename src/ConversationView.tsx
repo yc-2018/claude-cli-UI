@@ -4,7 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import type { Activity, ActivityDetail, ActivityDiffLine, ChatMessage, ResponseTimelineItem } from "./types";
+import type { Activity, ActivityDetail, ActivityDiffLine, ChatMessage, ContextCompaction, ResponseTimelineItem } from "./types";
 
 function getToolIcon(name: string) {
   const normalized = name.toLowerCase();
@@ -355,6 +355,7 @@ function UserMessage({ message, canEdit, onEditResend }: UserMessageProps) {
 
 interface ConversationViewProps {
   messages: ChatMessage[];
+  contextCompactions?: ContextCompaction[];
   loadingHistory?: boolean;
   branchDisabled?: boolean;
   editDisabled?: boolean;
@@ -362,7 +363,7 @@ interface ConversationViewProps {
   onEditResend?(messageId: string, content: string): void;
 }
 
-export default function ConversationView({ messages, loadingHistory = false, branchDisabled = false, editDisabled = false, onBranch, onEditResend }: ConversationViewProps) {
+export default function ConversationView({ messages, contextCompactions = [], loadingHistory = false, branchDisabled = false, editDisabled = false, onBranch, onEditResend }: ConversationViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const previousMessageCountRef = useRef(0);
@@ -417,6 +418,20 @@ export default function ConversationView({ messages, loadingHistory = false, bra
       }}
     >
       <div className="conversation">
+        {contextCompactions.map((compaction) => (
+          <div className={`context-compaction ${compaction.status}`} key={compaction.id}>
+            <span className="context-compaction-icon"><BrainCircuit size={14} /></span>
+            <span className="context-compaction-copy">
+              <strong>{compaction.status === "running" ? "正在压缩上下文" : compaction.status === "error" ? "上下文压缩失败" : "上下文已压缩"}</strong>
+              <small>
+                {compaction.status === "done" && compaction.preTokens !== undefined && compaction.postTokens !== undefined
+                  ? `${compaction.trigger === "auto" ? "自动" : "手动"} · ${compaction.preTokens.toLocaleString()} → ${compaction.postTokens.toLocaleString()} tokens`
+                  : compaction.error ?? "Claude 正在整理较早的对话内容"}
+              </small>
+            </span>
+            {compaction.summary ? <details><summary>查看摘要</summary><div className="context-compaction-summary"><MarkdownMessage content={compaction.summary} /></div></details> : null}
+          </div>
+        ))}
         {messages.map((message) => {
           if (message.role === "user") userTurn += 1;
           const messageUserTurn = userTurn;

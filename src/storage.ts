@@ -1,4 +1,5 @@
-import type { Activity, ActivityDetail, ActivityDiffLine, Attachment, ChatMessage, Conversation, PermissionMode, Project, ResponseTimelineItem } from "./types";
+import type { Activity, ActivityDetail, ActivityDiffLine, Attachment, ChatMessage, Conversation, ContextCompaction, ContextUsage, PermissionMode, Project, ResponseTimelineItem } from "./types";
+import { normalizeSlashCommands } from "./commands";
 
 export const PROJECTS_STORAGE_KEY = "claude-desk.projects.v2";
 export const LEGACY_TASKS_STORAGE_KEY = "claude-desk.tasks.v1";
@@ -150,9 +151,9 @@ function normalizeConversation(value: unknown): Conversation | null {
       ? conversation.selectedModel
       : undefined,
     resolvedModel: typeof conversation.resolvedModel === "string" ? conversation.resolvedModel : undefined,
-    slashCommands: Array.isArray(conversation.slashCommands)
-      ? [...new Set(conversation.slashCommands.filter((command): command is string => typeof command === "string" && command.startsWith("/")))]
-      : [],
+    slashCommands: normalizeSlashCommands(conversation.slashCommands),
+    contextUsage: normalizeContextUsage(conversation.contextUsage),
+    contextCompactions: normalizeContextCompactions(conversation.contextCompactions),
     allowedTools: Array.isArray(conversation.allowedTools)
       ? [...new Set(conversation.allowedTools.filter((tool): tool is string => typeof tool === "string" && /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(tool)))]
       : [],
@@ -162,6 +163,39 @@ function normalizeConversation(value: unknown): Conversation | null {
       ? conversation.permissionMode as PermissionMode
       : "acceptEdits",
   };
+}
+
+function normalizeContextUsage(value: unknown): ContextUsage | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const item = value as Partial<ContextUsage>;
+  const usage: ContextUsage = {
+    usedTokens: typeof item.usedTokens === "number" && Number.isFinite(item.usedTokens) ? Math.max(0, item.usedTokens) : undefined,
+    contextWindow: typeof item.contextWindow === "number" && Number.isFinite(item.contextWindow) ? Math.max(0, item.contextWindow) : undefined,
+    usedPercentage: typeof item.usedPercentage === "number" && Number.isFinite(item.usedPercentage) ? Math.max(0, item.usedPercentage) : undefined,
+    remainingPercentage: typeof item.remainingPercentage === "number" && Number.isFinite(item.remainingPercentage) ? Math.max(0, item.remainingPercentage) : undefined,
+  };
+  return Object.values(usage).some((entry) => entry !== undefined) ? usage : undefined;
+}
+
+function normalizeContextCompactions(value: unknown): ContextCompaction[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((raw): ContextCompaction[] => {
+    if (!raw || typeof raw !== "object") return [];
+    const item = raw as Partial<ContextCompaction>;
+    if (typeof item.id !== "string" || (item.trigger !== "auto" && item.trigger !== "manual" && item.trigger !== "unknown") || (item.status !== "running" && item.status !== "done" && item.status !== "error")) return [];
+    return [{
+      id: item.id,
+      trigger: item.trigger,
+      status: item.status,
+      startedAt: typeof item.startedAt === "number" ? item.startedAt : undefined,
+      completedAt: typeof item.completedAt === "number" ? item.completedAt : undefined,
+      preTokens: typeof item.preTokens === "number" ? item.preTokens : undefined,
+      postTokens: typeof item.postTokens === "number" ? item.postTokens : undefined,
+      durationMs: typeof item.durationMs === "number" ? item.durationMs : undefined,
+      summary: typeof item.summary === "string" ? item.summary.slice(0, 200_000) : undefined,
+      error: typeof item.error === "string" ? item.error.slice(0, 4_000) : undefined,
+    }];
+  }).slice(-20);
 }
 
 function normalizeProject(value: unknown): Project | null {

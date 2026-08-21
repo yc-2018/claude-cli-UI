@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CircleStop, CornerDownRight, FileText, GripVertical, Paperclip, Pencil, Send, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
 import ComposerSelect, { type ComposerSelectHandle } from "./ComposerSelect";
-import type { Attachment, AttachmentUpload, ComposerDraft, Conversation, ModelConfig, PermissionMode, QueuedPrompt, ReorderPosition } from "./types";
+import { LOCAL_SLASH_COMMANDS } from "./commands";
+import type { Attachment, AttachmentUpload, ComposerDraft, Conversation, ModelConfig, PermissionMode, QueuedPrompt, ReorderPosition, SlashCommand } from "./types";
 
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES = 40 * 1024 * 1024;
@@ -11,15 +12,6 @@ const permissionOptions: { value: PermissionMode; label: string }[] = [
   { value: "default", label: "默认权限" },
   { value: "plan", label: "计划模式" },
   { value: "dontAsk", label: "拒绝未授权" },
-];
-
-const localSlashCommands = [
-  { name: "/model", description: "选择当前对话使用的模型" },
-  { name: "/new", description: "在当前项目中新建对话" },
-  { name: "/project", description: "新建项目" },
-  { name: "/clear", description: "清空当前对话" },
-  { name: "/plan", description: "切换到计划模式" },
-  { name: "/edit", description: "允许 Claude 编辑文件" },
 ];
 
 interface Props {
@@ -82,9 +74,10 @@ export default function Composer({
     : permissionOptions;
   const slashSuggestions = useMemo(() => {
     if (attachments.length > 0 || !prompt.startsWith("/") || /\s/.test(prompt)) return [];
-    const external = (conversation.slashCommands ?? []).map((name) => ({ name, description: "Claude 命令" }));
+    const external = conversation.slashCommands ?? [];
     const seen = new Set<string>();
-    return [...localSlashCommands, ...external]
+    const commands: SlashCommand[] = [...LOCAL_SLASH_COMMANDS, ...external];
+    return commands
       .filter((command) => {
         const key = command.name.toLowerCase();
         if (seen.has(key) || !key.startsWith(prompt.toLowerCase())) return false;

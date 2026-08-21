@@ -117,6 +117,31 @@ export interface ChatMessage {
   attachments?: Attachment[];
 }
 
+export interface SlashCommand {
+  name: string;
+  description: string;
+}
+
+export interface ContextUsage {
+  usedTokens?: number;
+  contextWindow?: number;
+  usedPercentage?: number;
+  remainingPercentage?: number;
+}
+
+export interface ContextCompaction {
+  id: string;
+  trigger: "auto" | "manual" | "unknown";
+  status: "running" | "done" | "error";
+  startedAt?: number;
+  completedAt?: number;
+  preTokens?: number;
+  postTokens?: number;
+  durationMs?: number;
+  summary?: string;
+  error?: string;
+}
+
 export interface Conversation {
   id: string;
   title: string;
@@ -128,7 +153,9 @@ export interface Conversation {
   messages: ChatMessage[];
   selectedModel?: string;
   resolvedModel?: string;
-  slashCommands?: string[];
+  slashCommands?: SlashCommand[];
+  contextUsage?: ContextUsage;
+  contextCompactions?: ContextCompaction[];
   allowedTools?: string[];
   source?: "claude";
   historyLoaded?: boolean;
@@ -156,10 +183,14 @@ export interface ClaudeSessionSummary {
   gitBranch?: string;
   resolvedModel?: string;
   permissionMode: PermissionMode;
+  contextUsage?: ContextUsage;
+  contextCompactions?: ContextCompaction[];
 }
 
 export interface ClaudeSessionHistory extends ClaudeSessionSummary {
   messages: ChatMessage[];
+  contextUsage?: ContextUsage;
+  contextCompactions?: ContextCompaction[];
 }
 
 export interface BranchClaudeSessionResult {

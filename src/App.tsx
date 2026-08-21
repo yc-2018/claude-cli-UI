@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
-import { Check, CheckCircle2, Copy, Folder, FolderOpen, Plus, TerminalSquare, X } from "lucide-react";
+import { Check, CheckCircle2, Copy, Folder, FolderOpen, Minimize2, Plus, TerminalSquare, X } from "lucide-react";
 import Composer from "./Composer";
 import ConversationView from "./ConversationView";
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
@@ -21,6 +21,8 @@ import type {
   ClaudeSessionSummary,
   ComposerDraft,
   Conversation,
+  ContextCompaction,
+  ContextUsage,
   ModelConfig,
   PermissionMode,
   PermissionNotificationRequest,
@@ -30,6 +32,7 @@ import type {
   RunRequest,
   ToolPermissionRequest,
 } from "./types";
+import { describeSlashCommand, normalizeSlashCommands } from "./commands";
 
 interface RunMeta {
   conversationId: string;
@@ -325,6 +328,63 @@ function getPermissionRequests(data: Record<string, unknown>): ToolPermissionReq
   });
 }
 
+function numberValue(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : undefined;
+}
+
+function getContextUsage(data: Record<string, unknown>): ContextUsage | undefined {
+  const source = [data.context_window, data.contextWindow, data.current_usage, data.currentUsage, data.usage]
+    .find((value) => value && typeof value === "object") as Record<string, unknown> | undefined;
+  if (!source) return undefined;
+  const usedTokens = numberValue(source.used_tokens ?? source.usedTokens ?? source.input_tokens ?? source.inputTokens);
+  const contextWindow = numberValue(source.context_window ?? source.contextWindow ?? source.context_window_size ?? source.contextWindowSize ?? source.max_tokens);
+  const usedPercentage = numberValue(source.used_percentage ?? source.usedPercentage);
+  const remainingPercentage = numberValue(source.remaining_percentage ?? source.remainingPercentage);
+  if (usedTokens === undefined && contextWindow === undefined && usedPercentage === undefined && remainingPercentage === undefined) return undefined;
+  return { usedTokens, contextWindow, usedPercentage, remainingPercentage };
+}
+
+function getCompactBoundary(data: Record<string, unknown>): ContextCompaction | undefined {
+  if (data.type !== "system" || data.subtype !== "compact_boundary") return undefined;
+  const metadata = data.compactMetadata && typeof data.compactMetadata === "object"
+    ? data.compactMetadata as Record<string, unknown>
+    : {};
+  const trigger = metadata.trigger === "auto" || metadata.trigger === "manual" ? metadata.trigger : "unknown";
+  return {
+    id: typeof data.uuid === "string" ? data.uuid : makeId(),
+    trigger,
+    status: "done",
+    completedAt: Date.now(),
+    preTokens: numberValue(metadata.preTokens),
+    postTokens: numberValue(metadata.postTokens),
+    durationMs: numberValue(metadata.durationMs),
+  };
+}
+
+function getCompactSummary(data: Record<string, unknown>) {
+  if (data.isCompactSummary !== true || !data.message || typeof data.message !== "object") return undefined;
+  const content = (data.message as Record<string, unknown>).content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return undefined;
+  const text = content.flatMap((block) => {
+    if (!block || typeof block !== "object") return [];
+    const item = block as Record<string, unknown>;
+    return item.type === "text" && typeof item.text === "string" ? [item.text] : [];
+  }).join("\n").trim();
+  return text || undefined;
+}
+
+function getCompactionState(data: Record<string, unknown>): "running" | "done" | "error" | undefined {
+  const subtype = typeof data.subtype === "string" ? data.subtype.toLowerCase() : "";
+  const status = typeof data.status === "string" ? data.status.toLowerCase() : "";
+  if (subtype.includes("compact") || status.includes("compact")) {
+    if (subtype.includes("error") || status.includes("error") || data.is_error === true) return "error";
+    if (subtype.includes("boundary") || subtype.includes("complete") || status.includes("complete") || status.includes("done")) return "done";
+    return "running";
+  }
+  return undefined;
+}
+
 function getAssistantContent(data: Record<string, unknown>): Record<string, unknown>[] {
   if (data.type !== "assistant" || !data.message || typeof data.message !== "object") return [];
   const content = (data.message as Record<string, unknown>).content;
@@ -430,6 +490,8 @@ function importedConversation(summary: ClaudeSessionSummary): Conversation {
     messages: [],
     resolvedModel: summary.resolvedModel,
     slashCommands: [],
+    contextUsage: summary.contextUsage,
+    contextCompactions: summary.contextCompactions,
     permissionMode: summary.permissionMode,
     source: "claude",
     historyLoaded: false,
@@ -464,6 +526,45 @@ function ProjectEmptyView({ project, onNewConversation }: { project: Project; on
       <h1>{project.customName ?? project.name}</h1>
       <p>当前没有打开的对话</p>
       <button className="primary-button" onClick={onNewConversation}><Plus size={16} />新建对话</button>
+    </div>
+  );
+}
+
+function formatTokenCount(value?: number) {
+  if (value === undefined) return "未知";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
+  return `${Math.round(value)}`;
+}
+
+function ContextStatus({ conversation, onCompact, disabled }: { conversation: Conversation; onCompact(): void; disabled: boolean }) {
+  const usage = conversation.contextUsage;
+  const latest = conversation.contextCompactions?.at(-1);
+  const percentage = usage?.usedPercentage ?? (usage?.usedTokens !== undefined && usage.contextWindow
+    ? (usage.usedTokens / usage.contextWindow) * 100
+    : undefined);
+  const usageText = percentage !== undefined
+    ? `上下文 ${Math.round(percentage)}%`
+    : usage?.usedTokens !== undefined
+      ? `上下文 ${formatTokenCount(usage.usedTokens)}${usage.contextWindow ? `/${formatTokenCount(usage.contextWindow)}` : ""}`
+      : "上下文用量未知";
+  const compactText = latest?.status === "running"
+    ? "正在压缩上下文…"
+    : latest?.status === "error"
+      ? "上下文压缩失败"
+      : latest?.summary
+        ? "已完成上下文压缩"
+        : undefined;
+  return (
+    <div className="context-status" title={latest?.summary ?? usageText}>
+      <span className="context-status-text">{compactText ?? usageText}</span>
+      {latest?.status === "done" && latest.preTokens !== undefined && latest.postTokens !== undefined
+        ? <small>{formatTokenCount(latest.preTokens)} → {formatTokenCount(latest.postTokens)}</small>
+        : null}
+      <button type="button" className="context-compact-button" onClick={onCompact} disabled={disabled || latest?.status === "running"} title="压缩上下文" aria-label="压缩上下文">
+        <Minimize2 size={13} />
+        <span>压缩</span>
+      </button>
     </div>
   );
 }
@@ -923,6 +1024,8 @@ export default function App() {
             messages: history.messages,
             resolvedModel: history.resolvedModel ?? conversation.resolvedModel,
             permissionMode: history.permissionMode,
+            contextUsage: history.contextUsage ?? conversation.contextUsage,
+            contextCompactions: history.contextCompactions ?? conversation.contextCompactions,
             updatedAt: Math.max(conversation.updatedAt, history.updatedAt),
             historyLoaded: true,
           }
@@ -998,10 +1101,17 @@ export default function App() {
     if (event.type === "message" && event.data) {
       const data = event.data;
       if (data.type === "system" && typeof data.session_id === "string") {
+        const descriptions = data.slash_command_descriptions && typeof data.slash_command_descriptions === "object"
+          ? data.slash_command_descriptions as Record<string, unknown>
+          : {};
         const slashCommands = Array.isArray(data.slash_commands)
-          ? [...new Set(data.slash_commands
-            .filter((command): command is string => typeof command === "string")
-            .map((command) => `/${command.replace(/^\//, "")}`))]
+          ? normalizeSlashCommands(data.slash_commands.map((command) => {
+            const name = typeof command === "string" ? `/${command.replace(/^\//, "")}` : "";
+            const description = typeof descriptions[name.toLowerCase()] === "string"
+              ? descriptions[name.toLowerCase()] as string
+              : describeSlashCommand(name);
+            return { name, description };
+          }))
           : undefined;
         updateConversation(meta.conversationId, (conversation) => ({
           ...conversation,
@@ -1010,6 +1120,58 @@ export default function App() {
           resolvedModel: typeof data.model === "string" ? data.model : conversation.resolvedModel,
           slashCommands: slashCommands ?? conversation.slashCommands,
         }));
+      }
+
+      const contextUsage = getContextUsage(data);
+      if (contextUsage) {
+        updateConversation(meta.conversationId, (conversation) => ({
+          ...conversation,
+          contextUsage: { ...conversation.contextUsage, ...contextUsage },
+        }));
+      }
+      const compactBoundary = getCompactBoundary(data);
+      const compactSummary = getCompactSummary(data);
+      if (compactBoundary) {
+        updateConversation(meta.conversationId, (conversation) => ({
+          ...conversation,
+          contextUsage: {
+            ...conversation.contextUsage,
+            usedTokens: compactBoundary.postTokens ?? conversation.contextUsage?.usedTokens,
+          },
+          contextCompactions: [...(conversation.contextCompactions ?? []).filter((item) => item.status !== "running"), compactBoundary].slice(-20),
+        }));
+      } else if (compactSummary) {
+        updateConversation(meta.conversationId, (conversation) => {
+          const compactions = conversation.contextCompactions ?? [];
+          const index = compactions.findIndex((item) => item.status === "done" && !item.summary);
+          if (index < 0) return conversation;
+          return {
+            ...conversation,
+            contextCompactions: compactions.map((item, itemIndex) => itemIndex === index ? { ...item, summary: compactSummary } : item),
+          };
+        });
+      } else {
+        const compactState = getCompactionState(data);
+        if (compactState) {
+          updateConversation(meta.conversationId, (conversation) => {
+            const compactions = conversation.contextCompactions ?? [];
+            const runningIndex = compactions.findIndex((item) => item.status === "running");
+            if (compactState === "running" && runningIndex < 0) {
+              const runningCompaction: ContextCompaction = { id: makeId(), trigger: "unknown", status: "running", startedAt: Date.now() };
+              return {
+                ...conversation,
+                contextCompactions: [...compactions, runningCompaction].slice(-20),
+              };
+            }
+            if (runningIndex < 0) return conversation;
+            return {
+              ...conversation,
+              contextCompactions: compactions.map((item, index) => index === runningIndex
+                ? { ...item, status: compactState, completedAt: compactState === "running" ? undefined : Date.now(), error: compactState === "error" ? "上下文压缩失败" : undefined }
+                : item),
+            };
+          });
+        }
       }
 
       const blockStart = getStreamBlockStart(data);
@@ -1821,6 +1983,11 @@ export default function App() {
     return false;
   };
 
+  const compactContext = () => {
+    if (!activeConversation) return;
+    sendPrompt("/compact", []);
+  };
+
   const startSidebarResize = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     sidebarResize.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: sidebarWidth };
@@ -1970,10 +2137,16 @@ export default function App() {
                   </button>
                 </div>
               ) : null}
+              <ContextStatus
+                conversation={activeConversation}
+                disabled={activeProcessRunning || !activeConversation.sessionId}
+                onCompact={compactContext}
+              />
             </header>
             <ConversationView
               key={`conversation-${activeConversation.id}`}
               messages={activeConversation.messages}
+              contextCompactions={activeConversation.contextCompactions ?? []}
               loadingHistory={activeConversation.source === "claude" && !activeConversation.historyLoaded}
               onBranch={activeConversation.sessionId ? branchConversation : undefined}
               branchDisabled={activeProcessRunning || branchingConversationId === activeConversation.id}

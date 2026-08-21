@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { appendFile, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { extname, join } from "node:path";
+import { basename, extname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { UpdateManager } from "./update-manager";
@@ -105,6 +105,24 @@ interface ImportedMessage {
   timeline?: ImportedTimelineItem[];
 }
 
+interface ImportedContextUsage {
+  usedTokens?: number;
+  contextWindow?: number;
+  usedPercentage?: number;
+  remainingPercentage?: number;
+}
+
+interface ImportedContextCompaction {
+  id: string;
+  trigger: "auto" | "manual" | "unknown";
+  status: "done";
+  completedAt?: number;
+  preTokens?: number;
+  postTokens?: number;
+  durationMs?: number;
+  summary?: string;
+}
+
 interface ClaudeSessionSummary {
   sessionId: string;
   title: string;
@@ -116,6 +134,8 @@ interface ClaudeSessionSummary {
   resolvedModel?: string;
   permissionMode: PermissionMode;
   messages?: ImportedMessage[];
+  contextUsage?: ImportedContextUsage;
+  contextCompactions?: ImportedContextCompaction[];
 }
 
 interface ActiveRun {
@@ -630,6 +650,33 @@ function claudeSessionsDirectory(workspace: string) {
   return testDirectory || join(claudeConfigDirectory(), "projects", projectKey);
 }
 
+async function discoverSlashCommandDescriptions(workspace: string) {
+  const roots = [
+    join(workspace, ".claude", "commands"),
+    join(claudeConfigDirectory(), "commands"),
+    join(claudeConfigDirectory(), "plugins"),
+  ];
+  const descriptions: Record<string, string> = {};
+  const visit = async (directory: string, depth: number): Promise<void> => {
+    if (depth > 6) return;
+    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+    await Promise.all(entries.map(async (entry) => {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) return visit(path, depth + 1);
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".md")) return;
+      const raw = await readFile(path, "utf8").catch(() => "");
+      const match = raw.match(/^---\s*\r?\n([\s\S]*?)\r?\n---/);
+      const description = match?.[1].match(/^description:\s*(.+)$/m)?.[1]?.trim();
+      if (!description) return;
+      const relative = path.slice(directory.length + 1).replace(/[\\/]/g, "/").replace(/\.md$/i, "");
+      const commandName = basename(relative).toLowerCase();
+      if (commandName && !descriptions[`/${commandName}`]) descriptions[`/${commandName}`] = description;
+    }));
+  };
+  await Promise.all(roots.map((root) => visit(root, 0)));
+  return descriptions;
+}
+
 function importedUserText(content: unknown) {
   if (typeof content === "string") return content.trim();
   if (!Array.isArray(content)) return "";
@@ -638,6 +685,21 @@ function importedUserText(content: unknown) {
     const item = block as Record<string, unknown>;
     return item.type === "text" && typeof item.text === "string" ? [item.text] : [];
   }).join("\n").trim();
+}
+
+function importedUsage(record: Record<string, unknown>): ImportedContextUsage | undefined {
+  const message = record.message && typeof record.message === "object" ? record.message as Record<string, unknown> : undefined;
+  const usage = record.usage ?? message?.usage;
+  if (!usage || typeof usage !== "object") return undefined;
+  const item = usage as Record<string, unknown>;
+  const inputTokens = [item.input_tokens, item.cache_creation_input_tokens, item.cache_read_input_tokens]
+    .reduce<number>((total, value) => total + (typeof value === "number" && Number.isFinite(value) ? value : 0), 0);
+  return inputTokens > 0 ? { usedTokens: inputTokens } : undefined;
+}
+
+function importedCompactSummary(record: Record<string, unknown>) {
+  if (record.isCompactSummary !== true || !record.message || typeof record.message !== "object") return undefined;
+  return importedUserText((record.message as Record<string, unknown>).content) || undefined;
 }
 
 function importedToolResultText(content: unknown) {
@@ -724,6 +786,8 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
   let gitBranch: string | undefined;
   let resolvedModel: string | undefined;
   let permissionMode: PermissionMode = "acceptEdits";
+  let contextUsage: ImportedContextUsage | undefined;
+  const contextCompactions: ImportedContextCompaction[] = [];
   let createdAt = Number.POSITIVE_INFINITY;
   let updatedAt = 0;
   let currentAssistant: ImportedMessage | undefined;
@@ -749,10 +813,37 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
     }
     if (typeof record.gitBranch === "string" && record.gitBranch.length <= 200) gitBranch = record.gitBranch;
     const timestamp = parseTimestamp(record.timestamp);
+    const usage = importedUsage(record);
+    if (usage) contextUsage = { ...contextUsage, ...usage };
+    const compactSummary = importedCompactSummary(record);
+    if (compactSummary && contextCompactions.length > 0) {
+      contextCompactions[contextCompactions.length - 1].summary = compactSummary;
+    }
+    if (record.type === "system" && record.subtype === "compact_boundary") {
+      const metadata = record.compactMetadata && typeof record.compactMetadata === "object"
+        ? record.compactMetadata as Record<string, unknown>
+        : {};
+      const trigger = metadata.trigger === "auto" || metadata.trigger === "manual" ? metadata.trigger : "unknown";
+      contextCompactions.push({
+        id: typeof record.uuid === "string" ? record.uuid : `${sessionId}-compact-${contextCompactions.length}`,
+        trigger,
+        status: "done",
+        completedAt: timestamp,
+        preTokens: typeof metadata.preTokens === "number" ? metadata.preTokens : undefined,
+        postTokens: typeof metadata.postTokens === "number" ? metadata.postTokens : undefined,
+        durationMs: typeof metadata.durationMs === "number" ? metadata.durationMs : undefined,
+      });
+      contextUsage = {
+        ...contextUsage,
+        usedTokens: typeof metadata.postTokens === "number" ? metadata.postTokens : contextUsage?.usedTokens,
+      };
+    }
     if (timestamp !== undefined) {
       createdAt = Math.min(createdAt, timestamp);
       updatedAt = Math.max(updatedAt, timestamp);
     }
+
+    if (record.isCompactSummary === true) continue;
 
     if (record.type === "user" && record.message && typeof record.message === "object") {
       const message = record.message as Record<string, unknown>;
@@ -857,6 +948,8 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
     gitBranch,
     resolvedModel,
     permissionMode,
+    contextUsage,
+    contextCompactions: contextCompactions.length ? contextCompactions : undefined,
     ...(includeMessages ? { messages } : {}),
   };
 }
@@ -1456,14 +1549,18 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
   activeRuns.set(request.runId, activeRun);
 
   const output = createInterface({ input: child.stdout });
+  const slashDescriptionsPromise = discoverSlashCommandDescriptions(request.cwd).catch(() => ({} as Record<string, string>));
   let observedSessionId = request.sessionId;
-  output.on("line", (line) => {
+  output.on("line", async (line) => {
     if (!line.trim()) return;
     try {
       const data: unknown = JSON.parse(line);
       if (data && typeof data === "object") {
         const sessionId = (data as Record<string, unknown>).session_id;
         if (typeof sessionId === "string" && SESSION_ID_PATTERN.test(sessionId)) observedSessionId = sessionId;
+        if ((data as Record<string, unknown>).type === "system" && Array.isArray((data as Record<string, unknown>).slash_commands)) {
+          (data as Record<string, unknown>).slash_command_descriptions = await slashDescriptionsPromise;
+        }
       }
       emit(owner, { runId: activeRun.currentTurnRunId, type: "message", data });
       if (data && typeof data === "object" && (data as Record<string, unknown>).type === "result") {

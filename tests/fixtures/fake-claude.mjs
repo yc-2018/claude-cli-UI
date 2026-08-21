@@ -56,6 +56,10 @@ const processPrompt = (input) => {
   const sessionName = sessionNameIndex >= 0 ? args[sessionNameIndex + 1] : undefined;
   const isResume = args.includes("--resume");
   const send = (data) => process.stdout.write(`${JSON.stringify(data)}\n`);
+  const slashCommandDescriptions = {
+    "/story": "运行故事写作工作流",
+    "/compact": "压缩当前对话上下文，保留关键内容",
+  };
   if (prompt.includes("这是首次会话名称测试内容") && sessionName !== "手动会话名") {
     process.stderr.write(`unexpected session name: ${sessionName ?? "missing"}`);
     process.exitCode = 2;
@@ -110,6 +114,14 @@ const processPrompt = (input) => {
   if (prompt.includes("模拟失败")) {
     process.stderr.write("模拟 CLI 错误");
     setImmediate(() => process.exit(2));
+    return;
+  }
+  if (prompt.trim() === "/compact") {
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"], slash_command_descriptions: slashCommandDescriptions });
+    send({ type: "system", subtype: "context_usage", context_window: { used_tokens: 120000, context_window: 200000, used_percentage: 60, remaining_percentage: 40 }, session_id: sessionId });
+    send({ type: "system", subtype: "compact_boundary", session_id: sessionId, compactMetadata: { trigger: "manual", preTokens: 120000, postTokens: 14000, durationMs: 25 } });
+    send({ type: "user", isCompactSummary: true, message: { role: "user", content: [{ type: "text", text: "已保留项目目标、关键决策和未完成事项。" }] }, session_id: sessionId });
+    send({ type: "result", subtype: "success", is_error: false, result: "上下文压缩完成。", session_id: sessionId });
     return;
   }
   if (prompt.includes("空响应")) {
@@ -292,6 +304,8 @@ const processPrompt = (input) => {
     session_id: sessionId,
     model,
     slash_commands: ["story", "compact"],
+    slash_command_descriptions: slashCommandDescriptions,
+    context_window: { used_tokens: 8000, context_window: 200000, used_percentage: 4, remaining_percentage: 96 },
     permissionMode: "acceptEdits",
   });
 

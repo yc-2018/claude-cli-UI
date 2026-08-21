@@ -533,6 +533,13 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .title-command-icon { flex: 0 0 auto; color: #8a8a83; opacity: 0; transition: opacity 120ms ease; }
 .task-title-command:hover .title-command-icon, .task-title-command:focus-visible .title-command-icon { opacity: 1; }
 
+.context-status { display: flex; min-width: 0; align-items: center; gap: 7px; color: #777770; font-size: 11px; }
+.context-status-text { overflow: hidden; max-width: 180px; text-overflow: ellipsis; white-space: nowrap; }
+.context-status small { color: #999991; font-family: "Cascadia Code", Consolas, monospace; font-size: 10px; }
+.context-compact-button { display: flex; height: 27px; align-items: center; gap: 5px; padding: 0 8px; border: 1px solid #d8d8d1; border-radius: 5px; background: #fff; color: #5d5d57; font-size: 10.5px; cursor: pointer; }
+.context-compact-button:hover:not(:disabled) { border-color: #c1c1ba; background: #f2f2ee; color: #33332f; }
+.context-compact-button:disabled { opacity: .45; cursor: default; }
+
 .cli-command-popover {
   position: absolute;
   top: calc(100% + 6px);
@@ -629,6 +636,16 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .conversation { width: min(100% - 48px, 820px); margin: 0 auto; padding: 38px 0 28px; }
 
 .message { display: flex; width: 100%; margin-bottom: 28px; }
+.context-compaction { display: grid; max-width: 760px; grid-template-columns: 26px minmax(0, 1fr); align-items: start; gap: 7px; margin: 0 auto 24px; padding: 10px 12px; border: 1px solid #dfdfd8; border-radius: 7px; background: #f7f7f3; color: #5d5d57; }
+.context-compaction.running { border-color: #d8d6c6; background: #faf9ef; }
+.context-compaction.error { border-color: #e2c6c1; background: #fbf2f1; color: #8d4d46; }
+.context-compaction-icon { display: grid; width: 24px; height: 24px; place-items: center; border-radius: 50%; background: #ecece6; color: #6d6d65; }
+.context-compaction-copy { display: grid; min-width: 0; gap: 2px; }
+.context-compaction-copy strong { font-size: 11.5px; font-weight: 650; }
+.context-compaction-copy small { color: #888880; font-size: 10.5px; }
+.context-compaction details { grid-column: 2; min-width: 0; }
+.context-compaction summary { color: #77776f; font-size: 10.5px; cursor: pointer; }
+.context-compaction-summary { max-height: 300px; margin-top: 8px; padding: 9px 11px; overflow: auto; border-left: 2px solid #d2d2ca; background: #fff; color: #55554f; font-size: 11.5px; line-height: 1.55; }
 .message.user { justify-content: flex-end; }
 .message.branchable { margin-bottom: 3px; }
 .message-body { min-width: 0; max-width: 100%; }
@@ -1105,6 +1122,14 @@ button.activity-row:hover, button.activity-row:focus-visible { background: #f1f1
 .command-option.active { background: #eeeeea; }
 .command-option strong { color: #343430; font-family: "Cascadia Code", Consolas, monospace; font-size: 11.5px; font-weight: 600; }
 .command-option span { overflow: hidden; color: #85857e; font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (max-width: 900px) {
+  .task-header { align-items: flex-end; gap: 8px; }
+  .context-status-text, .context-status small { display: none; }
+  .context-compact-button span { display: none; }
+  .context-compact-button { width: 28px; justify-content: center; padding: 0; }
+  .command-option { grid-template-columns: 118px minmax(0, 1fr); }
+}
 
 .send-button {
   display: grid;

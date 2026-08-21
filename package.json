@@ -1,6 +1,6 @@
 {
   "name": "claude-cli-ui",
-  "version": "0.1.45",
+  "version": "0.1.46",
   "private": true,
   "description": "A focused desktop interface for Claude CLI",
   "main": "dist-electron/main.js",
