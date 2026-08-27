@@ -1519,9 +1519,12 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     "--input-format",
     "stream-json",
     "--include-partial-messages",
-    "--permission-mode",
-    request.permissionMode,
   ];
+  if (request.permissionMode === "bypassPermissions") {
+    args.push("--dangerously-skip-permissions");
+  } else {
+    args.push("--permission-mode", request.permissionMode);
+  }
   if (request.sessionId) args.push("--resume", request.sessionId);
   if (request.sessionName) args.push("--name", request.sessionName);
   if (request.model) args.push("--model", request.model);

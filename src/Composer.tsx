@@ -12,6 +12,7 @@ const permissionOptions: { value: PermissionMode; label: string }[] = [
   { value: "default", label: "默认权限" },
   { value: "plan", label: "计划模式" },
   { value: "dontAsk", label: "拒绝未授权" },
+  { value: "bypassPermissions", label: "完全访问权限" },
 ];
 
 interface Props {
@@ -69,9 +70,6 @@ export default function Composer({
   const matchedModel = modelConfig.options.find((option) => option.value === conversation.selectedModel)
     ?? modelConfig.options.find((option) => option.actualModel === conversation.selectedModel)
     ?? modelConfig.options[0];
-  const visiblePermissionOptions = conversation.permissionMode === "bypassPermissions"
-    ? [{ value: "bypassPermissions" as PermissionMode, label: "跳过权限检查" }, ...permissionOptions]
-    : permissionOptions;
   const slashSuggestions = useMemo(() => {
     if (attachments.length > 0 || !prompt.startsWith("/") || /\s/.test(prompt)) return [];
     const external = conversation.slashCommands ?? [];
@@ -396,7 +394,7 @@ export default function Composer({
               disabled={running || loadingHistory}
               icon={<ShieldCheck size={14} />}
               onChange={(value) => onPermissionChange(value as PermissionMode)}
-              options={visiblePermissionOptions}
+              options={permissionOptions}
               title="权限模式"
               value={conversation.permissionMode}
             />

@@ -440,16 +440,20 @@ try {
     throw new Error("/plan did not change permission mode");
   }
   await page.locator(".permission-select .composer-select-trigger").click();
-  if (await page.locator(".permission-select .composer-select-option").count() !== 4) throw new Error("custom permission picker did not expose every mode");
+  if (await page.locator(".permission-select .composer-select-option").count() !== 5) throw new Error("custom permission picker did not expose every mode");
+  if (!(await page.locator('.permission-select .composer-select-option[data-value="bypassPermissions"]').textContent())?.includes("完全访问权限")) {
+    throw new Error("full access permission mode was missing");
+  }
   await page.keyboard.press("ArrowUp");
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("Enter");
-  await page.locator(".composer textarea").fill("/edit");
-  await page.locator(".composer textarea").press("Enter");
-
+  await page.locator(".permission-select .composer-select-trigger").click();
+  await page.locator('.permission-select .composer-select-option[data-value="bypassPermissions"]').click();
   await page.locator(".composer textarea").fill("这是首次会话名称测试内容");
   await page.locator(".composer textarea").press("Enter");
-  await page.waitForSelector('.message.assistant[data-status="done"]', { timeout: 15_000 });
+  await page.waitForSelector('.message.assistant:last-of-type[data-status="done"]', { timeout: 15_000 });
+  await page.locator(".composer textarea").fill("/edit");
+  await page.locator(".composer textarea").press("Enter");
   await page.waitForFunction(() => {
     const responses = document.querySelectorAll(".message.assistant .markdown");
     return responses.item(responses.length - 1)?.textContent?.includes("流式输出稳定");

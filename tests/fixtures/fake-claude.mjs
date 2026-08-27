@@ -55,6 +55,11 @@ const processPrompt = (input) => {
   const sessionNameIndex = args.indexOf("--name");
   const sessionName = sessionNameIndex >= 0 ? args[sessionNameIndex + 1] : undefined;
   const isResume = args.includes("--resume");
+  if (prompt.includes("这是首次会话名称测试内容") && !args.includes("--dangerously-skip-permissions")) {
+    process.stderr.write("dangerously skip permissions flag was not passed");
+    process.exitCode = 2;
+    return;
+  }
   const send = (data) => process.stdout.write(`${JSON.stringify(data)}\n`);
   const slashCommandDescriptions = {
     "/story": "运行故事写作工作流",
