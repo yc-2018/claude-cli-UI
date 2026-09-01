@@ -429,6 +429,7 @@ interface ControlResponseRequest {
   requestId: string;
   behavior: "allow" | "deny" | "completed" | "cancelled";
   updatedInput?: Record<string, unknown>;
+  updatedPermissions?: Record<string, unknown>[];
   result?: unknown;
   message?: string;
 }
@@ -445,6 +446,11 @@ function isValidControlResponseRequest(value: unknown): value is ControlResponse
   if (request.updatedInput !== undefined && (
     !request.updatedInput || typeof request.updatedInput !== "object" || Array.isArray(request.updatedInput) ||
     JSON.stringify(request.updatedInput).length > 100_000
+  )) return false;
+  if (request.updatedPermissions !== undefined && (
+    !Array.isArray(request.updatedPermissions) || request.updatedPermissions.length > 20 ||
+    request.updatedPermissions.some((permission) => !permission || typeof permission !== "object" || Array.isArray(permission)) ||
+    JSON.stringify(request.updatedPermissions).length > 20_000
   )) return false;
   return true;
 }
@@ -1756,6 +1762,7 @@ ipcMain.handle("claude:respond-control", async (_event, value: unknown) => {
   if (!activeRun || !activeRun.pendingControlRequestIds.has(request.requestId)) return { responded: false };
   const response: Record<string, unknown> = { behavior: request.behavior };
   if (request.updatedInput) response.updatedInput = request.updatedInput;
+  if (request.updatedPermissions) response.updatedPermissions = request.updatedPermissions;
   if (request.result !== undefined) response.result = request.result;
   if (request.message) response.message = request.message;
   try {

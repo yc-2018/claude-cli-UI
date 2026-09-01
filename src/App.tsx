@@ -59,6 +59,7 @@ interface PendingPermission {
   runId?: string;
   requestId?: string;
   input?: Record<string, unknown>;
+  permissionSuggestions?: Record<string, unknown>[];
   direct?: boolean;
 }
 
@@ -386,6 +387,9 @@ function getControlRequest(data: Record<string, unknown>) {
     toolUseId: typeof request.tool_use_id === "string" ? request.tool_use_id : undefined,
     input,
     requiresUserInteraction: request.requires_user_interaction === true,
+    permissionSuggestions: Array.isArray(request.permission_suggestions)
+      ? request.permission_suggestions.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item))).slice(0, 20)
+      : undefined,
   };
 }
 
@@ -1191,6 +1195,7 @@ export default function App() {
               runId: event.runId,
               requestId: control.requestId,
               input: toolInput,
+              permissionSuggestions: control.permissionSuggestions,
               direct: true,
             }]);
         }
@@ -1973,7 +1978,15 @@ export default function App() {
       }
       const response = decision === "deny"
         ? { runId: pendingPermission.runId, requestId: pendingPermission.requestId, behavior: "deny" as const, message: `用户拒绝使用 ${names.join("、")}` }
-        : { runId: pendingPermission.runId, requestId: pendingPermission.requestId, behavior: "allow" as const, updatedInput: pendingPermission.input };
+        : {
+          runId: pendingPermission.runId,
+          requestId: pendingPermission.requestId,
+          behavior: "allow" as const,
+          updatedInput: pendingPermission.input,
+          ...(decision === "conversation" && pendingPermission.permissionSuggestions?.length
+            ? { updatedPermissions: pendingPermission.permissionSuggestions }
+            : {}),
+        };
       try {
         const result = await window.claudeDesk.respondControl(response);
         if (!result.responded) throw new Error("Claude CLI 没有接受这次授权");

@@ -252,6 +252,7 @@ export interface ControlResponseRequest {
   requestId: string;
   behavior: "allow" | "deny" | "completed" | "cancelled";
   updatedInput?: Record<string, unknown>;
+  updatedPermissions?: Record<string, unknown>[];
   result?: unknown;
   message?: string;
 }
