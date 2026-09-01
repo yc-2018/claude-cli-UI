@@ -151,7 +151,7 @@ const processPrompt = (input) => {
       send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
       slowTaskActive = false;
       for (const deferredInput of deferredInputs.splice(0)) processPrompt(deferredInput);
-    }, 5_000);
+    }, 8_000);
     return;
   }
 
@@ -221,6 +221,62 @@ const processPrompt = (input) => {
       send({ type: "assistant", message: { role: "assistant", content: [{ type: "thinking", thinking }, { type: "text", text: response }] }, session_id: sessionId });
       send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
     }, 20);
+    return;
+  }
+
+  if (prompt.includes("思考阶段测试")) {
+    const thinking = "先分析问题，再开始输出结论。";
+    const response = "已经进入回答阶段。";
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    send({
+      type: "stream_event",
+      event: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking } },
+      session_id: sessionId,
+    });
+    setTimeout(() => {
+      send({
+        type: "stream_event",
+        event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: response } },
+        session_id: sessionId,
+      });
+      send({
+        type: "assistant",
+        message: { role: "assistant", content: [{ type: "thinking", thinking }, { type: "text", text: response }] },
+        session_id: sessionId,
+      });
+      setTimeout(() => {
+        send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
+      }, 1_200);
+    }, 350);
+    return;
+  }
+
+  if (prompt.includes("计划询问测试")) {
+    const permissionModeIndex = args.indexOf("--permission-mode");
+    if (permissionModeIndex < 0 || args[permissionModeIndex + 1] !== "plan") {
+      process.stderr.write("plan permission mode was not passed");
+      process.exitCode = 2;
+      return;
+    }
+    const tool = {
+      type: "tool_use",
+      id: "tool-plan-question",
+      name: "AskUserQuestion",
+      input: {
+        questions: [{
+          question: "最终交付几份文稿？",
+          header: "交付形式",
+          multiSelect: false,
+          options: [
+            { label: "一份完整文稿", description: "将全部内容合并为一个文件。" },
+            { label: "按章节拆分", description: "每章单独生成一个文件。", preview: "第 1 章\n第 2 章" },
+          ],
+        }],
+      },
+    };
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    send({ type: "assistant", message: { role: "assistant", content: [tool] }, session_id: sessionId });
+    send({ type: "result", subtype: "success", is_error: false, result: "等待用户确认交付形式。", session_id: sessionId });
     return;
   }
 

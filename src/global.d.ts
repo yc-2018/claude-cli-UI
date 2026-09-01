@@ -1,4 +1,4 @@
-import type { AppendRunRequest, AppSelection, AppSettings, AppUpdateState, Attachment, AttachmentUpload, BranchClaudeSessionResult, ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ModelConfig, PermissionNotificationRequest, Project, RunRequest, UpdateActionResult } from "./types";
+import type { AppendRunRequest, AppSelection, AppSettings, AppUpdateState, Attachment, AttachmentUpload, BranchClaudeSessionResult, ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ModelConfig, OpenAttachmentResult, PermissionNotificationRequest, Project, RunRequest, UpdateActionResult } from "./types";
 
 declare module "*.css";
 
@@ -18,6 +18,7 @@ declare global {
       normalizeClaudeSession(workspace: string, sessionId: string): Promise<boolean>;
       stageAttachments(attachments: AttachmentUpload[]): Promise<Attachment[]>;
       deleteAttachment(storedName: string): Promise<boolean>;
+      openAttachment(storedName: string): Promise<OpenAttachmentResult>;
       getProjectStore(): Promise<unknown[] | null>;
       discoverProjects(): Promise<string[]>;
       saveProjectStore(projects: Project[]): void;

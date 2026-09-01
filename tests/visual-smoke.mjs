@@ -330,6 +330,16 @@ await page.locator(".composer textarea").evaluate((textarea) => {
 });
 await page.waitForFunction(() => document.querySelectorAll(".attachment-item").length === 2);
 await page.screenshot({ path: resolve(artifacts, "attachments.png") });
+await page.locator('.attachment-open[aria-label="预览 界面截图.png"]').click();
+const attachmentPreviewLayout = await page.locator(".attachment-preview-dialog").evaluate((element) => element.getBoundingClientRect().toJSON());
+if (
+  attachmentPreviewLayout.left < 0 ||
+  attachmentPreviewLayout.top < 0 ||
+  attachmentPreviewLayout.right > 1320 ||
+  attachmentPreviewLayout.bottom > 860
+) throw new Error(`attachment preview escaped the desktop viewport: ${JSON.stringify(attachmentPreviewLayout)}`);
+await page.screenshot({ path: resolve(artifacts, "attachment-preview.png") });
+await page.locator('[aria-label="关闭附件预览"]').click();
 
 const layout = await page.evaluate(() => ({
   body: { width: document.body.scrollWidth, height: document.body.scrollHeight },
@@ -342,6 +352,16 @@ const layout = await page.evaluate(() => ({
 await page.setViewportSize({ width: 900, height: 640 });
 if (await page.locator('[aria-label="压缩上下文"]').count() !== 1) throw new Error("context compact button was not visible in the compact viewport");
 await page.waitForTimeout(100);
+await page.locator('.attachment-open[aria-label="预览 界面截图.png"]').click();
+const compactAttachmentPreviewLayout = await page.locator(".attachment-preview-dialog").evaluate((element) => element.getBoundingClientRect().toJSON());
+if (
+  compactAttachmentPreviewLayout.left < 0 ||
+  compactAttachmentPreviewLayout.top < 0 ||
+  compactAttachmentPreviewLayout.right > 900 ||
+  compactAttachmentPreviewLayout.bottom > 640
+) throw new Error(`attachment preview escaped the compact viewport: ${JSON.stringify(compactAttachmentPreviewLayout)}`);
+await page.screenshot({ path: resolve(artifacts, "attachment-preview-compact.png") });
+await page.keyboard.press("Escape");
 await editActivity.locator(".activity-row").click();
 const compactActivityDetailLayout = await editActivity.locator(".activity-detail").evaluate((element) => element.getBoundingClientRect().toJSON());
 if (compactActivityDetailLayout.left < 0 || compactActivityDetailLayout.right > 900 || compactActivityDetailLayout.width <= 0) {

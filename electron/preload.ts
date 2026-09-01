@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld("claudeDesk", {
   normalizeClaudeSession: (workspace: string, sessionId: string) => ipcRenderer.invoke("claude:normalize-session", workspace, sessionId),
   stageAttachments: (attachments: unknown) => ipcRenderer.invoke("attachment:stage", attachments),
   deleteAttachment: (storedName: string) => ipcRenderer.invoke("attachment:delete", storedName),
+  openAttachment: (storedName: string) => ipcRenderer.invoke("attachment:open", storedName),
   getProjectStore: () => ipcRenderer.invoke("projects:load"),
   discoverProjects: () => ipcRenderer.invoke("projects:discover"),
   saveProjectStore: (projects: unknown) => ipcRenderer.send("projects:save", projects),

@@ -82,6 +82,14 @@ interface ImportedActivityDetail {
   newText?: string;
   output?: string;
   diff?: ImportedDiffLine[];
+  questions?: ImportedUserQuestion[];
+}
+
+interface ImportedUserQuestion {
+  question: string;
+  header?: string;
+  multiSelect: boolean;
+  options: { label: string; description?: string; preview?: string }[];
 }
 
 type ImportedTimelineItem = {
@@ -591,6 +599,36 @@ function importedDetailText(value: unknown) {
   return typeof value === "string" ? value.slice(0, MAX_IMPORTED_ACTIVITY_DETAIL) : undefined;
 }
 
+function importedUserQuestions(input: unknown): ImportedUserQuestion[] | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const rawQuestions = (input as Record<string, unknown>).questions;
+  if (!Array.isArray(rawQuestions)) return undefined;
+  const questions = rawQuestions.slice(0, 10).flatMap((rawQuestion): ImportedUserQuestion[] => {
+    if (!rawQuestion || typeof rawQuestion !== "object") return [];
+    const question = rawQuestion as Record<string, unknown>;
+    if (typeof question.question !== "string" || !question.question.trim()) return [];
+    const options = Array.isArray(question.options)
+      ? question.options.slice(0, 20).flatMap((rawOption) => {
+        if (!rawOption || typeof rawOption !== "object") return [];
+        const option = rawOption as Record<string, unknown>;
+        if (typeof option.label !== "string" || !option.label.trim()) return [];
+        return [{
+          label: option.label.slice(0, 500),
+          description: importedDetailText(option.description),
+          preview: importedDetailText(option.preview),
+        }];
+      })
+      : [];
+    return [{
+      question: question.question.slice(0, 2_000),
+      header: importedDetailText(question.header),
+      multiSelect: question.multiSelect === true,
+      options,
+    }];
+  });
+  return questions.length > 0 ? questions : undefined;
+}
+
 function importedActivityDetail(name: string, input: unknown): ImportedActivityDetail | undefined {
   if (!input || typeof input !== "object") return undefined;
   const value = input as Record<string, unknown>;
@@ -598,9 +636,10 @@ function importedActivityDetail(name: string, input: unknown): ImportedActivityD
   const command = importedDetailText(value.command);
   const oldText = importedDetailText(value.old_string ?? value.oldText);
   let newText = importedDetailText(value.new_string ?? value.newText);
+  const questions = /askuserquestion/i.test(name) ? importedUserQuestions(input) : undefined;
   if (newText === undefined && /write|create/i.test(name)) newText = importedDetailText(value.content);
-  if (!path && !command && oldText === undefined && newText === undefined) return undefined;
-  return { path, command, oldText, newText };
+  if (!path && !command && oldText === undefined && newText === undefined && !questions) return undefined;
+  return { path, command, oldText, newText, questions };
 }
 
 function importedStructuredDiff(value: unknown): ImportedDiffLine[] | undefined {
@@ -1479,6 +1518,16 @@ ipcMain.handle("attachment:delete", async (_event, storedName: unknown) => {
   return unlink(filePath).then(() => true).catch(() => false);
 });
 
+ipcMain.handle("attachment:open", async (_event, storedName: unknown) => {
+  if (typeof storedName !== "string") return { opened: false, error: "附件路径无效" };
+  const filePath = attachmentPath(storedName);
+  if (!filePath) return { opened: false, error: "附件路径无效" };
+  const details = await stat(filePath).catch(() => null);
+  if (!details?.isFile()) return { opened: false, error: "附件已丢失" };
+  const error = await shell.openPath(filePath);
+  return error ? { opened: false, error } : { opened: true };
+});
+
 ipcMain.handle("claude:start", async (event, value: unknown) => {
   if (!isValidRunRequest(value)) throw new Error("无效的运行参数");
   const request = value;
@@ -1623,8 +1672,6 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
 ipcMain.handle("claude:append", async (_event, value: unknown) => {
   if (!isValidAppendRunRequest(value)) throw new Error("无效的追加参数");
   const request = value;
-  const activeRun = activeRuns.get(request.runId);
-  if (!activeRun || activeRun.child.stdin.destroyed || activeRun.child.stdin.writableEnded) return { appended: false };
   const resolvedAttachments = await Promise.all((request.attachments ?? []).map(async (attachment) => {
     const filePath = attachmentPath(attachment.storedName);
     if (!filePath) throw new Error("附件路径无效");
@@ -1640,15 +1687,23 @@ ipcMain.handle("claude:append", async (_event, value: unknown) => {
   const attachmentContext = filePaths.length > 0
     ? `\n\n用户附加了以下本地文件，请根据请求读取并使用它们：\n${filePaths.map((path) => `- ${path}`).join("\n")}`
     : "";
+  const activeRun = activeRuns.get(request.runId);
+  if (!activeRun || activeRun.child.stdin.destroyed || activeRun.child.stdin.writableEnded) return { appended: false };
   activeRun.pendingTurnRunIds.push(request.turnRunId);
   activeRun.unfinishedTurnRunIds.add(request.turnRunId);
-  activeRun.child.stdin.write(`${JSON.stringify({
-    type: "user",
-    message: {
-      role: "user",
-      content: [...imageContent, { type: "text", text: `${request.prompt.trim() || "请查看并说明这些附件。"}${attachmentContext}` }],
-    },
-  })}\n`, "utf8");
+  try {
+    activeRun.child.stdin.write(`${JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [...imageContent, { type: "text", text: `${request.prompt.trim() || "请查看并说明这些附件。"}${attachmentContext}` }],
+      },
+    })}\n`, "utf8");
+  } catch {
+    activeRun.pendingTurnRunIds = activeRun.pendingTurnRunIds.filter((turnRunId) => turnRunId !== request.turnRunId);
+    activeRun.unfinishedTurnRunIds.delete(request.turnRunId);
+    return { appended: false };
+  }
   return { appended: true };
 });
 

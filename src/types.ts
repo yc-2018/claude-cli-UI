@@ -58,6 +58,19 @@ export interface ActivityDiffLine {
   newLine?: number;
 }
 
+export interface UserQuestionOption {
+  label: string;
+  description?: string;
+  preview?: string;
+}
+
+export interface UserQuestion {
+  question: string;
+  header?: string;
+  multiSelect: boolean;
+  options: UserQuestionOption[];
+}
+
 export interface ActivityDetail {
   path?: string;
   command?: string;
@@ -65,6 +78,7 @@ export interface ActivityDetail {
   newText?: string;
   output?: string;
   diff?: ActivityDiffLine[];
+  questions?: UserQuestion[];
 }
 
 export type ResponseTimelineItem = {
@@ -99,6 +113,11 @@ export interface AttachmentUpload {
   name: string;
   mediaType: string;
   dataBase64: string;
+}
+
+export interface OpenAttachmentResult {
+  opened: boolean;
+  error?: string;
 }
 
 export interface ChatMessage {

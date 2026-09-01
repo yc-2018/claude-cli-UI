@@ -1,4 +1,4 @@
-import type { Activity, ActivityDetail, ActivityDiffLine, Attachment, ChatMessage, Conversation, ContextCompaction, ContextUsage, PermissionMode, Project, ResponseTimelineItem } from "./types";
+import type { Activity, ActivityDetail, ActivityDiffLine, Attachment, ChatMessage, Conversation, ContextCompaction, ContextUsage, PermissionMode, Project, ResponseTimelineItem, UserQuestion } from "./types";
 import { normalizeSlashCommands } from "./commands";
 
 export const PROJECTS_STORAGE_KEY = "claude-desk.projects.v2";
@@ -44,6 +44,31 @@ function normalizeActivityDetail(value: unknown): ActivityDetail | undefined {
       }];
     })
     : undefined;
+  const questions = Array.isArray(detail.questions)
+    ? detail.questions.slice(0, 10).flatMap((question): UserQuestion[] => {
+      if (!question || typeof question !== "object") return [];
+      const item = question as Partial<UserQuestion>;
+      if (typeof item.question !== "string" || !item.question.trim()) return [];
+      const options = Array.isArray(item.options)
+        ? item.options.slice(0, 20).flatMap((option) => {
+          if (!option || typeof option !== "object") return [];
+          const candidate = option as { label?: unknown; description?: unknown; preview?: unknown };
+          if (typeof candidate.label !== "string" || !candidate.label.trim()) return [];
+          return [{
+            label: candidate.label.slice(0, 500),
+            description: boundedText(candidate.description),
+            preview: boundedText(candidate.preview),
+          }];
+        })
+        : [];
+      return [{
+        question: item.question.slice(0, 2_000),
+        header: boundedText(item.header),
+        multiSelect: item.multiSelect === true,
+        options,
+      }];
+    })
+    : undefined;
   const normalized = {
     path: boundedText(detail.path),
     command: boundedText(detail.command),
@@ -51,6 +76,7 @@ function normalizeActivityDetail(value: unknown): ActivityDetail | undefined {
     newText: boundedText(detail.newText),
     output: boundedText(detail.output),
     diff: diff?.length ? diff : undefined,
+    questions: questions?.length ? questions : undefined,
   };
   return Object.values(normalized).some((item) => item !== undefined) ? normalized : undefined;
 }

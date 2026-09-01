@@ -31,6 +31,7 @@ import type {
   ReorderPosition,
   RunRequest,
   ToolPermissionRequest,
+  UserQuestion,
 } from "./types";
 import { describeSlashCommand, normalizeSlashCommands } from "./commands";
 
@@ -212,6 +213,36 @@ function activityDetailText(value: unknown) {
   return typeof value === "string" ? value.slice(0, MAX_ACTIVITY_DETAIL_LENGTH) : undefined;
 }
 
+function getUserQuestions(input: unknown): UserQuestion[] | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const rawQuestions = (input as Record<string, unknown>).questions;
+  if (!Array.isArray(rawQuestions)) return undefined;
+  const questions = rawQuestions.slice(0, 10).flatMap((rawQuestion): UserQuestion[] => {
+    if (!rawQuestion || typeof rawQuestion !== "object") return [];
+    const question = rawQuestion as Record<string, unknown>;
+    if (typeof question.question !== "string" || !question.question.trim()) return [];
+    const options = Array.isArray(question.options)
+      ? question.options.slice(0, 20).flatMap((rawOption) => {
+        if (!rawOption || typeof rawOption !== "object") return [];
+        const option = rawOption as Record<string, unknown>;
+        if (typeof option.label !== "string" || !option.label.trim()) return [];
+        return [{
+          label: option.label.slice(0, 500),
+          description: activityDetailText(option.description),
+          preview: activityDetailText(option.preview),
+        }];
+      })
+      : [];
+    return [{
+      question: question.question.slice(0, 2_000),
+      header: activityDetailText(question.header),
+      multiSelect: question.multiSelect === true,
+      options,
+    }];
+  });
+  return questions.length > 0 ? questions : undefined;
+}
+
 function getActivityDetail(name: string, input: unknown): ActivityDetail | undefined {
   if (!input || typeof input !== "object") return undefined;
   const value = input as Record<string, unknown>;
@@ -219,9 +250,10 @@ function getActivityDetail(name: string, input: unknown): ActivityDetail | undef
   const command = activityDetailText(value.command);
   const oldText = activityDetailText(value.old_string ?? value.oldText);
   let newText = activityDetailText(value.new_string ?? value.newText);
+  const questions = /askuserquestion/i.test(name) ? getUserQuestions(input) : undefined;
   if (newText === undefined && /write|create/i.test(name)) newText = activityDetailText(value.content);
-  if (!path && !command && oldText === undefined && newText === undefined) return undefined;
-  return { path, command, oldText, newText };
+  if (!path && !command && oldText === undefined && newText === undefined && !questions) return undefined;
+  return { path, command, oldText, newText, questions };
 }
 
 function toolResultText(value: unknown): string | undefined {
@@ -1705,8 +1737,22 @@ export default function App() {
       ...conversation,
       messages: conversation.messages.filter((message) => message.id !== userMessageId),
     }));
+    if (activeMeta.completed && ![...runMeta.current.values()].some((meta) => meta.conversationId === conversationId && !meta.completed)) {
+      updateResponse(activeMeta, (message) => ({
+        ...message,
+        status: activeMeta.successful ? "done" : message.status,
+        ...(activeMeta.successful ? finishResponse(message) : {}),
+      }));
+      setActiveRuns((current) => {
+        const next = { ...current };
+        delete next[conversationId];
+        return next;
+      });
+      processRunIds.current.delete(conversationId);
+      if (activeMeta.successful) notifyConversationCompleted(conversationId);
+    }
     return false;
-  }, [updateConversation]);
+  }, [notifyConversationCompleted, updateConversation, updateResponse]);
 
   const sendPrompt = (prompt: string, attachments: Attachment[]) => {
     if (!activeConversation || (activeConversation.source === "claude" && !activeConversation.historyLoaded)) return;
@@ -1885,10 +1931,9 @@ export default function App() {
       pendingText: "",
       pendingThinking: "",
     };
-    const responseStartedAt = Date.now();
     updateResponse(meta, (message) => ({
       ...message,
-      responseStartedAt,
+      responseStartedAt: message.responseStartedAt ?? Date.now(),
       responseDurationMs: undefined,
       status: "running",
       error: undefined,
@@ -2023,7 +2068,9 @@ export default function App() {
   const showCliResumeCommand = () => {
     if (!activeConversation?.sessionId || !activeProject) return;
     const command = createCliResumeCommand(activeProject.workspace, activeConversation.sessionId);
-    void copyCliResumeCommand(command, activeConversation.id);
+    setCliCommandNotice({ conversationId: activeConversation.id, command, copied: false });
+    window.clearTimeout(cliCommandNoticeTimer.current);
+    cliCommandNoticeTimer.current = window.setTimeout(() => setCliCommandNotice(null), 8_000);
   };
 
   if (!storageReady) {
@@ -2121,7 +2168,10 @@ export default function App() {
                   <code>{cliCommandNotice.command}</code>
                   <button
                     aria-label={cliCommandNotice.copied ? "CMD 命令已复制" : "复制 CMD 命令"}
-                    onClick={() => { void copyCliResumeCommand(cliCommandNotice.command, activeConversation.id); }}
+                    onClick={() => {
+                      if (cliCommandNotice.copied) setCliCommandNotice(null);
+                      else void copyCliResumeCommand(cliCommandNotice.command, activeConversation.id);
+                    }}
                     title={cliCommandNotice.copied ? "已复制" : "复制"}
                     type="button"
                   >

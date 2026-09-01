@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { BrainCircuit, Check, ChevronRight, Code2, Copy, FileCode2, GitFork, Pencil, Search, Sparkles, TerminalSquare, Wrench } from "lucide-react";
+import AttachmentPreview, { attachmentUrl, openAttachmentFile } from "./AttachmentPreview";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import type { Activity, ActivityDetail, ActivityDiffLine, ChatMessage, ContextCompaction, ResponseTimelineItem } from "./types";
+import type { Activity, ActivityDetail, ActivityDiffLine, Attachment, ChatMessage, ContextCompaction, ResponseTimelineItem } from "./types";
 
 function getToolIcon(name: string) {
   const normalized = name.toLowerCase();
@@ -99,17 +100,34 @@ function ActivityDetails({ detail }: { detail: ActivityDetail }) {
           <pre><code>{detail.output}</code></pre>
         </div>
       ) : null}
+      {detail.questions?.map((question, index) => (
+        <section className="activity-question" key={`${question.header ?? "question"}-${index}`}>
+          {question.header ? <span className="activity-question-header">{question.header}</span> : null}
+          <strong>{question.question}</strong>
+          {question.options.length > 0 ? (
+            <div className="activity-question-options">
+              {question.options.map((option, optionIndex) => (
+                <div className="activity-question-option" key={`${option.label}-${optionIndex}`}>
+                  <span>{option.label}</span>
+                  {option.description ? <small>{option.description}</small> : null}
+                  {option.preview ? <pre>{option.preview}</pre> : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </section>
+      ))}
     </div>
   );
 }
 
 function ActivityRow({ activity, working }: { activity: Activity; working: boolean }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(Boolean(activity.detail?.questions?.length));
   const entryRef = useRef<HTMLDivElement>(null);
   const Icon = getToolIcon(activity.name);
   const expandable = Boolean(activity.detail && (
     activity.detail.path || activity.detail.command || activity.detail.output || activity.detail.diff?.length ||
-    activity.detail.oldText !== undefined || activity.detail.newText !== undefined
+    activity.detail.oldText !== undefined || activity.detail.newText !== undefined || activity.detail.questions?.length
   ));
   const rowContent = (
     <>
@@ -195,6 +213,7 @@ function ResponseDuration({ running, startedAt, durationMs }: { running: boolean
 
   return (
     <div className="response-duration" data-elapsed-seconds={elapsedSeconds}>
+      {running ? <span className="mini-spinner" /> : null}
       {running ? "正在回答" : "本次回答耗时"} · {formatElapsed(elapsedSeconds)}
     </div>
   );
@@ -256,6 +275,7 @@ interface UserMessageProps {
 
 function UserMessage({ message, canEdit, onEditResend }: UserMessageProps) {
   const [draft, setDraft] = useState<string | null>(null);
+  const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const editing = draft !== null;
   const attachmentCount = message.attachments?.length ?? 0;
@@ -281,55 +301,61 @@ function UserMessage({ message, canEdit, onEditResend }: UserMessageProps) {
     <div className="sent-attachments">
       {message.attachments?.map((attachment) => attachment.kind === "image" ? (
         <figure className="sent-image" key={attachment.id}>
-          <img src={`claude-desk-attachment://local/${encodeURIComponent(attachment.storedName)}`} alt={attachment.name} />
-          <figcaption title={attachment.name}>{attachment.name}</figcaption>
+          <button aria-label={`预览 ${attachment.name}`} onClick={() => setPreviewAttachment(attachment)} title="预览图片" type="button">
+            <img src={attachmentUrl(attachment)} alt={attachment.name} />
+            <figcaption title={attachment.name}>{attachment.name}</figcaption>
+          </button>
         </figure>
       ) : (
-        <div className="sent-file" key={attachment.id} title={attachment.name}>
+        <button className="sent-file" key={attachment.id} onClick={() => { void openAttachmentFile(attachment); }} title="打开文件" type="button">
           <FileCode2 size={16} />
           <span>{attachment.name}</span>
-        </div>
+        </button>
       ))}
     </div>
   ) : null;
 
   if (editing) {
     return (
-      <div className="user-bubble editing">
-        {attachments}
-        <textarea
-          ref={textareaRef}
-          aria-label="编辑消息"
-          onChange={(event) => {
-            setDraft(event.target.value);
-            event.target.style.height = "auto";
-            event.target.style.height = `${Math.min(event.target.scrollHeight, 220)}px`;
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              submitEdit();
-            }
-            if (event.key === "Escape") {
-              event.preventDefault();
-              setDraft(null);
-            }
-          }}
-          placeholder="编辑消息后重新发送…"
-          rows={1}
-          value={draft}
-        />
-        <div className="user-edit-actions">
-          <button onClick={() => setDraft(null)} type="button">取消</button>
-          <button className="primary" disabled={!canSubmit} onClick={submitEdit} type="button">重新发送</button>
+      <>
+        <AttachmentPreview attachment={previewAttachment} onClose={() => setPreviewAttachment(null)} />
+        <div className="user-bubble editing">
+          {attachments}
+          <textarea
+            ref={textareaRef}
+            aria-label="编辑消息"
+            onChange={(event) => {
+              setDraft(event.target.value);
+              event.target.style.height = "auto";
+              event.target.style.height = `${Math.min(event.target.scrollHeight, 220)}px`;
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                submitEdit();
+              }
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setDraft(null);
+              }
+            }}
+            placeholder="编辑消息后重新发送…"
+            rows={1}
+            value={draft}
+          />
+          <div className="user-edit-actions">
+            <button onClick={() => setDraft(null)} type="button">取消</button>
+            <button className="primary" disabled={!canSubmit} onClick={submitEdit} type="button">重新发送</button>
+          </div>
         </div>
-      </div>
+      </>
     );
   }
 
   const showActions = Boolean(message.content) || canEdit;
   return (
     <>
+      <AttachmentPreview attachment={previewAttachment} onClose={() => setPreviewAttachment(null)} />
       <div className="user-bubble">
         {attachments}
         {message.content ? <div className="user-message-text">{message.content}</div> : null}
@@ -460,7 +486,11 @@ export default function ConversationView({ messages, contextCompactions = [], lo
                     {message.thinking ? (
                       <ThinkingBlock
                         content={message.thinking}
-                        running={message.status === "running"}
+                        running={message.status === "running" && !(
+                          message.content ||
+                          (message.activities?.length ?? 0) > 0 ||
+                          message.timeline?.some((item) => item.type === "activity" || Boolean(item.content))
+                        )}
                       />
                     ) : null}
                     {message.timeline ? (

@@ -678,9 +678,11 @@ button, select, textarea { -webkit-app-region: no-drag; }
 
 .sent-attachments { display: flex; max-width: 100%; gap: 7px; margin-bottom: 8px; overflow-x: auto; }
 .sent-image { width: 132px; min-width: 0; margin: 0; }
+.sent-image button { display: block; width: 100%; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .sent-image img { display: block; width: 132px; height: 96px; border-radius: 5px; object-fit: cover; }
 .sent-image figcaption { margin-top: 4px; overflow: hidden; color: #777771; font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
-.sent-file { display: flex; min-width: 0; max-width: 230px; height: 34px; align-items: center; gap: 7px; padding: 0 9px; border: 1px solid #d6d6d0; border-radius: 5px; background: #fafaf8; color: #686862; }
+.sent-file { display: flex; min-width: 0; max-width: 230px; height: 34px; align-items: center; gap: 7px; padding: 0 9px; border: 1px solid #d6d6d0; border-radius: 5px; background: #fafaf8; color: #686862; cursor: pointer; }
+.sent-file:hover { border-color: #c5c5be; background: #f4f4f0; color: #454540; }
 .sent-file span { min-width: 0; overflow: hidden; font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
 .user-message-text { white-space: pre-wrap; }
 .user-bubble.editing { width: min(650px, 76vw); }
@@ -748,9 +750,19 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .thinking-block { margin: 0 0 13px; border-left: 2px solid #d7d7d0; }
 .thinking-toggle { display: flex; height: 28px; align-items: center; gap: 7px; padding: 0 8px; border: 0; background: transparent; color: #74746d; font-size: 11.5px; font-weight: 570; cursor: pointer; }
 .thinking-toggle:hover { color: #454540; }
-.response-duration { height: 20px; margin: 0 0 5px 8px; color: #96968e; font-size: 11.5px; font-variant-numeric: tabular-nums; line-height: 20px; }
+.response-duration { display: flex; height: 20px; align-items: center; gap: 6px; margin: 0 0 5px 8px; color: #96968e; font-size: 11.5px; font-variant-numeric: tabular-nums; line-height: 20px; }
+.response-duration .mini-spinner { width: 11px; height: 11px; }
 .thinking-chevron { transition: transform 140ms ease; }
 .thinking-block.open .thinking-chevron { transform: rotate(90deg); }
+.activity-question { display: grid; gap: 7px; padding: 10px 11px; border: 1px solid #deded7; border-radius: 6px; background: #fafaf8; color: #44443f; }
+.activity-question + .activity-question { margin-top: 8px; }
+.activity-question-header { color: #8a5b46; font-size: 10.5px; font-weight: 650; }
+.activity-question > strong { font-size: 12px; line-height: 1.5; }
+.activity-question-options { display: grid; gap: 5px; }
+.activity-question-option { display: grid; gap: 2px; padding: 7px 8px; border-left: 2px solid #d5d5ce; background: #fff; }
+.activity-question-option span { font-size: 11.5px; font-weight: 600; }
+.activity-question-option small { color: #777770; font-size: 10.5px; line-height: 1.45; }
+.activity-question-option pre { max-height: 180px; margin: 4px 0 0; padding: 7px; overflow: auto; background: #f2f2ee; font-size: 10.5px; white-space: pre-wrap; }
 .thinking-content.markdown { max-height: 280px; margin: 2px 8px 4px; padding: 5px 9px 7px; overflow: auto; color: #6e6e67; font-size: 12px; line-height: 1.6; }
 .thinking-content.markdown p { margin-bottom: 8px; }
 
@@ -979,20 +991,30 @@ button.activity-row:hover, button.activity-row:focus-visible { background: #f1f1
   height: 48px;
   flex: 0 0 auto;
   align-items: center;
-  gap: 8px;
-  padding: 5px 26px 5px 5px;
+  padding: 0 26px 0 0;
   border: 1px solid #deded8;
   border-radius: 6px;
   background: #fafaf8;
 }
 
+.attachment-open { display: flex; min-width: 0; height: 100%; flex: 1; align-items: center; gap: 8px; padding: 5px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.attachment-open:hover { background: #f2f2ee; }
 .attachment-item img { width: 38px; height: 38px; flex: 0 0 auto; border-radius: 4px; object-fit: cover; }
 .attachment-file-icon { display: grid; width: 38px; height: 38px; flex: 0 0 auto; place-items: center; border-radius: 4px; background: #eeeeea; color: #6f6f68; }
 .attachment-meta { display: grid; min-width: 0; gap: 2px; }
 .attachment-meta strong { overflow: hidden; color: #454540; font-size: 11.5px; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-meta small { color: #92928a; font-size: 10px; }
-.attachment-item > button { position: absolute; top: 4px; right: 4px; display: grid; width: 19px; height: 19px; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #92928b; cursor: pointer; }
-.attachment-item > button:hover { background: #e9e9e4; color: #4f4f49; }
+.attachment-item > .attachment-remove { position: absolute; top: 4px; right: 4px; display: grid; width: 19px; height: 19px; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #92928b; cursor: pointer; }
+.attachment-item > .attachment-remove:hover { background: #e9e9e4; color: #4f4f49; }
+
+.attachment-preview-backdrop { position: fixed; z-index: 400; inset: 0; display: grid; padding: 32px; place-items: center; background: rgb(24 24 21 / 72%); }
+.attachment-preview-dialog { display: grid; width: min(920px, calc(100vw - 64px)); height: min(78vh, 720px); max-height: calc(100vh - 64px); grid-template-rows: 42px minmax(0, 1fr); overflow: hidden; border: 1px solid #55554f; border-radius: 8px; background: #242421; box-shadow: 0 18px 60px rgb(0 0 0 / 32%); }
+.attachment-preview-dialog header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; padding: 0 10px 0 14px; border-bottom: 1px solid #44443f; color: #f1f1ed; }
+.attachment-preview-dialog header strong { min-width: 0; overflow: hidden; font-size: 12px; font-weight: 580; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-preview-dialog header button { display: grid; width: 28px; height: 28px; flex: 0 0 auto; place-items: center; padding: 0; border: 0; border-radius: 5px; background: transparent; color: #c4c4bd; cursor: pointer; }
+.attachment-preview-dialog header button:hover { background: #3b3b36; color: #fff; }
+.attachment-preview-content { display: grid; min-height: 0; padding: 18px; overflow: auto; place-items: center; }
+.attachment-preview-content img { display: block; max-width: 100%; max-height: calc(100vh - 142px); object-fit: contain; }
 
 .composer textarea {
   display: block;

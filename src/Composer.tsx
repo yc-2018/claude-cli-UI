@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CircleStop, CornerDownRight, FileText, GripVertical, Paperclip, Pencil, Send, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
+import AttachmentPreview, { attachmentUrl, openAttachmentFile } from "./AttachmentPreview";
 import ComposerSelect, { type ComposerSelectHandle } from "./ComposerSelect";
 import { LOCAL_SLASH_COMMANDS } from "./commands";
 import type { Attachment, AttachmentUpload, ComposerDraft, Conversation, ModelConfig, PermissionMode, QueuedPrompt, ReorderPosition, SlashCommand } from "./types";
@@ -62,6 +63,7 @@ export default function Composer({
   const [activeSuggestion, setActiveSuggestion] = useState(0);
   const [draggedPromptId, setDraggedPromptId] = useState<string | null>(null);
   const [promptDropTarget, setPromptDropTarget] = useState<{ id: string; position: ReorderPosition } | null>(null);
+  const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelSelectRef = useRef<ComposerSelectHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -291,20 +293,32 @@ export default function Composer({
           <div className="attachment-list" aria-label="待发送附件">
             {attachments.map((attachment) => (
               <div className={`attachment-item ${attachment.kind}`} key={attachment.id}>
-                {attachment.kind === "image"
-                  ? <img src={`claude-desk-attachment://local/${encodeURIComponent(attachment.storedName)}`} alt={attachment.name} />
-                  : <span className="attachment-file-icon"><FileText size={18} /></span>}
-                <span className="attachment-meta">
-                  <strong title={attachment.name}>{attachment.name}</strong>
-                  <small>{attachment.size < 1024 * 1024 ? `${Math.ceil(attachment.size / 1024)} KB` : `${(attachment.size / 1024 / 1024).toFixed(1)} MB`}</small>
-                </span>
-                <button type="button" onClick={() => removeAttachment(attachment)} title="移除附件" aria-label={`移除 ${attachment.name}`}>
+                <button
+                  aria-label={attachment.kind === "image" ? `预览 ${attachment.name}` : `打开 ${attachment.name}`}
+                  className="attachment-open"
+                  onClick={() => {
+                    if (attachment.kind === "image") setPreviewAttachment(attachment);
+                    else void openAttachmentFile(attachment);
+                  }}
+                  title={attachment.kind === "image" ? "预览图片" : "打开文件"}
+                  type="button"
+                >
+                  {attachment.kind === "image"
+                    ? <img src={attachmentUrl(attachment)} alt={attachment.name} />
+                    : <span className="attachment-file-icon"><FileText size={18} /></span>}
+                  <span className="attachment-meta">
+                    <strong title={attachment.name}>{attachment.name}</strong>
+                    <small>{attachment.size < 1024 * 1024 ? `${Math.ceil(attachment.size / 1024)} KB` : `${(attachment.size / 1024 / 1024).toFixed(1)} MB`}</small>
+                  </span>
+                </button>
+                <button className="attachment-remove" type="button" onClick={() => removeAttachment(attachment)} title="移除附件" aria-label={`移除 ${attachment.name}`}>
                   <X size={13} />
                 </button>
               </div>
             ))}
           </div>
         ) : null}
+        <AttachmentPreview attachment={previewAttachment} onClose={() => setPreviewAttachment(null)} />
         <textarea
           ref={textareaRef}
           value={prompt}

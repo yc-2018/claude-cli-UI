@@ -484,10 +484,15 @@ try {
   if (await page.locator(".cli-command-popover code").textContent() !== expectedCliCommand) {
     throw new Error("conversation title did not generate the complete CMD resume command");
   }
-  if (await page.evaluate(() => window.__cliCommandClipboardWrites.at(-1)) !== expectedCliCommand) {
-    throw new Error("CMD resume command was not copied from the conversation title");
+  if (await page.evaluate(() => window.__cliCommandClipboardWrites.length) !== 0) {
+    throw new Error("conversation title copied the CMD command before the copy action was clicked");
   }
-  await page.locator('[aria-label="关闭 CMD 命令"]').click();
+  await page.locator('[aria-label="复制 CMD 命令"]').click();
+  if (await page.evaluate(() => window.__cliCommandClipboardWrites.at(-1)) !== expectedCliCommand) {
+    throw new Error("CMD resume command was not copied from the popover action");
+  }
+  await page.locator('[aria-label="CMD 命令已复制"]').click();
+  await page.waitForSelector(".cli-command-popover", { state: "detached" });
   await page.locator('.task-row.active .task-rename[title="重命名对话"]').evaluate((button) => button.click());
   await page.locator('input[aria-label="对话名称"]').fill("UI 同步会话名");
   await page.locator('input[aria-label="对话名称"]').press("Enter");
@@ -615,11 +620,39 @@ try {
   await page.waitForFunction(() => document.querySelectorAll(".attachment-item").length === 2);
   await page.waitForFunction(() => (document.querySelector(".attachment-item img") instanceof HTMLImageElement) && document.querySelector(".attachment-item img").naturalWidth > 0);
   if (!(await page.locator(".attachment-list").textContent())?.includes("notes.txt")) throw new Error("pasted file was not shown in the composer");
+  await page.locator('.attachment-open[aria-label="预览 clipboard-image.png"]').click();
+  await page.waitForSelector(".attachment-preview-dialog");
+  if (await page.locator(".attachment-preview-dialog img").getAttribute("alt") !== "clipboard-image.png") {
+    throw new Error("pasted image preview did not show the selected image");
+  }
+  await page.locator('[aria-label="关闭附件预览"]').click();
   await page.locator(".composer textarea").fill("附件回归测试");
   await page.locator(".composer textarea").press("Enter");
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
   if (await page.locator(".sent-image").count() !== 1 || await page.locator(".sent-file", { hasText: "notes.txt" }).count() !== 1) {
     throw new Error("sent attachments were not rendered in the conversation");
+  }
+  await page.locator('.sent-image [aria-label="预览 clipboard-image.png"]').click();
+  await page.waitForSelector(".attachment-preview-dialog");
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".attachment-preview-dialog", { state: "detached" });
+  await electronApp.evaluate(({ shell }) => {
+    globalThis.__attachmentOpenPaths = [];
+    shell.openPath = async (path) => {
+      globalThis.__attachmentOpenPaths.push(path);
+      return "";
+    };
+  });
+  await page.locator(".sent-file", { hasText: "notes.txt" }).click();
+  await electronApp.evaluate(async () => {
+    const deadline = Date.now() + 5_000;
+    while (globalThis.__attachmentOpenPaths.length === 0 && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+  });
+  const openedAttachmentPaths = await electronApp.evaluate(() => globalThis.__attachmentOpenPaths);
+  if (openedAttachmentPaths.length !== 1 || !/[\\/]attachments[\\/][0-9a-f-]+\.txt$/i.test(openedAttachmentPaths[0])) {
+    throw new Error("sent file did not request opening through the main process");
   }
   await page.waitForTimeout(450);
   const persistedAttachments = await page.evaluate(() => JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0]?.conversations?.find((conversation) => conversation.sessionId === "22222222-2222-4222-8222-222222222222")?.messages?.find((message) => message.content === "附件回归测试")?.attachments);
@@ -716,6 +749,39 @@ try {
   await page.screenshot({ path: resolve(artifacts, "slash-menu.png") });
   await page.locator(".composer textarea").fill("");
 
+  await page.locator(".composer textarea").fill("/plan");
+  await page.locator(".composer textarea").press("Enter");
+  await page.locator(".composer textarea").fill("计划询问测试");
+  await page.locator(".composer textarea").press("Enter");
+  const planQuestion = page.locator(".activity-question", { hasText: "最终交付几份文稿？" });
+  await planQuestion.waitFor();
+  const planQuestionText = await planQuestion.textContent();
+  if (!planQuestionText?.includes("交付形式") || !planQuestionText.includes("一份完整文稿") || !planQuestionText.includes("按章节拆分")) {
+    throw new Error("plan mode AskUserQuestion options were not shown");
+  }
+  if (await page.locator(".activity-entry", { has: planQuestion }).locator(".activity-detail").count() !== 1) {
+    throw new Error("plan mode question was not expanded automatically");
+  }
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+
+  await page.locator(".composer textarea").fill("/edit");
+  await page.locator(".composer textarea").press("Enter");
+  await page.locator(".composer textarea").fill("思考阶段测试");
+  await page.locator(".composer textarea").press("Enter");
+  const thinkingPhaseResponse = page.locator(".message.assistant").last();
+  await thinkingPhaseResponse.locator(".thinking-toggle", { hasText: "正在思考" }).waitFor();
+  await thinkingPhaseResponse.locator(".response-text-block", { hasText: "已经进入回答阶段" }).waitFor();
+  if ((await thinkingPhaseResponse.locator(".thinking-toggle").textContent())?.includes("正在思考")) {
+    throw new Error("thinking indicator remained active after response text started");
+  }
+  if (await thinkingPhaseResponse.locator(".thinking-toggle .mini-spinner").count() !== 0) {
+    throw new Error("thinking block kept a spinner after the answer phase started");
+  }
+  if (await thinkingPhaseResponse.locator(".response-duration .mini-spinner").count() !== 1) {
+    throw new Error("active answer timer did not show the running indicator");
+  }
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+
   await electronApp.evaluate(({ ipcMain }) => {
     globalThis.__permissionNotifyCalls = [];
     ipcMain.removeHandler("app:notify-permission");
@@ -762,9 +828,12 @@ try {
   await page.locator(".composer textarea").fill("权限测试");
   await page.locator(".composer textarea").press("Enter");
   await page.waitForSelector(".permission-dialog");
+  await page.waitForTimeout(1_200);
   await page.locator(".permission-allow-once").click();
   await page.waitForSelector(".permission-dialog", { state: "detached" });
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  const continuedPermissionElapsed = Number(await page.locator(".message.assistant").last().locator(".response-duration").getAttribute("data-elapsed-seconds"));
+  if (continuedPermissionElapsed < 1) throw new Error("permission continuation reset the response timer");
   const allowedPermissionText = await page.locator(".message.assistant").last().textContent();
   if (!allowedPermissionText?.includes("我先保留这段阶段性说明") || !allowedPermissionText.includes("需要你授权网络搜索后才能继续") || !allowedPermissionText.includes("测试通过")) {
     throw new Error("permission retry replaced output that was already visible");
@@ -923,6 +992,19 @@ try {
   await page.locator(".composer textarea").press("Enter");
   await page.waitForSelector('.message.assistant[data-status="running"]');
   if (await page.locator(".composer textarea").isDisabled()) throw new Error("composer was disabled while Claude was replying");
+  const guidedPrompts = ["引导当前任务", "第二次追击", "第三次追击"];
+  for (const prompt of guidedPrompts) {
+    await page.locator(".composer textarea").fill(prompt);
+    await page.locator(".composer textarea").press("Enter");
+    const guidedPrompt = page.locator(".prompt-queue-item", { hasText: prompt });
+    await guidedPrompt.waitFor();
+    if (await page.locator('.message.assistant[data-status="running"]').count() !== 1) throw new Error("queued prompt created a second running response");
+    if (await page.locator('.message.assistant[data-status="running"] .response-duration').count() !== 1) throw new Error("queued prompt created a second response timer");
+    await guidedPrompt.locator(".guide-prompt").click();
+    await page.waitForFunction((guidedText) => ![...document.querySelectorAll(".prompt-queue-item")].some((element) => element.textContent?.includes(guidedText)), prompt);
+    if (await page.locator(".user-bubble", { hasText: prompt }).count() !== 1) throw new Error(`guided prompt disappeared from the conversation: ${prompt}`);
+    if (await page.locator('.message.assistant[data-status="running"]').count() !== 1) throw new Error("guiding created a second running response");
+  }
   const runningModelTrigger = page.locator(".model-select .composer-select-trigger");
   if (await runningModelTrigger.isDisabled()) throw new Error("model picker was disabled while Claude was replying");
   await runningModelTrigger.click();
@@ -938,16 +1020,6 @@ try {
   }
   await page.locator(`.model-select .composer-select-option[data-value="${originalRunningModel}"]`).click();
   if (await page.locator('.message.assistant[data-status="running"]').count() !== 1) throw new Error("changing models interrupted the active response");
-  await page.locator(".composer textarea").fill("引导当前任务");
-  await page.locator(".composer textarea").press("Enter");
-  const guidedPrompt = page.locator(".prompt-queue-item", { hasText: "引导当前任务" });
-  await guidedPrompt.waitFor();
-  if (await page.locator('.message.assistant[data-status="running"]').count() !== 1) throw new Error("queued prompt created a second running response");
-  if (await page.locator('.message.assistant[data-status="running"] .response-duration').count() !== 1) throw new Error("queued prompt created a second response timer");
-  await guidedPrompt.locator('[aria-label="引导当前任务"]').click();
-  await page.waitForFunction(() => ![...document.querySelectorAll(".prompt-queue-item")].some((element) => element.textContent?.includes("引导当前任务")));
-  if (await page.locator(".user-bubble", { hasText: "引导当前任务" }).count() !== 1) throw new Error("guided prompt disappeared from the conversation");
-  if (await page.locator('.message.assistant[data-status="running"]').count() !== 1) throw new Error("guiding created a second running response");
   for (const prompt of ["队列第一条", "队列第二条", "队列第三条"]) {
     await page.locator(".composer textarea").fill(prompt);
     await page.locator(".send-button:not(.stop)").click();
@@ -977,23 +1049,29 @@ try {
     "队列第三条,队列第二条已编辑"
   ));
   await page.waitForFunction(() => document.querySelectorAll('.message.assistant[data-status="running"]').length === 0);
-  const guidedResponse = await page.locator(".message.assistant .markdown").filter({ hasText: "引导当前任务" }).count();
-  if (guidedResponse !== 1) throw new Error("guided prompt did not continue in the current response");
+  const guidedResponse = page.locator(".message.assistant").filter({ hasText: "引导当前任务" }).filter({ hasText: "第二次追击" }).filter({ hasText: "第三次追击" });
+  if (await guidedResponse.count() !== 1) throw new Error("guided prompts did not continue in the current response");
   const guidedTurnOrder = await page.locator(".conversation .message").evaluateAll((messages) => messages.map((message) => ({
     role: message.classList.contains("user") ? "user" : "assistant",
     text: message.textContent ?? "",
-  })).filter((message) => message.text.includes("慢任务") || message.text.includes("引导当前任务")));
+  })).filter((message) => ["慢任务", "引导当前任务", "第二次追击", "第三次追击"].some((text) => message.text.includes(text))));
   if (
-    guidedTurnOrder.length !== 3 ||
+    guidedTurnOrder.length !== 5 ||
     guidedTurnOrder[0].role !== "user" ||
     guidedTurnOrder[1].role !== "user" ||
-    guidedTurnOrder[2].role !== "assistant" ||
-    !guidedTurnOrder[2].text.includes("慢任务阶段完成") ||
-    !guidedTurnOrder[2].text.includes("引导当前任务")
+    guidedTurnOrder[2].role !== "user" ||
+    guidedTurnOrder[3].role !== "user" ||
+    guidedTurnOrder[4].role !== "assistant" ||
+    !guidedTurnOrder[4].text.includes("慢任务阶段完成") ||
+    !guidedTurnOrder[4].text.includes("引导当前任务") ||
+    !guidedTurnOrder[4].text.includes("第二次追击") ||
+    !guidedTurnOrder[4].text.includes("第三次追击")
   ) throw new Error(`guided turn rendered in the wrong order: ${JSON.stringify(guidedTurnOrder)}`);
   await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((element) => element.textContent === "队列第三条"));
   await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((element) => element.textContent === "队列第二条已编辑"));
   await page.waitForFunction(() => document.querySelectorAll(".prompt-queue-item").length === 0);
+  await page.waitForFunction(() => document.querySelectorAll('.message.assistant[data-status="running"]').length === 0);
+  await page.waitForFunction(() => document.querySelectorAll(".send-button.stop").length === 0);
   const queuedUserMessages = await page.locator(".user-bubble").allTextContents();
   const thirdIndex = queuedUserMessages.indexOf("队列第三条");
   const editedSecondIndex = queuedUserMessages.indexOf("队列第二条已编辑");
