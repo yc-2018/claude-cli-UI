@@ -247,8 +247,18 @@ export interface AppendRunRequest {
   attachments?: Attachment[];
 }
 
+export interface ControlResponseRequest {
+  runId: string;
+  requestId: string;
+  behavior: "allow" | "deny" | "completed" | "cancelled";
+  updatedInput?: Record<string, unknown>;
+  result?: unknown;
+  message?: string;
+}
+
 
 export interface ToolPermissionRequest {
+  requestId?: string;
   toolName: string;
   toolUseId?: string;
   toolInput?: Record<string, unknown>;
@@ -257,7 +267,7 @@ export interface ToolPermissionRequest {
 
 export interface ClaudeEvent {
   runId: string;
-  type: "message" | "raw" | "error" | "exit";
+  type: "message" | "control_request" | "raw" | "error" | "exit";
   data?: Record<string, unknown>;
   text?: string;
   message?: string;

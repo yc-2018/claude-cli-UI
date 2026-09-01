@@ -447,6 +447,18 @@ try {
   await page.keyboard.press("ArrowUp");
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("Enter");
+  await page.locator(".composer textarea").fill("计划交互问题测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForSelector(".user-question-dialog", { timeout: 15_000 });
+  if (!(await page.locator(".user-question-dialog").textContent())?.includes("最终交付几份文稿？")) {
+    throw new Error("plan mode did not show the interactive question dialog");
+  }
+  await page.locator(".user-question-option", { hasText: "按章节拆分" }).click();
+  await page.locator(".user-question-dialog .permission-button.primary").click();
+  await page.waitForSelector('.message.assistant:last-of-type[data-status="done"]', { timeout: 15_000 });
+  if (!(await page.locator(".message.assistant .markdown").last().textContent())?.includes("按章节拆分")) {
+    throw new Error("plan question answer was not returned to Claude");
+  }
   await page.locator(".permission-select .composer-select-trigger").click();
   await page.locator('.permission-select .composer-select-option[data-value="bypassPermissions"]').click();
   await page.locator(".composer textarea").fill("这是首次会话名称测试内容");

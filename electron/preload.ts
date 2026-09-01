@@ -34,6 +34,7 @@ contextBridge.exposeInMainWorld("claudeDesk", {
   reportError: (message: string) => ipcRenderer.send("app:renderer-error", message),
   startRun: (request: unknown) => ipcRenderer.invoke("claude:start", request),
   appendRun: (request: unknown) => ipcRenderer.invoke("claude:append", request),
+  respondControl: (request: unknown) => ipcRenderer.invoke("claude:respond-control", request),
   stopRun: (runId: string) => ipcRenderer.invoke("claude:stop", runId),
   onEvent: (callback: (event: unknown) => void) => {
     const listener = (_ipcEvent: Electron.IpcRendererEvent, payload: unknown) => callback(payload);

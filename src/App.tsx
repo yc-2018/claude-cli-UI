@@ -4,6 +4,7 @@ import Composer from "./Composer";
 import ConversationView from "./ConversationView";
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
 import PermissionDialog from "./PermissionDialog";
+import UserQuestionDialog from "./UserQuestionDialog";
 import Sidebar from "./Sidebar";
 import UpdateDialog from "./UpdateDialog";
 import { hasLegacyProjectsToMigrate, loadProjects, makeId, parseProjects, pathName, saveProjects, shorten } from "./storage";
@@ -55,6 +56,18 @@ interface PendingPermission {
   responseId: string;
   sessionId?: string;
   requests: ToolPermissionRequest[];
+  runId?: string;
+  requestId?: string;
+  input?: Record<string, unknown>;
+  direct?: boolean;
+}
+
+interface PendingUserQuestion {
+  conversationId: string;
+  runId: string;
+  requestId: string;
+  input: Record<string, unknown>;
+  questions: UserQuestion[];
 }
 
 interface CliCommandNotice {
@@ -360,6 +373,22 @@ function getPermissionRequests(data: Record<string, unknown>): ToolPermissionReq
   });
 }
 
+function getControlRequest(data: Record<string, unknown>) {
+  if (data.type !== "control_request" || typeof data.request_id !== "string" || !data.request || typeof data.request !== "object") return null;
+  const request = data.request as Record<string, unknown>;
+  if (request.subtype !== "can_use_tool" || typeof request.tool_name !== "string" || !/^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(request.tool_name)) return null;
+  const input = request.input && typeof request.input === "object" && !Array.isArray(request.input)
+    ? request.input as Record<string, unknown>
+    : {};
+  return {
+    requestId: data.request_id,
+    toolName: request.tool_name,
+    toolUseId: typeof request.tool_use_id === "string" ? request.tool_use_id : undefined,
+    input,
+    requiresUserInteraction: request.requires_user_interaction === true,
+  };
+}
+
 function numberValue(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : undefined;
 }
@@ -621,6 +650,8 @@ export default function App() {
   const [cliInfo, setCliInfo] = useState<{ available: boolean; version?: string } | null>(null);
   const [modelConfig, setModelConfig] = useState<ModelConfig>({ options: [] });
   const [permissionQueue, setPermissionQueue] = useState<PendingPermission[]>([]);
+  const [questionQueue, setQuestionQueue] = useState<PendingUserQuestion[]>([]);
+  const [questionSubmitting, setQuestionSubmitting] = useState(false);
   const [cliCommandNotice, setCliCommandNotice] = useState<CliCommandNotice | null>(null);
   const [branchingConversationId, setBranchingConversationId] = useState<string | null>(null);
   const [composerFocusRequest, setComposerFocusRequest] = useState(0);
@@ -654,6 +685,7 @@ export default function App() {
   const activeResponseRunning = Boolean(activeConversation?.messages.some((message) => message.role === "assistant" && message.status === "running"));
   const activeProcessRunning = Boolean(activeRunId) || activeResponseRunning;
   const pendingPermission = permissionQueue[0];
+  const pendingQuestion = questionQueue[0];
 
   useEffect(() => {
     let canceled = false;
@@ -1130,6 +1162,42 @@ export default function App() {
       return;
     }
 
+    if (event.type === "control_request" && event.data) {
+      const control = getControlRequest(event.data);
+      if (control) {
+        const questions = getUserQuestions(control.input);
+        if (control.toolName === "AskUserQuestion" && questions) {
+          setQuestionQueue((current) => current.some((item) => item.requestId === control.requestId)
+            ? current
+            : [...current, {
+              conversationId: meta.conversationId,
+              runId: event.runId,
+              requestId: control.requestId,
+              input: control.input,
+              questions,
+            }]);
+        } else {
+          const toolInput = control.input;
+          let summary = summarizeToolInput(toolInput);
+          if (!summary) {
+            try { summary = shorten(JSON.stringify(toolInput), 120); } catch { summary = ""; }
+          }
+          setPermissionQueue((current) => current.some((item) => item.requestId === control.requestId)
+            ? current
+            : [...current, {
+              conversationId: meta.conversationId,
+              responseId: control.requestId,
+              requests: [{ requestId: control.requestId, toolName: control.toolName, toolUseId: control.toolUseId, toolInput, summary }],
+              runId: event.runId,
+              requestId: control.requestId,
+              input: toolInput,
+              direct: true,
+            }]);
+        }
+      }
+      return;
+    }
+
     if (event.type === "message" && event.data) {
       const data = event.data;
       if (data.type === "system" && typeof data.session_id === "string") {
@@ -1327,12 +1395,16 @@ export default function App() {
       if (meta.flushTimer === undefined) meta.flushTimer = window.setTimeout(() => flushPendingText(meta), 50);
     }
     if (event.type === "error") {
+      setQuestionQueue((current) => current.filter((item) => item.runId !== event.runId));
+      setPermissionQueue((current) => current.filter((item) => item.runId !== event.runId));
       flushPendingText(meta);
       meta.completed = true;
       meta.successful = false;
       updateResponse(meta, (message) => ({ ...message, status: "error", activeActivityId: undefined, error: event.message ?? "无法启动 Claude CLI", ...finishResponse(message) }));
     }
     if (event.type === "exit") {
+      setQuestionQueue((current) => current.filter((item) => item.runId !== event.runId));
+      setPermissionQueue((current) => current.filter((item) => item.runId !== event.runId));
       flushPendingText(meta);
       if (!meta.completed) {
         const detail = event.stderr || (event.code === 0 ? "Claude 已结束，但没有返回结果" : `Claude CLI 退出，代码 ${event.code ?? "未知"}`);
@@ -1757,7 +1829,8 @@ export default function App() {
   const sendPrompt = (prompt: string, attachments: Attachment[]) => {
     if (!activeConversation || (activeConversation.source === "claude" && !activeConversation.historyLoaded)) return;
     const busy = [...runMeta.current.values()].some((meta) => meta.conversationId === activeConversation.id)
-      || permissionQueue.some((permission) => permission.conversationId === activeConversation.id);
+      || permissionQueue.some((permission) => permission.conversationId === activeConversation.id)
+      || questionQueue.some((question) => question.conversationId === activeConversation.id);
     if (!busy) {
       void startPrompt(activeConversation.id, prompt, attachments);
       return;
@@ -1797,6 +1870,7 @@ export default function App() {
         queue.length === 0 ||
         activeRuns[conversationId] ||
         permissionQueue.some((permission) => permission.conversationId === conversationId) ||
+        questionQueue.some((question) => question.conversationId === conversationId) ||
         [...runMeta.current.values()].some((meta) => meta.conversationId === conversationId)
       ) continue;
       const [nextPrompt, ...remaining] = queue;
@@ -1812,7 +1886,7 @@ export default function App() {
       });
       void startPrompt(conversationId, nextPrompt.prompt, nextPrompt.attachments);
     }
-  }, [activeRuns, permissionQueue, promptQueues, startPrompt]);
+  }, [activeRuns, permissionQueue, promptQueues, questionQueue, startPrompt]);
 
   const reorderPromptQueue = (sourceId: string, targetId: string, position: ReorderPosition) => {
     if (!activeConversation) return;
@@ -1876,6 +1950,7 @@ export default function App() {
     if (!isLastUserMessage) return;
     const attachments = target.attachments ?? [];
     setPermissionQueue((current) => current.filter((item) => item.conversationId !== activeConversation.id));
+    setQuestionQueue((current) => current.filter((item) => item.conversationId !== activeConversation.id));
     updateConversation(activeConversation.id, (conversation) => ({
       ...conversation,
       updatedAt: Date.now(),
@@ -1886,7 +1961,28 @@ export default function App() {
   };
 
   const resolvePermission = async (decision: "deny" | "once" | "conversation") => {
-    if (!pendingPermission || [...runMeta.current.values()].some((meta) => meta.conversationId === pendingPermission.conversationId && !meta.completed)) return;
+    if (!pendingPermission) return;
+    if (!pendingPermission.direct && [...runMeta.current.values()].some((meta) => meta.conversationId === pendingPermission.conversationId && !meta.completed)) return;
+    if (pendingPermission.direct && pendingPermission.runId && pendingPermission.requestId) {
+      const project = projectsRef.current.find((item) => item.conversations.some((conversation) => conversation.id === pendingPermission.conversationId));
+      const conversation = project?.conversations.find((item) => item.id === pendingPermission.conversationId);
+      const names = [...new Set(pendingPermission.requests.map((request) => request.toolName))];
+      if (decision === "conversation" && conversation) {
+        const allowedTools = [...new Set([...(conversation.allowedTools ?? []), ...names])];
+        updateConversation(conversation.id, (current) => ({ ...current, allowedTools, updatedAt: Date.now() }));
+      }
+      const response = decision === "deny"
+        ? { runId: pendingPermission.runId, requestId: pendingPermission.requestId, behavior: "deny" as const, message: `用户拒绝使用 ${names.join("、")}` }
+        : { runId: pendingPermission.runId, requestId: pendingPermission.requestId, behavior: "allow" as const, updatedInput: pendingPermission.input };
+      try {
+        const result = await window.claudeDesk.respondControl(response);
+        if (!result.responded) throw new Error("Claude CLI 没有接受这次授权");
+        setPermissionQueue((current) => current.filter((item) => item.requestId !== pendingPermission.requestId));
+      } catch (error) {
+        window.alert(error instanceof Error ? error.message : "无法回复 Claude 的权限请求");
+      }
+      return;
+    }
     setPermissionQueue((current) => current.filter((item) => item.responseId !== pendingPermission.responseId));
 
     const names = [...new Set(pendingPermission.requests.map((request) => request.toolName))];
@@ -1967,6 +2063,43 @@ export default function App() {
     }
   };
 
+  const resolveQuestion = async (answers: Record<string, string>) => {
+    if (!pendingQuestion || questionSubmitting) return;
+    setQuestionSubmitting(true);
+    try {
+      const result = await window.claudeDesk.respondControl({
+        runId: pendingQuestion.runId,
+        requestId: pendingQuestion.requestId,
+        behavior: "allow",
+        updatedInput: { ...pendingQuestion.input, answers },
+      });
+      if (!result.responded) throw new Error("Claude CLI 没有接受这次回答");
+      setQuestionQueue((current) => current.filter((item) => item.requestId !== pendingQuestion.requestId));
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "无法提交回答");
+    } finally {
+      setQuestionSubmitting(false);
+    }
+  };
+
+  const cancelQuestion = async () => {
+    if (!pendingQuestion || questionSubmitting) return;
+    setQuestionSubmitting(true);
+    try {
+      const result = await window.claudeDesk.respondControl({
+        runId: pendingQuestion.runId,
+        requestId: pendingQuestion.requestId,
+        behavior: "cancelled",
+      });
+      if (!result.responded) throw new Error("Claude CLI 没有接受取消操作");
+      setQuestionQueue((current) => current.filter((item) => item.requestId !== pendingQuestion.requestId));
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "无法取消问题");
+    } finally {
+      setQuestionSubmitting(false);
+    }
+  };
+
   const stopRun = async () => {
     if (!activeConversation) return;
     const processRunId = processRunIds.current.get(activeConversation.id) ?? activeRunId;
@@ -2003,6 +2136,7 @@ export default function App() {
     }
     if (name === "/clear") {
       setPermissionQueue((current) => current.filter((item) => item.conversationId !== activeConversation.id));
+      setQuestionQueue((current) => current.filter((item) => item.conversationId !== activeConversation.id));
       updateConversation(activeConversation.id, (conversation) => ({
         ...conversation,
         title: "新对话",
@@ -2258,10 +2392,18 @@ export default function App() {
           </span>
         </button>
       ) : null}
-      {pendingPermission ? (
+      {pendingQuestion ? (
+        <UserQuestionDialog
+          questions={pendingQuestion.questions}
+          submitting={questionSubmitting}
+          onSubmit={(answers) => { void resolveQuestion(answers); }}
+          onCancel={() => { void cancelQuestion(); }}
+        />
+      ) : null}
+      {!pendingQuestion && pendingPermission ? (
         <PermissionDialog
           requests={pendingPermission.requests}
-          waitingForCli={[...runMeta.current.values()].some((meta) => meta.conversationId === pendingPermission.conversationId && !meta.completed)}
+          waitingForCli={!pendingPermission.direct && [...runMeta.current.values()].some((meta) => meta.conversationId === pendingPermission.conversationId && !meta.completed)}
           onDeny={() => { void resolvePermission("deny"); }}
           onAllowOnce={() => { void resolvePermission("once"); }}
           onAllowConversation={() => { void resolvePermission("conversation"); }}
@@ -2282,7 +2424,7 @@ export default function App() {
           onConfirm={() => { void confirmDeletion(); }}
         />
       ) : null}
-      {appSettingsLoaded && !pendingPermission && !pendingDeletion && updateState.latestVersion && dismissedUpdateVersion !== updateState.latestVersion && (
+      {appSettingsLoaded && !pendingQuestion && !pendingPermission && !pendingDeletion && updateState.latestVersion && dismissedUpdateVersion !== updateState.latestVersion && (
         updateState.phase === "available" ||
         updateState.phase === "downloading" ||
         updateState.phase === "ready" ||

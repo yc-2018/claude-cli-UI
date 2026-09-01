@@ -464,6 +464,26 @@ await page.screenshot({ path: resolve(artifacts, "permission-dialog-long-compact
 await page.locator(".permission-deny").click();
 await page.waitForSelector(".permission-dialog", { state: "detached" });
 
+await page.locator(".composer textarea").fill("/plan");
+await page.locator(".composer textarea").press("Enter");
+await page.locator(".composer textarea").fill("计划交互问题测试");
+await page.locator(".composer textarea").press("Enter");
+await page.waitForSelector(".user-question-dialog");
+const userQuestionLayout = await page.evaluate(() => ({
+  viewport: { width: window.innerWidth, height: window.innerHeight },
+  dialog: document.querySelector(".user-question-dialog")?.getBoundingClientRect().toJSON(),
+  actions: document.querySelector(".user-question-dialog .permission-actions")?.getBoundingClientRect().toJSON(),
+}));
+if (
+  !userQuestionLayout.dialog || !userQuestionLayout.actions ||
+  userQuestionLayout.dialog.top < 0 || userQuestionLayout.dialog.bottom > userQuestionLayout.viewport.height ||
+  userQuestionLayout.actions.bottom > userQuestionLayout.dialog.bottom
+) throw new Error(`user question dialog escaped the compact viewport: ${JSON.stringify(userQuestionLayout)}`);
+await page.screenshot({ path: resolve(artifacts, "user-question-dialog-compact.png") });
+await page.locator(".user-question-option", { hasText: "按章节拆分" }).click();
+await page.locator(".user-question-dialog .permission-button.primary").click();
+await page.waitForSelector(".user-question-dialog", { state: "detached" });
+
 await page.locator(".composer textarea").fill("慢任务");
 await page.locator(".composer textarea").press("Enter");
 await page.waitForSelector('.message.assistant[data-status="running"]');
@@ -490,7 +510,7 @@ if (
 await page.screenshot({ path: resolve(artifacts, "prompt-queue-compact.png") });
 await page.locator(".send-button.stop").click();
 
-console.log(JSON.stringify({ errors, modelMenuLayout, permissionMenuLayout, compactModelMenuLayout, deleteDialogLayout, compactDeleteDialogLayout, updateDialogLayout, compactUpdateDialogLayout, settingsLayout, layout, compactLayout, compactQueueLayout, longPermissionLayout }, null, 2));
+console.log(JSON.stringify({ errors, modelMenuLayout, permissionMenuLayout, compactModelMenuLayout, deleteDialogLayout, compactDeleteDialogLayout, updateDialogLayout, compactUpdateDialogLayout, settingsLayout, layout, compactLayout, compactQueueLayout, longPermissionLayout, userQuestionLayout }, null, 2));
 await electronApp.close();
 
 if (errors.length > 0) process.exitCode = 1;

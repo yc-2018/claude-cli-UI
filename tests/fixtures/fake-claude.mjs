@@ -11,6 +11,7 @@ if (args.includes("--version")) {
 process.stdin.setEncoding("utf8");
 let slowTaskActive = false;
 const deferredInputs = [];
+const pendingControlResponses = new Map();
 const processPrompt = (input) => {
   const usesStreamInput = args.includes("--input-format") && args[args.indexOf("--input-format") + 1] === "stream-json";
   let streamContent = [];
@@ -65,7 +66,7 @@ const processPrompt = (input) => {
     "/story": "运行故事写作工作流",
     "/compact": "压缩当前对话上下文，保留关键内容",
   };
-  if (prompt.includes("这是首次会话名称测试内容") && sessionName !== "手动会话名") {
+  if (prompt.includes("这是首次会话名称测试内容") && !isResume && sessionName !== "手动会话名") {
     process.stderr.write(`unexpected session name: ${sessionName ?? "missing"}`);
     process.exitCode = 2;
     return;
@@ -280,6 +281,39 @@ const processPrompt = (input) => {
     return;
   }
 
+  if (prompt.includes("计划交互问题测试")) {
+    const permissionModeIndex = args.indexOf("--permission-mode");
+    if (permissionModeIndex < 0 || args[permissionModeIndex + 1] !== "plan") {
+      process.stderr.write("plan permission mode was not passed");
+      process.exitCode = 2;
+      return;
+    }
+    const requestId = "control-plan-question";
+    const input = {
+      questions: [{
+        question: "最终交付几份文稿？",
+        header: "交付形式",
+        multiSelect: false,
+        options: [
+          { label: "一份完整文稿", description: "将全部内容合并为一个文件。" },
+          { label: "按章节拆分", description: "每章单独生成一个文件。" },
+        ],
+      }],
+    };
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    send({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "tool-plan-question", name: "AskUserQuestion", input }] }, session_id: sessionId });
+    send({ type: "control_request", request_id: requestId, request: { subtype: "can_use_tool", tool_name: "AskUserQuestion", input, tool_use_id: "tool-plan-question", requires_user_interaction: true }, session_id: sessionId });
+    pendingControlResponses.set(requestId, ({ response }) => {
+      const answers = response?.response?.updatedInput?.answers;
+      const answer = answers && typeof answers === "object" ? Object.values(answers)[0] : "";
+      const result = typeof answer === "string" && answer ? `你选择了：${answer}` : "你没有选择任何选项（问题被跳过了）。";
+      send({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-plan-question", content: result }] }, session_id: sessionId });
+      send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: result }] }, session_id: sessionId });
+      send({ type: "result", subtype: "success", is_error: false, result, session_id: sessionId });
+    });
+    return;
+  }
+
   if (prompt.includes("时间线排序测试")) {
     send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
     const phases = [
@@ -415,7 +449,23 @@ process.stdin.on("data", (chunk) => {
   const lines = lineBuffer.split(/\r?\n/);
   lineBuffer = lines.pop() ?? "";
   for (const line of lines) {
-    if (line.trim()) processPrompt(line);
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed.type === "control_response") {
+        const requestId = parsed.response?.request_id;
+        const handler = typeof requestId === "string" ? pendingControlResponses.get(requestId) : undefined;
+        if (handler) {
+          pendingControlResponses.delete(requestId);
+          handler(parsed);
+        }
+        continue;
+      }
+      if (parsed.type === "control_request") continue;
+    } catch {
+      // The regular stream-input validation reports malformed user messages.
+    }
+    processPrompt(line);
   }
 });
 process.stdin.on("end", () => {

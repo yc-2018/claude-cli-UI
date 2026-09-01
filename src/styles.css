@@ -846,6 +846,21 @@ button.activity-row:hover, button.activity-row:focus-visible { background: #f1f1
 .permission-button:disabled { opacity: .55; cursor: wait; }
 .permission-waiting { display: flex; flex: 0 0 auto; align-items: center; justify-content: flex-end; gap: 7px; margin-top: 10px; color: #8a8a83; font-size: 10.5px; }
 
+.user-question-dialog { width: min(100%, 620px); }
+.user-question-list { min-height: 0; margin: 17px 0 14px; overflow-y: auto; overscroll-behavior: contain; border-block: 1px solid #e0e0da; }
+.user-question { min-width: 0; margin: 0; padding: 13px 2px 14px; border: 0; }
+.user-question + .user-question { border-top: 1px solid #e7e7e1; }
+.user-question legend { width: 100%; margin-bottom: 10px; color: #3f3f3a; font-size: 12.5px; font-weight: 620; line-height: 1.5; }
+.user-question-options { display: grid; gap: 7px; }
+.user-question-option { display: flex; align-items: flex-start; gap: 8px; padding: 8px 9px; border: 1px solid #e1e1da; border-radius: 6px; background: #fff; cursor: pointer; }
+.user-question-option:has(input:checked) { border-color: #77776f; background: #f4f4ef; }
+.user-question-option input { margin: 2px 0 0; accent-color: #343430; }
+.user-question-option span { display: grid; min-width: 0; gap: 2px; }
+.user-question-option strong { color: #3f3f3a; font-size: 11.5px; font-weight: 620; }
+.user-question-option small { color: #797970; font-size: 10.5px; line-height: 1.45; }
+.user-question-other { width: 100%; height: 32px; margin-top: 8px; padding: 0 9px; border: 1px solid #d2d2cb; border-radius: 6px; background: #fff; color: #3f3f3a; font: inherit; font-size: 11.5px; outline: none; }
+.user-question-other:focus { border-color: #77776f; box-shadow: 0 0 0 2px rgb(119 119 111 / 14%); }
+
 .delete-confirm-dialog {
   width: min(100%, 430px);
   padding: 20px;

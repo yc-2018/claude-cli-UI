@@ -151,6 +151,7 @@ interface ActiveRun {
   currentTurnRunId: string;
   pendingTurnRunIds: string[];
   unfinishedTurnRunIds: Set<string>;
+  pendingControlRequestIds: Set<string>;
 }
 
 const activeRuns = new Map<string, ActiveRun>();
@@ -421,6 +422,31 @@ function isValidAppendRunRequest(value: unknown): value is AppendRunRequest {
       Array.isArray(request.attachments) && request.attachments.length <= 10 && request.attachments.every(isAttachment)
     ))
   );
+}
+
+interface ControlResponseRequest {
+  runId: string;
+  requestId: string;
+  behavior: "allow" | "deny" | "completed" | "cancelled";
+  updatedInput?: Record<string, unknown>;
+  result?: unknown;
+  message?: string;
+}
+
+function isValidControlResponseRequest(value: unknown): value is ControlResponseRequest {
+  if (!value || typeof value !== "object") return false;
+  const request = value as Partial<ControlResponseRequest>;
+  if (
+    typeof request.runId !== "string" || request.runId.length === 0 || request.runId.length > 200 ||
+    typeof request.requestId !== "string" || request.requestId.length === 0 || request.requestId.length > 200 ||
+    !["allow", "deny", "completed", "cancelled"].includes(request.behavior as string)
+  ) return false;
+  if (request.message !== undefined && (typeof request.message !== "string" || request.message.length > 4_000)) return false;
+  if (request.updatedInput !== undefined && (
+    !request.updatedInput || typeof request.updatedInput !== "object" || Array.isArray(request.updatedInput) ||
+    JSON.stringify(request.updatedInput).length > 100_000
+  )) return false;
+  return true;
 }
 
 function isAttachment(value: unknown): value is Attachment {
@@ -1568,6 +1594,8 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     "--input-format",
     "stream-json",
     "--include-partial-messages",
+    "--permission-prompt-tool",
+    "stdio",
   ];
   if (request.permissionMode === "bypassPermissions") {
     args.push("--dangerously-skip-permissions");
@@ -1597,6 +1625,7 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     currentTurnRunId: request.runId,
     pendingTurnRunIds: [],
     unfinishedTurnRunIds: new Set([request.runId]),
+    pendingControlRequestIds: new Set(),
   };
   activeRuns.set(request.runId, activeRun);
 
@@ -1612,6 +1641,14 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
         if (typeof sessionId === "string" && SESSION_ID_PATTERN.test(sessionId)) observedSessionId = sessionId;
         if ((data as Record<string, unknown>).type === "system" && Array.isArray((data as Record<string, unknown>).slash_commands)) {
           (data as Record<string, unknown>).slash_command_descriptions = await slashDescriptionsPromise;
+        }
+        if ((data as Record<string, unknown>).type === "control_request") {
+          const requestId = (data as Record<string, unknown>).request_id;
+          if (typeof requestId === "string" && requestId.length > 0 && requestId.length <= 200) {
+            activeRun.pendingControlRequestIds.add(requestId);
+            emit(owner, { runId: activeRun.currentTurnRunId, type: "control_request", data });
+          }
+          return;
         }
       }
       emit(owner, { runId: activeRun.currentTurnRunId, type: "message", data });
@@ -1660,6 +1697,11 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     : "";
   const inputPrompt = `${request.prompt.trim() || "请查看并说明这些附件。"}${attachmentContext}`;
   child.stdin.write(`${JSON.stringify({
+    type: "control_request",
+    request_id: randomUUID(),
+    request: { subtype: "initialize", supportedDialogKinds: ["ask_user_question"] },
+  })}\n`, "utf8");
+  child.stdin.write(`${JSON.stringify({
       type: "user",
       message: {
         role: "user",
@@ -1705,6 +1747,27 @@ ipcMain.handle("claude:append", async (_event, value: unknown) => {
     return { appended: false };
   }
   return { appended: true };
+});
+
+ipcMain.handle("claude:respond-control", async (_event, value: unknown) => {
+  if (!isValidControlResponseRequest(value)) throw new Error("无效的控制响应");
+  const request = value;
+  const activeRun = activeRuns.get(request.runId);
+  if (!activeRun || !activeRun.pendingControlRequestIds.has(request.requestId)) return { responded: false };
+  const response: Record<string, unknown> = { behavior: request.behavior };
+  if (request.updatedInput) response.updatedInput = request.updatedInput;
+  if (request.result !== undefined) response.result = request.result;
+  if (request.message) response.message = request.message;
+  try {
+    activeRun.child.stdin.write(`${JSON.stringify({
+      type: "control_response",
+      response: { subtype: "success", request_id: request.requestId, response },
+    })}\n`, "utf8");
+    activeRun.pendingControlRequestIds.delete(request.requestId);
+    return { responded: true };
+  } catch {
+    return { responded: false };
+  }
 });
 
 ipcMain.handle("claude:stop", (_event, runId: string) => {
