@@ -160,6 +160,13 @@ if (!(await page.locator(".response-duration").textContent())?.includes("本次�
 if ((await page.locator("[data-timeline-kind]").evaluateAll((items) => items.map((item) => item.getAttribute("data-timeline-kind")).join(","))) !== "text,activity,activity,text,activity,text") {
   throw new Error("visual fixture did not render assistant text and tools as one ordered timeline");
 }
+const visualCollapseButton = page.locator(".tool-collapse-toggle").first();
+if (await visualCollapseButton.count() !== 1) throw new Error("visual fixture did not render the tool collapse control");
+await visualCollapseButton.click();
+if (await page.locator('[data-timeline-kind="activity"]').count() !== 0 || !(await page.locator(".message.assistant").first().textContent())?.includes("现在刷新页面会等待会话恢复后再判断路由。")) {
+  throw new Error("collapsed visual response did not retain its final text");
+}
+await visualCollapseButton.click();
 const editActivity = page.locator('[data-timeline-kind="activity"]', { hasText: "Edit" });
 await editActivity.locator(".activity-row").click();
 const activityDetailLayout = await editActivity.locator(".activity-detail").evaluate((element) => element.getBoundingClientRect().toJSON());
@@ -460,6 +467,8 @@ if (
   longPermissionLayout.tools.scrollHeight <= longPermissionLayout.tools.clientHeight
 ) throw new Error(`long permission dialog did not keep its actions visible: ${JSON.stringify(longPermissionLayout)}`);
 if (await page.locator(".permission-actions .permission-button").count() !== 3) throw new Error("long permission dialog hid an action button");
+const permissionCommand = await page.locator(".permission-input").first().textContent();
+if (!permissionCommand?.includes("curl -sL -o artifact-0.zip https://example.com/assets/0")) throw new Error("permission dialog did not show the complete command");
 await page.screenshot({ path: resolve(artifacts, "permission-dialog-long-compact.png") });
 await page.locator(".permission-deny").click();
 await page.waitForSelector(".permission-dialog", { state: "detached" });

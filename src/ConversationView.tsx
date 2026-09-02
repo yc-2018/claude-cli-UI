@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { BrainCircuit, Check, ChevronRight, Code2, Copy, FileCode2, GitFork, Pencil, Search, Sparkles, TerminalSquare, Wrench } from "lucide-react";
+import { BrainCircuit, Check, ChevronRight, Code2, Copy, FileCode2, GitFork, List, Pencil, Search, Sparkles, TerminalSquare, Wrench } from "lucide-react";
 import AttachmentPreview, { attachmentUrl, openAttachmentFile } from "./AttachmentPreview";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -171,22 +171,25 @@ function ActivityList({ activities, running }: { activities: Activity[]; running
   );
 }
 
-function ResponseTimeline({ activeActivityId, items, running }: { activeActivityId?: string; items: ResponseTimelineItem[]; running: boolean }) {
+function ResponseTimeline({ activeActivityId, items, running, showActivities }: { activeActivityId?: string; items: ResponseTimelineItem[]; running: boolean; showActivities: boolean }) {
+  const lastTextIndex = items.reduce((lastIndex, item, index) => item.type === "text" && item.content ? index : lastIndex, -1);
   return (
     <div className="response-timeline">
-      {items.map((item) => item.type === "text" ? (
+      {items.map((item, index) => item.type === "text" ? (
+        !showActivities && index !== lastTextIndex ? null : (
         item.content ? (
           <div className="markdown response-text-block" data-timeline-kind="text" key={item.id}>
             <MarkdownMessage content={item.content} />
           </div>
         ) : null
-      ) : (
+        )
+      ) : showActivities ? (
         <ActivityRow
           activity={item.activity}
           key={item.id}
           working={running && activeActivityId === item.activity.id}
         />
-      ))}
+      ) : null)}
     </div>
   );
 }
@@ -235,6 +238,60 @@ function ThinkingBlock({ content, running }: { content: string; running: boolean
       </button>
       {open ? <div className="thinking-content markdown"><MarkdownMessage content={content} /></div> : null}
     </div>
+  );
+}
+
+function AssistantResponse({ message }: { message: ChatMessage }) {
+  const [showActivities, setShowActivities] = useState(true);
+  const activityCount = message.timeline
+    ? message.timeline.filter((item) => item.type === "activity").length
+    : (message.activities?.length ?? 0);
+  return (
+    <>
+      <ResponseDuration
+        durationMs={message.responseDurationMs}
+        running={message.status === "running"}
+        startedAt={message.responseStartedAt}
+      />
+      {message.thinking ? (
+        <ThinkingBlock
+          content={message.thinking}
+          running={message.status === "running" && !(
+            message.content ||
+            (message.activities?.length ?? 0) > 0 ||
+            message.timeline?.some((item) => item.type === "activity" || Boolean(item.content))
+          )}
+        />
+      ) : null}
+      {activityCount > 0 ? (
+        <button
+          className="tool-collapse-toggle"
+          type="button"
+          aria-expanded={showActivities}
+          onClick={() => setShowActivities((value) => !value)}
+        >
+          <List size={13} />
+          {showActivities ? "收起工具调用" : `展开工具调用（${activityCount}）`}
+        </button>
+      ) : null}
+      {message.timeline ? (
+        <ResponseTimeline
+          activeActivityId={message.activeActivityId}
+          items={message.timeline}
+          running={message.status === "running"}
+          showActivities={showActivities}
+        />
+      ) : (
+        <>
+          {showActivities ? <ActivityList activities={message.activities ?? []} running={message.status === "running"} /> : null}
+          {message.content ? <div className="markdown"><MarkdownMessage content={message.content} /></div> : null}
+        </>
+      )}
+      {message.status === "running" && !message.content && !message.thinking && (message.activities?.length ?? 0) === 0
+        ? <div className="thinking"><span className="spinner" />Claude 正在准备回答</div>
+        : null}
+      {message.error ? <div className="message-error">{message.error}</div> : null}
+    </>
   );
 }
 
@@ -478,37 +535,7 @@ export default function ConversationView({ messages, contextCompactions = [], lo
                   <UserMessage canEdit={canEdit} message={message} onEditResend={onEditResend} />
                 ) : (
                   <>
-                    <ResponseDuration
-                      durationMs={message.responseDurationMs}
-                      running={message.status === "running"}
-                      startedAt={message.responseStartedAt}
-                    />
-                    {message.thinking ? (
-                      <ThinkingBlock
-                        content={message.thinking}
-                        running={message.status === "running" && !(
-                          message.content ||
-                          (message.activities?.length ?? 0) > 0 ||
-                          message.timeline?.some((item) => item.type === "activity" || Boolean(item.content))
-                        )}
-                      />
-                    ) : null}
-                    {message.timeline ? (
-                      <ResponseTimeline
-                        activeActivityId={message.activeActivityId}
-                        items={message.timeline}
-                        running={message.status === "running"}
-                      />
-                    ) : (
-                      <>
-                        <ActivityList activities={message.activities ?? []} running={message.status === "running"} />
-                        {message.content ? <div className="markdown"><MarkdownMessage content={message.content} /></div> : null}
-                      </>
-                    )}
-                    {message.status === "running" && !message.content && !message.thinking && (message.activities?.length ?? 0) === 0
-                      ? <div className="thinking"><span className="spinner" />Claude 正在准备回答</div>
-                      : null}
-                    {message.error ? <div className="message-error">{message.error}</div> : null}
+                    <AssistantResponse message={message} />
                     {hasActions ? (
                       <div className="message-actions">
                         {message.content ? <CopyButton text={message.content} /> : null}

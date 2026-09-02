@@ -752,6 +752,8 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .thinking-toggle:hover { color: #454540; }
 .response-duration { display: flex; height: 20px; align-items: center; gap: 6px; margin: 0 0 5px 8px; color: #96968e; font-size: 11.5px; font-variant-numeric: tabular-nums; line-height: 20px; }
 .response-duration .mini-spinner { width: 11px; height: 11px; }
+.tool-collapse-toggle { display: inline-flex; height: 25px; align-items: center; gap: 5px; margin: 0 0 7px 8px; padding: 0 7px; border: 0; border-radius: 4px; background: transparent; color: #777770; font-size: 10.5px; cursor: pointer; }
+.tool-collapse-toggle:hover, .tool-collapse-toggle:focus-visible { background: #f1f1ed; color: #444440; outline: 0; }
 .thinking-chevron { transition: transform 140ms ease; }
 .thinking-block.open .thinking-chevron { transform: rotate(90deg); }
 .activity-question { display: grid; gap: 7px; padding: 10px 11px; border: 1px solid #deded7; border-radius: 6px; background: #fafaf8; color: #44443f; }
@@ -831,10 +833,11 @@ button.activity-row:hover, button.activity-row:focus-visible { background: #f1f1
 .permission-heading h2 { margin: 1px 0 4px; color: #30302d; font-size: 15px; font-weight: 650; letter-spacing: 0; }
 .permission-heading p { margin: 0; color: #777770; font-size: 12px; line-height: 1.5; }
 .permission-tools { min-height: 0; margin: 17px 0 14px; overflow-y: auto; overscroll-behavior: contain; border-block: 1px solid #e0e0da; }
-.permission-tool { display: grid; grid-template-columns: 105px minmax(0, 1fr); align-items: center; min-height: 42px; gap: 10px; padding: 7px 2px; }
+.permission-tool { display: grid; grid-template-columns: 105px minmax(0, 1fr); align-items: start; min-height: 42px; gap: 10px; padding: 9px 2px; }
 .permission-tool + .permission-tool { border-top: 1px solid #e7e7e1; }
 .permission-tool strong { color: #40403b; font-size: 12.5px; font-weight: 620; }
-.permission-tool code { min-width: 0; overflow: hidden; color: #73736c; font-family: "Cascadia Code", Consolas, monospace; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.permission-input { min-width: 0; max-height: 180px; margin: 0; padding: 7px 8px; overflow: auto; border: 1px solid #e1e1da; border-radius: 4px; background: #f5f5f2; color: #464641; font-family: "Cascadia Code", Consolas, monospace; font-size: 10.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.permission-input code { font: inherit; }
 .permission-scope { flex: 0 0 auto; margin: 0 0 18px; color: #84847d; font-size: 11px; line-height: 1.55; }
 .permission-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; }
 .permission-action-spacer { flex: 1; }

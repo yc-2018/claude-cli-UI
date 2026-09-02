@@ -38,6 +38,7 @@ import { describeSlashCommand, normalizeSlashCommands } from "./commands";
 
 interface RunMeta {
   conversationId: string;
+  processRunId: string;
   responseId: string;
   userMessageId?: string;
   appendToResponse: boolean;
@@ -1384,9 +1385,10 @@ export default function App() {
         }
         runMeta.current.delete(event.runId);
         if (!hasPendingTurn) {
+          if (processRunIds.current.get(meta.conversationId) === meta.processRunId) processRunIds.current.delete(meta.conversationId);
           setActiveRuns((current) => {
             const next = { ...current };
-            delete next[meta.conversationId];
+            if (next[meta.conversationId] === meta.processRunId) delete next[meta.conversationId];
             return next;
           });
         }
@@ -1406,6 +1408,12 @@ export default function App() {
       meta.completed = true;
       meta.successful = false;
       updateResponse(meta, (message) => ({ ...message, status: "error", activeActivityId: undefined, error: event.message ?? "无法启动 Claude CLI", ...finishResponse(message) }));
+      if (processRunIds.current.get(meta.conversationId) === meta.processRunId) processRunIds.current.delete(meta.conversationId);
+      setActiveRuns((current) => {
+        const next = { ...current };
+        if (next[meta.conversationId] === meta.processRunId) delete next[meta.conversationId];
+        return next;
+      });
     }
     if (event.type === "exit") {
       setQuestionQueue((current) => current.filter((item) => item.runId !== event.runId));
@@ -1417,12 +1425,12 @@ export default function App() {
       }
       setActiveRuns((current) => {
         const next = { ...current };
-        delete next[meta.conversationId];
+        if (next[meta.conversationId] === meta.processRunId) delete next[meta.conversationId];
         return next;
       });
       if (meta.successful) notifyConversationCompleted(meta.conversationId);
       runMeta.current.delete(event.runId);
-      if (processRunIds.current.get(meta.conversationId) === event.runId) processRunIds.current.delete(meta.conversationId);
+      if (processRunIds.current.get(meta.conversationId) === meta.processRunId) processRunIds.current.delete(meta.conversationId);
     }
   }), [flushPendingText, notifyConversationCompleted, updateConversation, updateResponse]);
 
@@ -1722,6 +1730,7 @@ export default function App() {
     }));
     runMeta.current.set(runId, {
       conversationId,
+      processRunId: runId,
       responseId,
       appendToResponse: false,
       completed: false,
@@ -1756,7 +1765,7 @@ export default function App() {
       if (meta) updateResponse(meta, (message) => ({ ...message, status: "error", error: error instanceof Error ? error.message : "启动失败", ...finishResponse(message) }));
       setActiveRuns((current) => {
         const next = { ...current };
-        delete next[conversationId];
+        if (next[conversationId] === runId) delete next[conversationId];
         return next;
       });
       runMeta.current.delete(runId);
@@ -1792,6 +1801,7 @@ export default function App() {
     });
     runMeta.current.set(turnRunId, {
       conversationId,
+      processRunId: runId,
       responseId: activeMeta.responseId,
       userMessageId,
       appendToResponse: true,
@@ -1822,7 +1832,7 @@ export default function App() {
       }));
       setActiveRuns((current) => {
         const next = { ...current };
-        delete next[conversationId];
+        if (next[conversationId] === runId) delete next[conversationId];
         return next;
       });
       processRunIds.current.delete(conversationId);
@@ -2008,6 +2018,7 @@ export default function App() {
     if (decision === "deny") {
       const meta: RunMeta = {
         conversationId: pendingPermission.conversationId,
+        processRunId: "",
         responseId: pendingPermission.responseId,
         appendToResponse: false,
         completed: true,
@@ -2037,6 +2048,7 @@ export default function App() {
     const runId = makeId();
     const meta: RunMeta = {
       conversationId: conversation.id,
+      processRunId: runId,
       responseId: pendingPermission.responseId,
       appendToResponse: true,
       completed: false,
@@ -2075,7 +2087,7 @@ export default function App() {
       }));
       setActiveRuns((current) => {
         const next = { ...current };
-        delete next[conversation.id];
+        if (next[conversation.id] === runId) delete next[conversation.id];
         return next;
       });
       runMeta.current.delete(runId);

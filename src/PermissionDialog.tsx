@@ -17,6 +17,17 @@ export default function PermissionDialog({
   onDeny,
 }: PermissionDialogProps) {
   const toolNames = [...new Set(requests.map((request) => request.toolName))];
+  const formatInput = (request: ToolPermissionRequest) => {
+    if (typeof request.toolInput?.command === "string") return request.toolInput.command;
+    if (request.toolInput) {
+      try {
+        return JSON.stringify(request.toolInput, null, 2);
+      } catch {
+        return request.summary;
+      }
+    }
+    return request.summary;
+  };
 
   return (
     <div className="permission-overlay" role="presentation">
@@ -33,7 +44,7 @@ export default function PermissionDialog({
           {requests.map((request) => (
             <div className="permission-tool" key={request.toolUseId ?? `${request.toolName}-${request.summary}`}>
               <strong>{request.toolName}</strong>
-              {request.summary ? <code>{request.summary}</code> : null}
+              {formatInput(request) ? <pre className="permission-input"><code>{formatInput(request)}</code></pre> : null}
             </div>
           ))}
         </div>
