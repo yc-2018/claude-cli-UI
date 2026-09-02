@@ -1032,6 +1032,15 @@ try {
   }
   await page.locator(`.model-select .composer-select-option[data-value="${originalRunningModel}"]`).click();
   if (await page.locator('.message.assistant[data-status="running"]').count() !== 1) throw new Error("changing models interrupted the active response");
+  const runningPermissionTrigger = page.locator(".permission-select .composer-select-trigger");
+  if (await runningPermissionTrigger.isDisabled()) throw new Error("permission picker was disabled while Claude was replying");
+  await runningPermissionTrigger.click();
+  await page.locator('.permission-select .composer-select-option[data-value="plan"]').click();
+  if (!(await page.locator(".permission-select .composer-select-value").textContent())?.includes("计划模式")) {
+    throw new Error("permission mode could not be changed while Claude was replying");
+  }
+  await runningPermissionTrigger.click();
+  await page.locator('.permission-select .composer-select-option[data-value="acceptEdits"]').click();
   for (const prompt of ["队列第一条", "队列第二条", "队列第三条"]) {
     await page.locator(".composer textarea").fill(prompt);
     await page.locator(".send-button:not(.stop)").click();

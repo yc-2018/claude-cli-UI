@@ -405,7 +405,7 @@ export default function Composer({
             <ComposerSelect
               ariaLabel="选择权限模式"
               className="permission-select"
-              disabled={running || loadingHistory}
+              disabled={loadingHistory}
               icon={<ShieldCheck size={14} />}
               onChange={(value) => onPermissionChange(value as PermissionMode)}
               options={permissionOptions}

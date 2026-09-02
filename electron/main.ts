@@ -434,6 +434,18 @@ interface ControlResponseRequest {
   message?: string;
 }
 
+interface SetPermissionModeRequest {
+  runId: string;
+  permissionMode: PermissionMode;
+}
+
+function isValidSetPermissionModeRequest(value: unknown): value is SetPermissionModeRequest {
+  if (!value || typeof value !== "object") return false;
+  const request = value as Partial<SetPermissionModeRequest>;
+  return typeof request.runId === "string" && request.runId.length > 0 && request.runId.length <= 200 &&
+    typeof request.permissionMode === "string" && ["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions"].includes(request.permissionMode);
+}
+
 function isValidControlResponseRequest(value: unknown): value is ControlResponseRequest {
   if (!value || typeof value !== "object") return false;
   const request = value as Partial<ControlResponseRequest>;
@@ -1774,6 +1786,23 @@ ipcMain.handle("claude:respond-control", async (_event, value: unknown) => {
     return { responded: true };
   } catch {
     return { responded: false };
+  }
+});
+
+ipcMain.handle("claude:set-permission-mode", async (_event, value: unknown) => {
+  if (!isValidSetPermissionModeRequest(value)) throw new Error("无效的权限模式请求");
+  const request = value;
+  const activeRun = activeRuns.get(request.runId);
+  if (!activeRun || activeRun.child.stdin.destroyed || activeRun.child.stdin.writableEnded) return { changed: false };
+  try {
+    activeRun.child.stdin.write(`${JSON.stringify({
+      type: "control_request",
+      request_id: randomUUID(),
+      request: { subtype: "set_permission_mode", mode: request.permissionMode },
+    })}\n`, "utf8");
+    return { changed: true };
+  } catch {
+    return { changed: false };
   }
 });
 

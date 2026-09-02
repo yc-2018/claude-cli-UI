@@ -1974,7 +1974,13 @@ export default function App() {
       const names = [...new Set(pendingPermission.requests.map((request) => request.toolName))];
       if (decision === "conversation" && conversation) {
         const allowedTools = [...new Set([...(conversation.allowedTools ?? []), ...names])];
-        updateConversation(conversation.id, (current) => ({ ...current, allowedTools, updatedAt: Date.now() }));
+        const suggestedMode = pendingPermission.permissionSuggestions?.find((suggestion) => suggestion.type === "setMode" && suggestion.mode === "acceptEdits");
+        updateConversation(conversation.id, (current) => ({
+          ...current,
+          allowedTools,
+          ...(suggestedMode ? { permissionMode: "acceptEdits" as const } : {}),
+          updatedAt: Date.now(),
+        }));
       }
       const response = decision === "deny"
         ? { runId: pendingPermission.runId, requestId: pendingPermission.requestId, behavior: "deny" as const, message: `用户拒绝使用 ${names.join("、")}` }
@@ -2173,6 +2179,13 @@ export default function App() {
       return true;
     }
     return false;
+  };
+
+  const changePermissionMode = (permissionMode: PermissionMode) => {
+    if (!activeConversation) return;
+    updateConversation(activeConversation.id, (conversation) => ({ ...conversation, permissionMode, updatedAt: Date.now() }));
+    const runId = processRunIds.current.get(activeConversation.id) ?? activeRuns[activeConversation.id];
+    if (runId) void window.claudeDesk.setPermissionMode({ runId, permissionMode }).catch(() => undefined);
   };
 
   const compactContext = () => {
@@ -2380,7 +2393,7 @@ export default function App() {
               }}
               onModelChange={(selectedModel) => updateConversation(activeConversation.id, (conversation) => ({ ...conversation, selectedModel }))}
               onLocalCommand={runLocalCommand}
-              onPermissionChange={(permissionMode: PermissionMode) => updateConversation(activeConversation.id, (conversation) => ({ ...conversation, permissionMode }))}
+              onPermissionChange={changePermissionMode}
             />
           </>
         ) : activeProject
