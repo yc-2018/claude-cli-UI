@@ -791,6 +791,17 @@ try {
   }
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
 
+  await page.locator(".composer textarea").fill("结束事件缺失测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done", undefined, { timeout: 5_000 });
+  if (!(await page.locator(".message.assistant .markdown").last().textContent())?.includes("最终总结已经输出")) {
+    throw new Error("assistant end_turn fallback lost the final response text");
+  }
+  if (await page.locator('.task-row.active[aria-label="会话正在运行"], .task-row.active .conversation-running-icon').count()) {
+    throw new Error("assistant end_turn fallback left the sidebar running indicator active");
+  }
+  if (await page.locator(".send-button.stop").count()) throw new Error("assistant end_turn fallback left the stop button visible");
+
   await page.locator(".composer textarea").fill("/edit");
   await page.locator(".composer textarea").press("Enter");
   await page.locator(".composer textarea").fill("思考阶段测试");

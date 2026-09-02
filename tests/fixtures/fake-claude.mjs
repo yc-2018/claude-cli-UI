@@ -141,6 +141,16 @@ const processPrompt = (input) => {
     setImmediate(() => process.exit(0));
     return;
   }
+  if (prompt.includes("结束事件缺失测试")) {
+    const response = "最终总结已经输出，但 Claude CLI 不再发送 result 事件。";
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    send({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "text", text: response }], stop_reason: "end_turn" },
+      session_id: sessionId,
+    });
+    return;
+  }
   if (prompt.includes("后台提醒测试") || prompt.includes("后台托盘测试")) {
     const response = prompt.includes("后台提醒测试") ? "后台会话提醒测试完成。" : "托盘后台运行测试完成。";
     send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });

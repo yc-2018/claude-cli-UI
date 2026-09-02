@@ -153,6 +153,9 @@ interface ActiveRun {
   pendingTurnRunIds: string[];
   unfinishedTurnRunIds: Set<string>;
   pendingControlRequestIds: Set<string>;
+  endTurnFallback?: ReturnType<typeof setTimeout>;
+  currentTurnHasOutput: boolean;
+  ignoreTrailingResult: boolean;
 }
 
 const activeRuns = new Map<string, ActiveRun>();
@@ -1664,12 +1667,53 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     pendingTurnRunIds: [],
     unfinishedTurnRunIds: new Set([request.runId]),
     pendingControlRequestIds: new Set(),
+    currentTurnHasOutput: false,
+    ignoreTrailingResult: false,
   };
   activeRuns.set(request.runId, activeRun);
 
   const output = createInterface({ input: child.stdout });
   const slashDescriptionsPromise = discoverSlashCommandDescriptions(request.cwd).catch(() => ({} as Record<string, string>));
   let observedSessionId = request.sessionId;
+  const clearEndTurnFallback = () => {
+    if (activeRun.endTurnFallback) clearTimeout(activeRun.endTurnFallback);
+    activeRun.endTurnFallback = undefined;
+  };
+  const completeCurrentTurn = (data: Record<string, unknown>, completedFromEndTurn: boolean) => {
+    clearEndTurnFallback();
+    const completedTurnRunId = activeRun.currentTurnRunId;
+    if (!activeRun.unfinishedTurnRunIds.has(completedTurnRunId)) return;
+    emit(owner, { runId: completedTurnRunId, type: "message", data });
+    activeRun.unfinishedTurnRunIds.delete(completedTurnRunId);
+    const nextTurnRunId = activeRun.pendingTurnRunIds.shift();
+    if (nextTurnRunId) {
+      activeRun.currentTurnRunId = nextTurnRunId;
+      activeRun.currentTurnHasOutput = false;
+      activeRun.ignoreTrailingResult = completedFromEndTurn;
+    } else {
+      activeRun.child.stdin.end();
+    }
+    if (observedSessionId) {
+      void normalizeClaudeDeskSession(request.cwd, observedSessionId, existingSessionPrefix).catch(() => undefined);
+    }
+  };
+  const scheduleEndTurnFallback = (data: Record<string, unknown>) => {
+    // Claude CLI 2.1.x can leave stream-json stdin open after end_turn without emitting result.
+    clearEndTurnFallback();
+    const turnRunId = activeRun.currentTurnRunId;
+    activeRun.endTurnFallback = setTimeout(() => {
+      activeRun.endTurnFallback = undefined;
+      if (activeRun.currentTurnRunId !== turnRunId || !activeRun.unfinishedTurnRunIds.has(turnRunId)) return;
+      completeCurrentTurn({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "",
+        session_id: typeof data.session_id === "string" ? data.session_id : observedSessionId,
+        completion_source: "assistant_end_turn",
+      }, true);
+    }, 250);
+  };
   output.on("line", async (line) => {
     if (!line.trim()) return;
     try {
@@ -1688,15 +1732,25 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
           }
           return;
         }
+        const record = data as Record<string, unknown>;
+        if (record.type === "result") {
+          if (activeRun.ignoreTrailingResult && !activeRun.currentTurnHasOutput) {
+            activeRun.ignoreTrailingResult = false;
+            return;
+          }
+          completeCurrentTurn(record, false);
+          return;
+        }
+        if (record.type === "assistant" || record.type === "stream_event" || record.type === "user") {
+          activeRun.currentTurnHasOutput = true;
+          activeRun.ignoreTrailingResult = false;
+        }
       }
       emit(owner, { runId: activeRun.currentTurnRunId, type: "message", data });
-      if (data && typeof data === "object" && (data as Record<string, unknown>).type === "result") {
-        activeRun.unfinishedTurnRunIds.delete(activeRun.currentTurnRunId);
-        const nextTurnRunId = activeRun.pendingTurnRunIds.shift();
-        if (nextTurnRunId) activeRun.currentTurnRunId = nextTurnRunId;
-        else activeRun.child.stdin.end();
-        if (observedSessionId) {
-          void normalizeClaudeDeskSession(request.cwd, observedSessionId, existingSessionPrefix).catch(() => undefined);
+      if (data && typeof data === "object" && (data as Record<string, unknown>).type === "assistant") {
+        const message = (data as Record<string, unknown>).message;
+        if (message && typeof message === "object" && (message as Record<string, unknown>).stop_reason === "end_turn") {
+          scheduleEndTurnFallback(data as Record<string, unknown>);
         }
       }
     } catch {
@@ -1711,11 +1765,13 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
   });
 
   child.on("error", (error) => {
+    clearEndTurnFallback();
     activeRuns.delete(request.runId);
     for (const turnRunId of activeRun.unfinishedTurnRunIds) emit(owner, { runId: turnRunId, type: "error", message: error.message });
   });
 
   child.on("close", async (code) => {
+    clearEndTurnFallback();
     activeRuns.delete(request.runId);
     if (observedSessionId) {
       try {
