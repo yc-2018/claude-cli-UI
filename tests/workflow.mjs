@@ -169,6 +169,7 @@ const launch = () => electron.launch({
     CLAUDE_DESK_DISABLE_AUTO_UPDATE_CHECK: "1",
     CLAUDE_DESK_TEST_UPDATE_BASE_URL: updateBaseUrl,
     CLAUDE_DESK_TEST_UPDATE_INSTALL: "1",
+    CLAUDE_DESK_TEST_EXPECT_EFFORT: "high",
     PORTABLE_EXECUTABLE_FILE: currentPortablePath,
     CLAUDE_DESK_TEST_MODELS: JSON.stringify({
       Sonnet: "ThirdParty-A",
@@ -418,7 +419,15 @@ try {
   await page.keyboard.press("Escape");
   await page.locator(".model-select .composer-select-trigger").click();
   await page.locator('.model-select .composer-select-option[data-value="fable"]').click();
-
+  await page.locator(".effort-select .composer-select-trigger").click();
+  if (await page.locator(".effort-select .composer-select-option").count() !== 6) throw new Error("thinking effort picker did not expose every Claude effort level");
+  if (!(await page.locator('.effort-select .composer-select-option[data-value="high"]').textContent())?.includes("更深入")) {
+    throw new Error("high thinking effort option was missing its description");
+  }
+  await page.locator('.effort-select .composer-select-option[data-value="high"]').click();
+  if (!(await page.locator(".effort-select .composer-select-value").textContent())?.includes("高")) {
+    throw new Error("thinking effort selection was not reflected in the composer");
+  }
   await page.locator('.project-action[title="重命名项目"]').evaluate((button) => button.click());
   const projectNameInput = page.locator('input[aria-label="项目名称"]');
   await projectNameInput.waitFor({ state: "visible" });
@@ -542,6 +551,7 @@ try {
   if (firstConversation?.selectedModel !== "fable" || firstConversation?.resolvedModel !== "ThirdParty-B") {
     throw new Error("selected model role was not mapped through CLI");
   }
+  if (firstConversation?.thinkingEffort !== "high") throw new Error("thinking effort selection was not persisted");
   if (firstConversation?.title !== "CLI 外部改名") throw new Error("CLI custom title was not synchronized back to the UI");
   const thinkingToggle = page.locator(".thinking-toggle").last();
   if (await thinkingToggle.getAttribute("aria-expanded") !== "false") throw new Error("completed thinking was not collapsed");

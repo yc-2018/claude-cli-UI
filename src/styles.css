@@ -1085,6 +1085,7 @@ button.activity-row:hover, button.activity-row:focus-visible { background: #f1f1
 }
 
 .composer-select.model-select .composer-select-trigger { max-width: 235px; }
+.composer-select.effort-select .composer-select-trigger { max-width: 108px; }
 .composer-select-trigger:hover, .composer-select.open .composer-select-trigger { background: #f1f1ee; color: #4d4d48; }
 .composer-select-trigger:focus-visible { box-shadow: 0 0 0 2px rgb(90 90 82 / 13%); }
 .composer-select-trigger:disabled { opacity: .55; cursor: default; }

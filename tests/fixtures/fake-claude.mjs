@@ -51,6 +51,13 @@ const processPrompt = (input) => {
   const roleName = modelRole.charAt(0).toUpperCase() + modelRole.slice(1).toLowerCase();
   const testModels = JSON.parse(process.env.CLAUDE_DESK_TEST_MODELS ?? "{}");
   const model = testModels[roleName] ?? modelRole;
+  const effortIndex = args.indexOf("--effort");
+  const effort = effortIndex >= 0 ? args[effortIndex + 1] : undefined;
+  if (prompt.includes("计划交互问题测试") && process.env.CLAUDE_DESK_TEST_EXPECT_EFFORT === "high" && effort !== "high") {
+    process.stderr.write(`unexpected thinking effort: ${effort ?? "missing"}`);
+    process.exitCode = 2;
+    return;
+  }
   const allowedToolsIndex = args.indexOf("--allowedTools");
   const allowedTools = allowedToolsIndex >= 0 ? args[allowedToolsIndex + 1].split(",") : [];
   const sessionNameIndex = args.indexOf("--name");

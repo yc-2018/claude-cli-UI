@@ -1,4 +1,5 @@
 export type PermissionMode = "default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions";
+export type ThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
 export type ReorderPosition = "before" | "after";
 
 export interface AppSettings {
@@ -171,6 +172,7 @@ export interface Conversation {
   gitBranch?: string;
   messages: ChatMessage[];
   selectedModel?: string;
+  thinkingEffort?: ThinkingEffort;
   resolvedModel?: string;
   slashCommands?: SlashCommand[];
   contextUsage?: ContextUsage;
@@ -235,6 +237,7 @@ export interface RunRequest {
   sessionId?: string;
   sessionName?: string;
   model?: string;
+  thinkingEffort?: ThinkingEffort;
   allowedTools?: string[];
   permissionMode: PermissionMode;
   attachments?: Attachment[];

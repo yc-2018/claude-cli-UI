@@ -1,4 +1,4 @@
-import type { Activity, ActivityDetail, ActivityDiffLine, Attachment, ChatMessage, Conversation, ContextCompaction, ContextUsage, PermissionMode, Project, ResponseTimelineItem, UserQuestion } from "./types";
+import type { Activity, ActivityDetail, ActivityDiffLine, Attachment, ChatMessage, Conversation, ContextCompaction, ContextUsage, PermissionMode, Project, ResponseTimelineItem, ThinkingEffort, UserQuestion } from "./types";
 import { normalizeSlashCommands } from "./commands";
 
 export const PROJECTS_STORAGE_KEY = "claude-desk.projects.v2";
@@ -175,6 +175,9 @@ function normalizeConversation(value: unknown): Conversation | null {
     messages,
     selectedModel: typeof conversation.selectedModel === "string" && conversation.selectedModel
       ? conversation.selectedModel
+      : undefined,
+    thinkingEffort: ["low", "medium", "high", "xhigh", "max"].includes(conversation.thinkingEffort as ThinkingEffort)
+      ? conversation.thinkingEffort as ThinkingEffort
       : undefined,
     resolvedModel: typeof conversation.resolvedModel === "string" ? conversation.resolvedModel : undefined,
     slashCommands: normalizeSlashCommands(conversation.slashCommands),

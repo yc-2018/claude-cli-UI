@@ -31,6 +31,7 @@ import type {
   QueuedPrompt,
   ReorderPosition,
   RunRequest,
+  ThinkingEffort,
   ToolPermissionRequest,
   UserQuestion,
 } from "./types";
@@ -1693,6 +1694,7 @@ export default function App() {
         gitBranch: session.gitBranch,
         messages: session.messages,
         selectedModel: sourceConversation.selectedModel,
+        thinkingEffort: sourceConversation.thinkingEffort,
         resolvedModel: session.resolvedModel ?? sourceConversation.resolvedModel,
         slashCommands: sourceConversation.slashCommands,
         allowedTools: sourceConversation.allowedTools,
@@ -1770,6 +1772,7 @@ export default function App() {
           ? conversation.title.slice(0, 100)
           : makeClaudeSessionName((conversation.messages.find((message) => message.role === "user")?.content ?? prompt) || attachments[0]?.name || "附件")),
       model: getModelArgument(conversation, modelConfig),
+      thinkingEffort: conversation.thinkingEffort,
       allowedTools: conversation.allowedTools,
       permissionMode: conversation.permissionMode,
       attachments,
@@ -2090,6 +2093,7 @@ export default function App() {
       cwd: project.workspace,
       sessionId: pendingPermission.sessionId ?? conversation.sessionId,
       model: getModelArgument(conversation, modelConfig),
+      thinkingEffort: conversation.thinkingEffort,
       allowedTools,
       permissionMode: conversation.permissionMode,
     };
@@ -2420,6 +2424,7 @@ export default function App() {
                 });
               }}
               onModelChange={(selectedModel) => updateConversation(activeConversation.id, (conversation) => ({ ...conversation, selectedModel }))}
+              onThinkingEffortChange={(thinkingEffort) => updateConversation(activeConversation.id, (conversation) => ({ ...conversation, thinkingEffort }))}
               onLocalCommand={runLocalCommand}
               onPermissionChange={changePermissionMode}
             />

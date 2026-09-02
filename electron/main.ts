@@ -29,6 +29,7 @@ interface RunRequest {
   sessionId?: string;
   sessionName?: string;
   model?: string;
+  thinkingEffort?: "low" | "medium" | "high" | "xhigh" | "max";
   allowedTools?: string[];
   permissionMode: PermissionMode;
   attachments?: Attachment[];
@@ -368,6 +369,7 @@ function isValidRunRequest(value: unknown): value is RunRequest {
   if (!value || typeof value !== "object") return false;
   const request = value as Partial<RunRequest>;
   const validPermissionModes: PermissionMode[] = ["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions"];
+  const validThinkingEfforts = ["low", "medium", "high", "xhigh", "max"] as const;
   const hasValidSessionId = request.sessionId === undefined || (
     typeof request.sessionId === "string" &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(request.sessionId)
@@ -378,6 +380,7 @@ function isValidRunRequest(value: unknown): value is RunRequest {
     request.model.length <= 200 &&
     !/[\r\n&|<>^%"]/.test(request.model)
   );
+  const hasValidThinkingEffort = request.thinkingEffort === undefined || validThinkingEfforts.includes(request.thinkingEffort);
   const hasValidSessionName = request.sessionName === undefined || (
     typeof request.sessionName === "string" &&
     request.sessionName.length > 0 &&
@@ -405,6 +408,7 @@ function isValidRunRequest(value: unknown): value is RunRequest {
     hasValidSessionId &&
     hasValidSessionName &&
     hasValidModel &&
+    hasValidThinkingEffort &&
     hasValidAllowedTools &&
     hasValidAttachments
   );
@@ -1638,6 +1642,7 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
   if (request.sessionId) args.push("--resume", request.sessionId);
   if (request.sessionName) args.push("--name", request.sessionName);
   if (request.model) args.push("--model", request.model);
+  if (request.thinkingEffort) args.push("--effort", request.thinkingEffort);
   if (request.allowedTools?.length) args.push("--allowedTools", [...new Set(request.allowedTools)].join(","));
   await mkdir(attachmentsDirectory(), { recursive: true });
   args.push("--add-dir", attachmentsDirectory());

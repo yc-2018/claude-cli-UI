@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CircleStop, CornerDownRight, FileText, GripVertical, Paperclip, Pencil, Send, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
+import { Brain, CircleStop, CornerDownRight, FileText, GripVertical, Paperclip, Pencil, Send, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
 import AttachmentPreview, { attachmentUrl, openAttachmentFile } from "./AttachmentPreview";
 import ComposerSelect, { type ComposerSelectHandle } from "./ComposerSelect";
 import { LOCAL_SLASH_COMMANDS } from "./commands";
-import type { Attachment, AttachmentUpload, ComposerDraft, Conversation, ModelConfig, PermissionMode, QueuedPrompt, ReorderPosition, SlashCommand } from "./types";
+import type { Attachment, AttachmentUpload, ComposerDraft, Conversation, ModelConfig, PermissionMode, QueuedPrompt, ReorderPosition, SlashCommand, ThinkingEffort } from "./types";
 
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES = 40 * 1024 * 1024;
@@ -14,6 +14,15 @@ const permissionOptions: { value: PermissionMode; label: string }[] = [
   { value: "plan", label: "计划模式" },
   { value: "dontAsk", label: "拒绝未授权" },
   { value: "bypassPermissions", label: "完全访问权限" },
+];
+
+const thinkingEffortOptions: { value: string; label: string; detail?: string }[] = [
+  { value: "auto", label: "自动", detail: "Claude 默认" },
+  { value: "low", label: "低", detail: "更快" },
+  { value: "medium", label: "中", detail: "平衡" },
+  { value: "high", label: "高", detail: "更深入" },
+  { value: "xhigh", label: "极高", detail: "更充分" },
+  { value: "max", label: "最大", detail: "最高推理" },
 ];
 
 interface Props {
@@ -33,6 +42,7 @@ interface Props {
   onReorderQueuedPrompt(sourceId: string, targetId: string, position: ReorderPosition): void;
   onDraftChange(update: (current: ComposerDraft) => ComposerDraft): void;
   onModelChange(model: string): void;
+  onThinkingEffortChange(effort: ThinkingEffort | undefined): void;
   onLocalCommand(command: string): boolean;
   onPermissionChange(mode: PermissionMode): void;
 }
@@ -54,6 +64,7 @@ export default function Composer({
   onReorderQueuedPrompt,
   onDraftChange,
   onModelChange,
+  onThinkingEffortChange,
   onLocalCommand,
   onPermissionChange,
 }: Props) {
@@ -401,6 +412,16 @@ export default function Composer({
               ref={modelSelectRef}
               title="选择模型"
               value={matchedModel?.value ?? ""}
+            />
+            <ComposerSelect
+              ariaLabel="选择思考程度"
+              className="effort-select"
+              disabled={loadingHistory}
+              icon={<Brain size={14} />}
+              onChange={(value) => onThinkingEffortChange(value === "auto" ? undefined : value as ThinkingEffort)}
+              options={thinkingEffortOptions}
+              title="选择思考程度"
+              value={conversation.thinkingEffort ?? "auto"}
             />
             <ComposerSelect
               ariaLabel="选择权限模式"
