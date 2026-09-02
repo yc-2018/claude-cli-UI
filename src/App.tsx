@@ -398,14 +398,30 @@ function numberValue(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : undefined;
 }
 
+function percentageValue(value: unknown) {
+  const percentage = numberValue(value);
+  return percentage === undefined ? undefined : Math.min(100, percentage);
+}
+
+function contextUsageSource(data: Record<string, unknown>) {
+  const directSources = [data.context_window, data.contextWindow, data.current_usage, data.currentUsage, data.context_usage, data.contextUsage];
+  for (const value of directSources) {
+    if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  }
+  const usage = data.usage;
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return undefined;
+  const usageObject = usage as Record<string, unknown>;
+  const nestedSources = [usageObject.context_window, usageObject.contextWindow, usageObject.current_usage, usageObject.currentUsage];
+  return nestedSources.find((value) => value && typeof value === "object" && !Array.isArray(value)) as Record<string, unknown> | undefined;
+}
+
 function getContextUsage(data: Record<string, unknown>): ContextUsage | undefined {
-  const source = [data.context_window, data.contextWindow, data.current_usage, data.currentUsage, data.usage]
-    .find((value) => value && typeof value === "object") as Record<string, unknown> | undefined;
+  const source = contextUsageSource(data);
   if (!source) return undefined;
-  const usedTokens = numberValue(source.used_tokens ?? source.usedTokens ?? source.input_tokens ?? source.inputTokens);
+  const usedTokens = numberValue(source.used_tokens ?? source.usedTokens ?? source.current_tokens ?? source.currentTokens ?? source.context_tokens ?? source.contextTokens);
   const contextWindow = numberValue(source.context_window ?? source.contextWindow ?? source.context_window_size ?? source.contextWindowSize ?? source.max_tokens);
-  const usedPercentage = numberValue(source.used_percentage ?? source.usedPercentage);
-  const remainingPercentage = numberValue(source.remaining_percentage ?? source.remainingPercentage);
+  const usedPercentage = percentageValue(source.used_percentage ?? source.usedPercentage);
+  const remainingPercentage = percentageValue(source.remaining_percentage ?? source.remainingPercentage);
   if (usedTokens === undefined && contextWindow === undefined && usedPercentage === undefined && remainingPercentage === undefined) return undefined;
   return { usedTokens, contextWindow, usedPercentage, remainingPercentage };
 }
@@ -1093,7 +1109,7 @@ export default function App() {
             messages: history.messages,
             resolvedModel: history.resolvedModel ?? conversation.resolvedModel,
             permissionMode: history.permissionMode,
-            contextUsage: history.contextUsage ?? conversation.contextUsage,
+            contextUsage: history.contextUsage,
             contextCompactions: history.contextCompactions ?? conversation.contextCompactions,
             updatedAt: Math.max(conversation.updatedAt, history.updatedAt),
             historyLoaded: true,

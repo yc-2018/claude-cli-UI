@@ -130,6 +130,7 @@ await writeFile(resolve(cliSessions, `${importedSessionId}.jsonl`), [
         },
         { type: "text", text: "这是从 Claude CLI 会话文件恢复的回答。" },
       ],
+      usage: { input_tokens: 5_000_000, cache_creation_input_tokens: 1_000_000, cache_read_input_tokens: 2_000_000 },
     },
   },
   {
@@ -299,6 +300,10 @@ try {
   await importedRow.locator(".task-select").click();
   await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "来自终端的历史对话");
   if (!(await page.locator(".markdown").last().textContent())?.includes("恢复的回答")) throw new Error("CLI session response was not loaded");
+  const importedContextStatus = await page.locator(".context-status").textContent();
+  if (!importedContextStatus?.includes("上下文用量未知") || importedContextStatus.includes("5.0M")) {
+    throw new Error(`billing input tokens were incorrectly shown as context usage: ${importedContextStatus}`);
+  }
   if ((await page.locator(".message.assistant [data-timeline-kind]").evaluateAll((items) => items.map((item) => item.getAttribute("data-timeline-kind")).join(","))) !== "text,activity,text") {
     throw new Error("CLI session history did not preserve text and tool event order");
   }

@@ -773,11 +773,26 @@ function importedUserText(content: unknown) {
 function importedUsage(record: Record<string, unknown>): ImportedContextUsage | undefined {
   const message = record.message && typeof record.message === "object" ? record.message as Record<string, unknown> : undefined;
   const usage = record.usage ?? message?.usage;
-  if (!usage || typeof usage !== "object") return undefined;
-  const item = usage as Record<string, unknown>;
-  const inputTokens = [item.input_tokens, item.cache_creation_input_tokens, item.cache_read_input_tokens]
-    .reduce<number>((total, value) => total + (typeof value === "number" && Number.isFinite(value) ? value : 0), 0);
-  return inputTokens > 0 ? { usedTokens: inputTokens } : undefined;
+  const directSources = [record.context_window, record.contextWindow, record.current_usage, record.currentUsage, record.context_usage, record.contextUsage];
+  const usageObject = usage && typeof usage === "object" && !Array.isArray(usage) ? usage as Record<string, unknown> : undefined;
+  const nestedSources = usageObject
+    ? [usageObject.context_window, usageObject.contextWindow, usageObject.current_usage, usageObject.currentUsage]
+    : [];
+  const source = [...directSources, ...nestedSources]
+    .find((value) => value && typeof value === "object" && !Array.isArray(value)) as Record<string, unknown> | undefined;
+  if (!source) return undefined;
+  const numberValue = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : undefined;
+  const percentageValue = (value: unknown) => {
+    const percentage = numberValue(value);
+    return percentage === undefined ? undefined : Math.min(100, percentage);
+  };
+  const contextUsage: ImportedContextUsage = {
+    usedTokens: numberValue(source.used_tokens ?? source.usedTokens ?? source.current_tokens ?? source.currentTokens ?? source.context_tokens ?? source.contextTokens),
+    contextWindow: numberValue(source.context_window ?? source.contextWindow ?? source.context_window_size ?? source.contextWindowSize ?? source.max_tokens),
+    usedPercentage: percentageValue(source.used_percentage ?? source.usedPercentage),
+    remainingPercentage: percentageValue(source.remaining_percentage ?? source.remainingPercentage),
+  };
+  return Object.values(contextUsage).some((value) => value !== undefined) ? contextUsage : undefined;
 }
 
 function importedCompactSummary(record: Record<string, unknown>) {
