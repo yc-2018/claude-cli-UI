@@ -5,6 +5,7 @@ import {
   Folder,
   GripVertical,
   LoaderCircle,
+  MessageCircleQuestion,
   MessageSquareText,
   PanelLeftClose,
   PanelLeftOpen,
@@ -15,6 +16,7 @@ import {
   RefreshCw,
   Settings,
   Sparkles,
+  Star,
   Trash2,
 } from "lucide-react";
 import type { AppSettings, AppUpdateState, Project, ReorderPosition } from "./types";
@@ -129,14 +131,26 @@ export default function Sidebar({
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
   const draggedItemRef = useRef<DragItem | null>(null);
   const dropTargetRef = useRef<DropTarget | null>(null);
+  const settingsRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!settingsOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setSettingsOpen(false);
     };
+    // 点设置框和设置按钮以外的任何地方都收起来：用 pointerdown 而不是 click，按下就收，底下那一下点击照常生效。
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      // 盖在上面的模态框（更新提示、权限询问等）由它自己接管这次点击，不该顺手把背后的设置收起来。
+      if (!target || settingsRef.current?.contains(target) || target.closest("[aria-modal]")) return;
+      setSettingsOpen(false);
+    };
     window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
+    window.addEventListener("pointerdown", closeOnOutsidePointer, true);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+    };
   }, [settingsOpen]);
 
   useEffect(() => {
@@ -570,58 +584,78 @@ export default function Sidebar({
         })}
       </nav>
       <div className="sidebar-bottom">
-        {settingsOpen ? (
-          <section className="settings-popover" aria-label="设置">
-            <div className="settings-heading">设置</div>
-            <div className="setting-group">
-              <span className="setting-label">关闭窗口</span>
-              <div className="segmented-control" role="group" aria-label="关闭窗口行为">
+        <div className="settings-anchor" ref={settingsRef}>
+          {settingsOpen ? (
+            <section className="settings-popover" aria-label="设置">
+              <div className="settings-heading">设置</div>
+              <div className="setting-group">
+                <span className="setting-label">关闭窗口</span>
+                <div className="segmented-control" role="group" aria-label="关闭窗口行为">
+                  <button
+                    className={appSettings.closeBehavior === "tray" ? "active" : ""}
+                    onClick={() => onSettingsChange({ ...appSettings, closeBehavior: "tray" })}
+                    type="button"
+                  >
+                    托盘后台
+                  </button>
+                  <button
+                    className={appSettings.closeBehavior === "quit" ? "active" : ""}
+                    onClick={() => onSettingsChange({ ...appSettings, closeBehavior: "quit" })}
+                    type="button"
+                  >
+                    退出应用
+                  </button>
+                </div>
+              </div>
+              <label className="setting-toggle-row">
+                <span>后台会话完成提醒</span>
+                <input
+                  checked={appSettings.notifyOnCompletion}
+                  onChange={(event) => onSettingsChange({ ...appSettings, notifyOnCompletion: event.target.checked })}
+                  type="checkbox"
+                />
+                <span className="toggle-track" aria-hidden="true"><span /></span>
+              </label>
+              <div className="setting-update-row">
+                <span>
+                  <strong>应用更新</strong>
+                  <small>{updateStatusText(updateState)}</small>
+                </span>
                 <button
-                  className={appSettings.closeBehavior === "tray" ? "active" : ""}
-                  onClick={() => onSettingsChange({ ...appSettings, closeBehavior: "tray" })}
+                  className="setting-update-button"
+                  disabled={updateState.phase === "checking"}
+                  onClick={onCheckForUpdates}
                   type="button"
                 >
-                  托盘后台
-                </button>
-                <button
-                  className={appSettings.closeBehavior === "quit" ? "active" : ""}
-                  onClick={() => onSettingsChange({ ...appSettings, closeBehavior: "quit" })}
-                  type="button"
-                >
-                  退出应用
+                  <RefreshCw className={updateState.phase === "checking" ? "spinning" : undefined} size={13} />
+                  {updateState.phase === "available" || updateState.phase === "downloading" || updateState.phase === "ready" ? "查看" : "检查"}
                 </button>
               </div>
-            </div>
-            <label className="setting-toggle-row">
-              <span>后台会话完成提醒</span>
-              <input
-                checked={appSettings.notifyOnCompletion}
-                onChange={(event) => onSettingsChange({ ...appSettings, notifyOnCompletion: event.target.checked })}
-                type="checkbox"
-              />
-              <span className="toggle-track" aria-hidden="true"><span /></span>
-            </label>
-            <div className="setting-update-row">
-              <span>
-                <strong>应用更新</strong>
-                <small>{updateStatusText(updateState)}</small>
-              </span>
-              <button
-                className="setting-update-button"
-                disabled={updateState.phase === "checking"}
-                onClick={onCheckForUpdates}
-                type="button"
-              >
-                <RefreshCw className={updateState.phase === "checking" ? "spinning" : undefined} size={13} />
-                {updateState.phase === "available" || updateState.phase === "downloading" || updateState.phase === "ready" ? "查看" : "检查"}
-              </button>
-            </div>
-          </section>
-        ) : null}
-        <button className={`settings-trigger ${settingsOpen ? "active" : ""}`} onClick={() => setSettingsOpen((value) => !value)} type="button">
-          <Settings size={15} />
-          <span>设置</span>
-        </button>
+              <div className="setting-link-row">
+                <button
+                  className="setting-link-button"
+                  onClick={() => void window.claudeDesk.openProjectLink("repository")}
+                  type="button"
+                >
+                  <Star size={13} />
+                  去 star
+                </button>
+                <button
+                  className="setting-link-button"
+                  onClick={() => void window.claudeDesk.openProjectLink("issues")}
+                  type="button"
+                >
+                  <MessageCircleQuestion size={13} />
+                  问题反馈
+                </button>
+              </div>
+            </section>
+          ) : null}
+          <button className={`settings-trigger ${settingsOpen ? "active" : ""}`} onClick={() => setSettingsOpen((value) => !value)} type="button">
+            <Settings size={15} />
+            <span>设置</span>
+          </button>
+        </div>
         <div className="sidebar-version">claude-cli-UI v{appVersion || "…"}</div>
         <div className="sidebar-footer">
           <span className={`status-dot ${cliInfo && !cliInfo.available ? "off" : ""}`} />

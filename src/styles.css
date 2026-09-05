@@ -449,6 +449,34 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .setting-update-button:hover { background: #f0f0ec; color: #363632; }
 .setting-update-button:disabled { opacity: .55; cursor: wait; }
 
+.setting-link-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px;
+  margin-top: 11px;
+  padding-top: 11px;
+  border-top: 1px solid #e2e2dc;
+}
+
+.setting-link-button {
+  display: inline-flex;
+  height: 27px;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid #d3d3cc;
+  border-radius: 5px;
+  background: #fff;
+  color: #61615b;
+  font-size: 10.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.setting-link-button:hover { background: #f0f0ec; color: #363632; }
+
 .sidebar-footer {
   display: flex;
   align-items: center;

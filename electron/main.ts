@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
-import { UpdateManager } from "./update-manager";
+import { GITHUB_ISSUES_URL, GITHUB_PROJECT_URL, UpdateManager } from "./update-manager";
 
 type PermissionMode = "default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions";
 
@@ -1425,6 +1425,14 @@ ipcMain.handle("app:update:download", () => updateManager.downloadUpdate());
 ipcMain.handle("app:update:install", () => updateManager.installUpdate());
 
 ipcMain.handle("app:update:open-release", () => updateManager.openReleasePage());
+
+// 渲染层只能点名要开哪个链接，地址在主进程里写死，避免把任意 URL 交给 shell.openExternal。
+ipcMain.handle("app:open-project-link", async (_event, target: unknown) => {
+  const url = target === "issues" ? GITHUB_ISSUES_URL : target === "repository" ? GITHUB_PROJECT_URL : undefined;
+  if (!url) return false;
+  await shell.openExternal(url);
+  return true;
+});
 
 ipcMain.handle("app:settings:set", async (_event, value: unknown) => {
   const normalized = normalizeAppSettings(value);

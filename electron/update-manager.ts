@@ -63,6 +63,8 @@ interface UpdateManagerOptions {
 
 const GITHUB_OWNER = "yc-2018";
 const GITHUB_REPOSITORY = "claude-cli-UI";
+export const GITHUB_PROJECT_URL = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPOSITORY}`;
+export const GITHUB_ISSUES_URL = `${GITHUB_PROJECT_URL}/issues/new`;
 const GITHUB_RELEASES_URL = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPOSITORY}/releases`;
 const GITHUB_LATEST_RELEASE_URL = `${GITHUB_RELEASES_URL}/latest`;
 const PORTABLE_UPDATE_MANIFEST_URL = `${GITHUB_RELEASES_URL}/latest/download/portable-update.json`;

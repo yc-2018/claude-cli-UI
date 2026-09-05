@@ -1,4 +1,4 @@
-import type { ActiveRunStatus, AppendRunRequest, AppSelection, AppSettings, AppUpdateState, Attachment, AttachmentUpload, BranchClaudeSessionResult, ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ControlResponseRequest, ModelConfig, OpenAttachmentResult, PermissionMode, PermissionNotificationRequest, Project, RunRequest, StartRunResult, UpdateActionResult } from "./types";
+import type { ActiveRunStatus, AppendRunRequest, AppSelection, AppSettings, AppUpdateState, Attachment, AttachmentUpload, BranchClaudeSessionResult, ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ControlResponseRequest, ModelConfig, OpenAttachmentResult, PermissionMode, PermissionNotificationRequest, Project, ProjectLinkTarget, RunRequest, StartRunResult, UpdateActionResult } from "./types";
 
 declare module "*.css";
 
@@ -30,6 +30,7 @@ declare global {
       downloadAppUpdate(): Promise<AppUpdateState>;
       installAppUpdate(): Promise<UpdateActionResult>;
       openUpdateRelease(): Promise<boolean>;
+      openProjectLink(target: ProjectLinkTarget): Promise<boolean>;
       getAppSettings(): Promise<AppSettings>;
       setAppSettings(settings: AppSettings): Promise<AppSettings>;
       focusWindow(): Promise<boolean>;

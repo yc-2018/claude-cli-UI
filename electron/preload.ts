@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld("claudeDesk", {
   downloadAppUpdate: () => ipcRenderer.invoke("app:update:download"),
   installAppUpdate: () => ipcRenderer.invoke("app:update:install"),
   openUpdateRelease: () => ipcRenderer.invoke("app:update:open-release"),
+  openProjectLink: (target: string) => ipcRenderer.invoke("app:open-project-link", target),
   getAppSettings: () => ipcRenderer.invoke("app:settings:get"),
   setAppSettings: (settings: unknown) => ipcRenderer.invoke("app:settings:set", settings),
   focusWindow: () => ipcRenderer.invoke("app:focus-window"),

@@ -1,6 +1,8 @@
 export type PermissionMode = "default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions";
 export type ThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
 export type ReorderPosition = "before" | "after";
+/** 设置里的外部链接：地址写在主进程里，渲染层只点名要开哪个。 */
+export type ProjectLinkTarget = "repository" | "issues";
 
 export interface AppSettings {
   closeBehavior: "tray" | "quit";

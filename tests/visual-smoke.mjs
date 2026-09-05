@@ -268,6 +268,11 @@ await page.waitForSelector(".settings-popover");
 const settingsLayout = await page.evaluate(() => ({
   sidebar: document.querySelector(".sidebar")?.getBoundingClientRect().toJSON(),
   popover: document.querySelector(".settings-popover")?.getBoundingClientRect().toJSON(),
+  links: [...document.querySelectorAll(".setting-link-button")].map((button) => ({
+    text: button.textContent?.trim(),
+    clipped: button.scrollWidth > button.clientWidth,
+    rect: button.getBoundingClientRect().toJSON(),
+  })),
 }));
 if (
   !settingsLayout.sidebar ||
@@ -276,6 +281,16 @@ if (
   settingsLayout.popover.right > settingsLayout.sidebar.right ||
   settingsLayout.popover.top < settingsLayout.sidebar.top
 ) throw new Error(`settings popover escaped the sidebar: ${JSON.stringify(settingsLayout)}`);
+// 去 star 和问题反馈并排放在设置框里：既不能溢出框外，也不能把文字挤掉。
+if (
+  settingsLayout.links.length !== 2 ||
+  settingsLayout.links.map((link) => link.text).join(",") !== "去 star,问题反馈" ||
+  settingsLayout.links[0].rect.top !== settingsLayout.links[1].rect.top ||
+  settingsLayout.links.some((link) => link.clipped
+    || link.rect.left < settingsLayout.popover.left
+    || link.rect.right > settingsLayout.popover.right
+    || link.rect.bottom > settingsLayout.popover.bottom)
+) throw new Error(`settings links were not laid out inside the popover: ${JSON.stringify(settingsLayout.links)}`);
 await page.screenshot({ path: resolve(artifacts, "settings-popover.png") });
 await page.locator(".setting-update-button").click();
 await page.waitForSelector(".update-dialog");

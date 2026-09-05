@@ -293,7 +293,45 @@ try {
   }
   await page.locator(".update-later-button").click();
   await page.waitForSelector(".update-dialog", { state: "detached" });
+
+  // 更新提示是从设置里点出来的模态框，它自己的点击不该顺手把背后的设置面板收起来。
+  if (await page.locator(".settings-popover").count() !== 1) {
+    throw new Error("settings popover was dismissed by clicking inside the update dialog");
+  }
+  await electronApp.evaluate(({ shell }) => {
+    globalThis.__externalUrls = [];
+    shell.openExternal = async (url) => {
+      globalThis.__externalUrls.push(url);
+    };
+  });
+  await page.locator(".setting-link-button", { hasText: "去 star" }).click();
+  await page.locator(".setting-link-button", { hasText: "问题反馈" }).click();
+  await electronApp.evaluate(async () => {
+    const deadline = Date.now() + 5_000;
+    while (globalThis.__externalUrls.length < 2 && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+  });
+  const settingsLinkUrls = await electronApp.evaluate(() => globalThis.__externalUrls);
+  if (settingsLinkUrls.join(",") !== "https://github.com/yc-2018/claude-cli-UI,https://github.com/yc-2018/claude-cli-UI/issues/new") {
+    throw new Error(`settings links did not open the project page and the issue form: ${JSON.stringify(settingsLinkUrls)}`);
+  }
+  // 渲染层只能点名要开哪个链接，任意 URL 不能交给 shell.openExternal。
+  const rejectedProjectLink = await page.evaluate(() => window.claudeDesk.openProjectLink("https://example.com"));
+  if (rejectedProjectLink !== false || await electronApp.evaluate(() => globalThis.__externalUrls.length) !== 2) {
+    throw new Error("settings link IPC accepted an arbitrary URL");
+  }
+  // 点设置框以外的地方就收起来，不用再点一次设置按钮。
+  await page.locator(".sidebar-version").click();
+  await page.waitForSelector(".settings-popover", { state: "detached" });
+  await page.locator(".settings-trigger").click();
+  await page.waitForSelector(".settings-popover");
+  await page.locator(".settings-trigger").click();
+  await page.waitForSelector(".settings-popover", { state: "detached" });
+  await page.locator(".settings-trigger").click();
+  await page.waitForSelector(".settings-popover");
   await page.keyboard.press("Escape");
+  await page.waitForSelector(".settings-popover", { state: "detached" });
 
   await page.click(".new-task-button");
   await page.waitForSelector(".composer");
