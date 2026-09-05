@@ -161,6 +161,12 @@ if (await page.locator('[aria-label="已置顶项目"]').count() !== 1 || await 
 }
 await page.screenshot({ path: resolve(artifacts, "conversation.png") });
 if (!(await page.locator(".response-duration").textContent())?.includes("本次回答耗时 · 8 秒")) throw new Error("completed response duration was not rendered");
+// 只存了开始时刻和耗时的旧数据也要补出完成时刻，长任务才知道是几点结束的。
+const durationText = (await page.locator(".response-duration").textContent()) ?? "";
+if (!/本次回答耗时 · 8 秒 · 完成于 \d{2}:\d{2}:\d{2}$/.test(durationText.trim())) {
+  throw new Error(`completed response did not show when it finished: ${durationText}`);
+}
+if (!(await page.locator(".response-duration").getAttribute("data-completed-at"))) throw new Error("response completion timestamp was not recorded");
 if ((await page.locator("[data-timeline-kind]").evaluateAll((items) => items.map((item) => item.getAttribute("data-timeline-kind")).join(","))) !== "text,activity,activity,text,activity,text") {
   throw new Error("visual fixture did not render assistant text and tools as one ordered timeline");
 }

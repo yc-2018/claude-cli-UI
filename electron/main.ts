@@ -110,6 +110,9 @@ interface ImportedMessage {
   content: string;
   thinking?: string;
   createdAt: number;
+  responseStartedAt?: number;
+  responseDurationMs?: number;
+  responseCompletedAt?: number;
   status?: "done";
   activities?: ImportedActivity[];
   timeline?: ImportedTimelineItem[];
@@ -1015,6 +1018,7 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
   let createdAt = Number.POSITIVE_INFINITY;
   let updatedAt = 0;
   let currentAssistant: ImportedMessage | undefined;
+  let lastUserTimestamp: number | undefined;
   const messages: ImportedMessage[] = [];
   const validModes: PermissionMode[] = ["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions"];
 
@@ -1124,6 +1128,7 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
         permissionMode = record.permissionMode as PermissionMode;
       }
       currentAssistant = undefined;
+      lastUserTimestamp = timestamp;
       if (includeMessages) {
         messages.push({
           id: typeof record.uuid === "string" ? record.uuid : `${sessionId}-user-${messages.length}`,
@@ -1145,11 +1150,20 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
         role: "assistant",
         content: "",
         createdAt: timestamp ?? updatedAt ?? Date.now(),
+        // 耗时从用户发出提问算起，和 CLI 里 “for 1h 43m 18s” 的口径一致。
+        responseStartedAt: lastUserTimestamp ?? timestamp,
         status: "done",
         activities: [],
         timeline: [],
       };
       messages.push(currentAssistant);
+    }
+    // 一轮回答由多条 assistant 记录组成（中间夹着工具结果），最后一条的时刻就是这轮的完成时刻。
+    if (timestamp !== undefined) {
+      currentAssistant.responseCompletedAt = timestamp;
+      currentAssistant.responseDurationMs = currentAssistant.responseStartedAt !== undefined
+        ? Math.max(0, timestamp - currentAssistant.responseStartedAt)
+        : undefined;
     }
     for (const block of message.content) {
       if (!block || typeof block !== "object") continue;

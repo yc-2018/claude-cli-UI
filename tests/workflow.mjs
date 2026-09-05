@@ -312,6 +312,14 @@ try {
   await importedRow.locator(".task-select").click();
   await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "来自终端的历史对话");
   if (!(await page.locator(".markdown").last().textContent())?.includes("恢复的回答")) throw new Error("CLI session response was not loaded");
+  // CLI 的会话文件里带着每条记录的时刻，导入的回答要还原出耗时和完成时刻（提问 → 最后一条回答记录，正好 1 秒）。
+  const importedDuration = page.locator(".message.assistant .response-duration").last();
+  if (await importedDuration.getAttribute("data-completed-at") !== String(importedTime + 1_000)) {
+    throw new Error(`imported CLI response lost its completion time: ${await importedDuration.getAttribute("data-completed-at")}`);
+  }
+  if (!(await importedDuration.textContent())?.includes("本次回答耗时 · 1 秒 · 完成于 ")) {
+    throw new Error(`imported CLI response did not show how long it took and when it finished: ${await importedDuration.textContent()}`);
+  }
   const importedContextStatus = await page.locator(".context-status").textContent();
   if (!importedContextStatus?.includes("上下文用量未知") || importedContextStatus.includes("5.0M")) {
     throw new Error(`billing input tokens were incorrectly shown as context usage: ${importedContextStatus}`);
@@ -765,6 +773,14 @@ try {
   }
   if (!(await page.locator('.message.assistant:last-of-type .response-duration').textContent())?.includes("本次回答耗时")) {
     throw new Error("completed response duration was not labeled clearly");
+  }
+  // 结束时刻要和耗时一起记下来：只有耗时的话，回头看长任务不知道它是几点跑完的。
+  const liveCompletedAt = Number(await page.locator('.message.assistant:last-of-type .response-duration').getAttribute("data-completed-at"));
+  if (!Number.isFinite(liveCompletedAt) || Math.abs(Date.now() - liveCompletedAt) > 60_000) {
+    throw new Error(`completed response did not record when it finished: ${liveCompletedAt}`);
+  }
+  if (!(await page.locator('.message.assistant:last-of-type .response-duration').textContent())?.includes(`完成于 ${new Date(liveCompletedAt).toTimeString().slice(0, 8)}`)) {
+    throw new Error(`completed response did not show when it finished: ${await page.locator('.message.assistant:last-of-type .response-duration').textContent()}`);
   }
   const resumedBottomDistance = await page.locator(".conversation-scroll").evaluate((container) => container.scrollHeight - container.clientHeight - container.scrollTop);
   if (resumedBottomDistance > 2) throw new Error(`bottom-follow did not resume: ${resumedBottomDistance}px`);

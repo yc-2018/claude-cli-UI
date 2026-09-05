@@ -128,21 +128,29 @@ function normalizeMessage(value: unknown): ChatMessage | null {
     ))
     : [];
 
+  const responseStartedAt = typeof message.responseStartedAt === "number" && Number.isFinite(message.responseStartedAt)
+    ? message.responseStartedAt
+    : (typeof legacyMessage.thinkingStartedAt === "number" && Number.isFinite(legacyMessage.thinkingStartedAt)
+      ? legacyMessage.thinkingStartedAt
+      : undefined);
+  const responseDurationMs = typeof message.responseDurationMs === "number" && Number.isFinite(message.responseDurationMs) && message.responseDurationMs >= 0
+    ? message.responseDurationMs
+    : (typeof legacyMessage.thinkingDurationMs === "number" && Number.isFinite(legacyMessage.thinkingDurationMs) && legacyMessage.thinkingDurationMs >= 0
+      ? legacyMessage.thinkingDurationMs
+      : undefined);
+  // 旧数据没有存完成时刻，用开始时刻加耗时补出来，老对话也能显示“完成于”。
+  const responseCompletedAt = typeof message.responseCompletedAt === "number" && Number.isFinite(message.responseCompletedAt) && message.responseCompletedAt > 0
+    ? message.responseCompletedAt
+    : (responseStartedAt !== undefined && responseDurationMs !== undefined ? responseStartedAt + responseDurationMs : undefined);
+
   return {
     id: message.id,
     role: message.role,
     content: typeof message.content === "string" ? message.content : "",
     thinking: typeof message.thinking === "string" ? message.thinking : undefined,
-    responseStartedAt: typeof message.responseStartedAt === "number" && Number.isFinite(message.responseStartedAt)
-      ? message.responseStartedAt
-      : (typeof legacyMessage.thinkingStartedAt === "number" && Number.isFinite(legacyMessage.thinkingStartedAt)
-        ? legacyMessage.thinkingStartedAt
-        : undefined),
-    responseDurationMs: typeof message.responseDurationMs === "number" && Number.isFinite(message.responseDurationMs) && message.responseDurationMs >= 0
-      ? message.responseDurationMs
-      : (typeof legacyMessage.thinkingDurationMs === "number" && Number.isFinite(legacyMessage.thinkingDurationMs) && legacyMessage.thinkingDurationMs >= 0
-        ? legacyMessage.thinkingDurationMs
-        : undefined),
+    responseStartedAt,
+    responseDurationMs,
+    responseCompletedAt: wasInterrupted ? undefined : responseCompletedAt,
     createdAt: typeof message.createdAt === "number" ? message.createdAt : Date.now(),
     status: wasInterrupted ? "stopped" : status,
     activities,

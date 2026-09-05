@@ -195,12 +195,33 @@ function ResponseTimeline({ activeActivityId, items, running, showActivities }: 
 }
 
 function formatElapsed(seconds: number) {
-  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor(seconds / 60) % 60;
   const remainingSeconds = seconds % 60;
+  if (hours > 0) return `${hours} 小时 ${minutes.toString().padStart(2, "0")} 分 ${remainingSeconds.toString().padStart(2, "0")} 秒`;
   return minutes > 0 ? `${minutes} 分 ${remainingSeconds.toString().padStart(2, "0")} 秒` : `${remainingSeconds} 秒`;
 }
 
-function ResponseDuration({ running, startedAt, durationMs }: { running: boolean; startedAt?: number; durationMs?: number }) {
+/** 当天只显示时刻，跨天补上日期，长任务隔夜跑完也能看出是哪天结束的。 */
+function formatCompletedAt(completedAt: number) {
+  const completed = new Date(completedAt);
+  if (Number.isNaN(completed.getTime())) return undefined;
+  const clock = `${completed.getHours().toString().padStart(2, "0")}:${completed.getMinutes().toString().padStart(2, "0")}:${completed.getSeconds().toString().padStart(2, "0")}`;
+  const now = new Date();
+  const sameDay = completed.getFullYear() === now.getFullYear()
+    && completed.getMonth() === now.getMonth()
+    && completed.getDate() === now.getDate();
+  return sameDay ? clock : `${completed.getMonth() + 1} 月 ${completed.getDate()} 日 ${clock}`;
+}
+
+interface ResponseDurationProps {
+  running: boolean;
+  startedAt?: number;
+  durationMs?: number;
+  completedAt?: number;
+}
+
+function ResponseDuration({ running, startedAt, durationMs, completedAt }: ResponseDurationProps) {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -213,11 +234,13 @@ function ResponseDuration({ running, startedAt, durationMs }: { running: boolean
   const elapsedMs = durationMs ?? (running && startedAt ? Math.max(0, now - startedAt) : undefined);
   const elapsedSeconds = elapsedMs === undefined ? undefined : Math.floor(elapsedMs / 1000);
   if (elapsedSeconds === undefined) return null;
+  const completedText = running || completedAt === undefined ? undefined : formatCompletedAt(completedAt);
 
   return (
-    <div className="response-duration" data-elapsed-seconds={elapsedSeconds}>
+    <div className="response-duration" data-completed-at={completedAt} data-elapsed-seconds={elapsedSeconds}>
       {running ? <span className="mini-spinner" /> : null}
       {running ? "正在回答" : "本次回答耗时"} · {formatElapsed(elapsedSeconds)}
+      {completedText ? ` · 完成于 ${completedText}` : ""}
     </div>
   );
 }
@@ -249,6 +272,7 @@ function AssistantResponse({ message }: { message: ChatMessage }) {
   return (
     <>
       <ResponseDuration
+        completedAt={message.responseCompletedAt}
         durationMs={message.responseDurationMs}
         running={message.status === "running"}
         startedAt={message.responseStartedAt}

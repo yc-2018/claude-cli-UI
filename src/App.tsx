@@ -87,9 +87,10 @@ interface CliCommandNotice {
   copied: boolean;
 }
 
-function finishResponse(message: ChatMessage, now = Date.now()): Pick<ChatMessage, "responseDurationMs"> {
+function finishResponse(message: ChatMessage, now = Date.now()): Pick<ChatMessage, "responseDurationMs" | "responseCompletedAt"> {
   if (!message.responseStartedAt) return {};
-  return { responseDurationMs: Math.max(0, now - message.responseStartedAt) };
+  // 耗时和完成时刻一起记：CLI 两个都会给（“for 1h 43m 18s · done 0:11”），只留耗时就看不出是几点结束的。
+  return { responseDurationMs: Math.max(0, now - message.responseStartedAt), responseCompletedAt: now };
 }
 
 function appendResponseContent(current: string | undefined, addition: string) {
@@ -2289,6 +2290,7 @@ export default function App() {
       ...message,
       responseStartedAt: message.responseStartedAt ?? Date.now(),
       responseDurationMs: undefined,
+      responseCompletedAt: undefined,
       status: "running",
       error: undefined,
     }));
@@ -2377,7 +2379,7 @@ export default function App() {
     const rollback = (detail: string) => {
       for (const { meta, status } of restore) {
         meta.completed = false;
-        updateResponse(meta, (message) => ({ ...message, status, responseDurationMs: undefined, error: detail }));
+        updateResponse(meta, (message) => ({ ...message, status, responseDurationMs: undefined, responseCompletedAt: undefined, error: detail }));
       }
     };
     try {

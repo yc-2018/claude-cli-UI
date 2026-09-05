@@ -128,6 +128,8 @@ export interface ChatMessage {
   thinking?: string;
   responseStartedAt?: number;
   responseDurationMs?: number;
+  /** 这一轮回答结束的时刻：耗时只说明跑了多久，回看长任务还需要知道它是几点结束的。 */
+  responseCompletedAt?: number;
   createdAt: number;
   status?: "queued" | "running" | "done" | "error" | "stopped";
   activities?: Activity[];
