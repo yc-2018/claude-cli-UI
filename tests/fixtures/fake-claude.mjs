@@ -173,6 +173,42 @@ const processPrompt = (input) => {
     return;
   }
 
+  if (prompt.includes("子代理测试")) {
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    send({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "tool_use", id: "tool-subagent", name: "Task", input: { description: "并行检索", prompt: "检索仓库" } }] },
+      session_id: sessionId,
+    });
+    // 子代理的 end_turn 和 result 都属于工具内部过程，它们不能把主轮次提前收尾。
+    send({
+      type: "assistant",
+      parent_tool_use_id: "tool-subagent",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "子代理已经检索完毕。" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 950_000, cache_read_input_tokens: 950_000, output_tokens: 400 },
+      },
+      session_id: sessionId,
+    });
+    send({ type: "result", subtype: "success", is_error: false, result: "子代理任务结束。", parent_tool_use_id: "tool-subagent", session_id: sessionId });
+    setTimeout(() => {
+      const response = "子代理测试完成。";
+      send({
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: response }],
+          usage: { input_tokens: 2_000, cache_creation_input_tokens: 1_000, cache_read_input_tokens: 27_000, output_tokens: 300 },
+        },
+        session_id: sessionId,
+      });
+      send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
+    }, 1_800);
+    return;
+  }
+
   if (prompt.includes("大量权限测试")) {
     const permissionDenials = Array.from({ length: 30 }, (_, index) => ({
       tool_name: "Bash",
@@ -439,7 +475,12 @@ const processPrompt = (input) => {
 
   send({
     type: "assistant",
-    message: { role: "assistant", content: [{ type: "thinking", thinking }, { type: "text", text: response }] },
+    message: {
+      role: "assistant",
+      content: [{ type: "thinking", thinking }, { type: "text", text: response }],
+      // 单次请求真正占用的上下文：1400 + 2600 + 16000 = 20000，也就是 200k 窗口的 10%。
+      usage: { input_tokens: 1_400, cache_creation_input_tokens: 2_600, cache_read_input_tokens: 16_000, output_tokens: 900 },
+    },
     session_id: sessionId,
   });
   if (sessionsDirectory && persistTestPrompt) {
@@ -457,7 +498,16 @@ const processPrompt = (input) => {
       },
     })}\n`, "utf8");
   }
-  send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
+  send({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: response,
+    session_id: sessionId,
+    // 计费口径的累加值：一旦被当成上下文占用，头部就会显示 5M 这种离谱数字。
+    usage: { input_tokens: 2_600_000, cache_read_input_tokens: 2_400_000, output_tokens: 12_000 },
+    modelUsage: { [model]: { inputTokens: 5_000_000, outputTokens: 12_000, contextWindow: 200_000 } },
+  });
 };
 
 let lineBuffer = "";

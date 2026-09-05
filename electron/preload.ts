@@ -37,6 +37,7 @@ contextBridge.exposeInMainWorld("claudeDesk", {
   respondControl: (request: unknown) => ipcRenderer.invoke("claude:respond-control", request),
   setPermissionMode: (request: unknown) => ipcRenderer.invoke("claude:set-permission-mode", request),
   stopRun: (runId: string) => ipcRenderer.invoke("claude:stop", runId),
+  getActiveRuns: () => ipcRenderer.invoke("claude:runs"),
   onEvent: (callback: (event: unknown) => void) => {
     const listener = (_ipcEvent: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
     ipcRenderer.on("claude:event", listener);

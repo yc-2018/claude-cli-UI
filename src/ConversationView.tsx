@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { BrainCircuit, Check, ChevronRight, Code2, Copy, FileCode2, GitFork, List, Pencil, Search, Sparkles, TerminalSquare, Wrench } from "lucide-react";
 import AttachmentPreview, { attachmentUrl, openAttachmentFile } from "./AttachmentPreview";
 import ReactMarkdown from "react-markdown";
@@ -290,6 +290,10 @@ function AssistantResponse({ message }: { message: ChatMessage }) {
       {message.status === "running" && !message.content && !message.thinking && (message.activities?.length ?? 0) === 0
         ? <div className="thinking"><span className="spinner" />Claude 正在准备回答</div>
         : null}
+      {/* 排队中的轮次还没轮到自己，只提示位置，不显示计时也不显示转圈。 */}
+      {message.status === "queued"
+        ? <div className="queued-hint">排队中 · 等上一条回答结束后开始</div>
+        : null}
       {message.error ? <div className="message-error">{message.error}</div> : null}
     </>
   );
@@ -436,6 +440,23 @@ function UserMessage({ message, canEdit, onEditResend }: UserMessageProps) {
   );
 }
 
+function CompactionCard({ compaction }: { compaction: ContextCompaction }) {
+  return (
+    <div className={`context-compaction ${compaction.status}`} data-compaction-id={compaction.id}>
+      <span className="context-compaction-icon"><BrainCircuit size={14} /></span>
+      <span className="context-compaction-copy">
+        <strong>{compaction.status === "running" ? "正在压缩上下文" : compaction.status === "error" ? "上下文压缩失败" : "上下文已压缩"}</strong>
+        <small>
+          {compaction.status === "done" && compaction.preTokens !== undefined && compaction.postTokens !== undefined
+            ? `${compaction.trigger === "auto" ? "自动" : "手动"} · ${compaction.preTokens.toLocaleString()} → ${compaction.postTokens.toLocaleString()} tokens`
+            : compaction.error ?? "Claude 正在整理较早的对话内容"}
+        </small>
+      </span>
+      {compaction.summary ? <details><summary>查看摘要</summary><div className="context-compaction-summary"><MarkdownMessage content={compaction.summary} /></div></details> : null}
+    </div>
+  );
+}
+
 interface ConversationViewProps {
   messages: ChatMessage[];
   contextCompactions?: ContextCompaction[];
@@ -463,7 +484,7 @@ export default function ConversationView({ messages, contextCompactions = [], lo
     scrollToBottom();
     const frame = requestAnimationFrame(scrollToBottom);
     return () => cancelAnimationFrame(frame);
-  }, [messages.length, latest?.id, latest?.content.length, latest?.thinking?.length, latest?.activities?.length, latest?.error, latest?.status]);
+  }, [messages.length, contextCompactions.length, latest?.id, latest?.content.length, latest?.thinking?.length, latest?.activities?.length, latest?.error, latest?.status]);
 
   if (loadingHistory) {
     return (
@@ -491,6 +512,20 @@ export default function ConversationView({ messages, contextCompactions = [], lo
       break;
     }
   }
+  // 压缩卡片挂在触发它的那条消息后面；没有锚点（或锚点消息已经不在了）的旧记录仍然显示在顶部。
+  const messageIds = new Set(messages.map((message) => message.id));
+  const anchoredCompactions = new Map<string, ContextCompaction[]>();
+  const orphanCompactions: ContextCompaction[] = [];
+  for (const compaction of contextCompactions) {
+    const anchorId = compaction.anchorMessageId;
+    if (!anchorId || !messageIds.has(anchorId)) {
+      orphanCompactions.push(compaction);
+      continue;
+    }
+    const anchored = anchoredCompactions.get(anchorId);
+    if (anchored) anchored.push(compaction);
+    else anchoredCompactions.set(anchorId, [compaction]);
+  }
   return (
     <div
       className="conversation-scroll"
@@ -501,20 +536,7 @@ export default function ConversationView({ messages, contextCompactions = [], lo
       }}
     >
       <div className="conversation">
-        {contextCompactions.map((compaction) => (
-          <div className={`context-compaction ${compaction.status}`} key={compaction.id}>
-            <span className="context-compaction-icon"><BrainCircuit size={14} /></span>
-            <span className="context-compaction-copy">
-              <strong>{compaction.status === "running" ? "正在压缩上下文" : compaction.status === "error" ? "上下文压缩失败" : "上下文已压缩"}</strong>
-              <small>
-                {compaction.status === "done" && compaction.preTokens !== undefined && compaction.postTokens !== undefined
-                  ? `${compaction.trigger === "auto" ? "自动" : "手动"} · ${compaction.preTokens.toLocaleString()} → ${compaction.postTokens.toLocaleString()} tokens`
-                  : compaction.error ?? "Claude 正在整理较早的对话内容"}
-              </small>
-            </span>
-            {compaction.summary ? <details><summary>查看摘要</summary><div className="context-compaction-summary"><MarkdownMessage content={compaction.summary} /></div></details> : null}
-          </div>
-        ))}
+        {orphanCompactions.map((compaction) => <CompactionCard compaction={compaction} key={compaction.id} />)}
         {messages.map((message) => {
           if (message.role === "user") userTurn += 1;
           const messageUserTurn = userTurn;
@@ -524,38 +546,40 @@ export default function ConversationView({ messages, contextCompactions = [], lo
             ? Boolean(message.content) || canEdit
             : Boolean(message.content) || (canBranch && onBranch);
           return (
-            <article
-              className={`message ${message.role} ${canBranch && onBranch ? "branchable" : ""} ${hasActions ? "has-actions" : ""}`}
-              data-status={message.status}
-              key={message.id}
-            >
-              {message.role === "assistant" ? <div className="assistant-avatar"><Sparkles size={14} /></div> : null}
-              <div className="message-body">
-                {message.role === "user" ? (
-                  <UserMessage canEdit={canEdit} message={message} onEditResend={onEditResend} />
-                ) : (
-                  <>
-                    <AssistantResponse message={message} />
-                    {hasActions ? (
-                      <div className="message-actions">
-                        {message.content ? <CopyButton text={message.content} /> : null}
-                        {canBranch && onBranch ? (
-                          <button
-                            aria-label="从这里分叉"
-                            disabled={branchDisabled}
-                            onClick={() => onBranch(messageUserTurn)}
-                            title="从这里分叉"
-                            type="button"
-                          >
-                            <GitFork size={14} />
-                          </button>
-                        ) : null}
-                      </div>
-                    ) : null}
-                  </>
-                )}
-              </div>
-            </article>
+            <Fragment key={message.id}>
+              <article
+                className={`message ${message.role} ${canBranch && onBranch ? "branchable" : ""} ${hasActions ? "has-actions" : ""}`}
+                data-status={message.status}
+              >
+                {message.role === "assistant" ? <div className="assistant-avatar"><Sparkles size={14} /></div> : null}
+                <div className="message-body">
+                  {message.role === "user" ? (
+                    <UserMessage canEdit={canEdit} message={message} onEditResend={onEditResend} />
+                  ) : (
+                    <>
+                      <AssistantResponse message={message} />
+                      {hasActions ? (
+                        <div className="message-actions">
+                          {message.content ? <CopyButton text={message.content} /> : null}
+                          {canBranch && onBranch ? (
+                            <button
+                              aria-label="从这里分叉"
+                              disabled={branchDisabled}
+                              onClick={() => onBranch(messageUserTurn)}
+                              title="从这里分叉"
+                              type="button"
+                            >
+                              <GitFork size={14} />
+                            </button>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+              </article>
+              {anchoredCompactions.get(message.id)?.map((compaction) => <CompactionCard compaction={compaction} key={compaction.id} />)}
+            </Fragment>
           );
         })}
       </div>

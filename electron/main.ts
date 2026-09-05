@@ -24,6 +24,7 @@ interface AppSelection {
 
 interface RunRequest {
   runId: string;
+  conversationId: string;
   prompt: string;
   cwd: string;
   sessionId?: string;
@@ -130,6 +131,7 @@ interface ImportedContextCompaction {
   postTokens?: number;
   durationMs?: number;
   summary?: string;
+  anchorMessageId?: string;
 }
 
 interface ClaudeSessionSummary {
@@ -148,6 +150,10 @@ interface ClaudeSessionSummary {
 }
 
 interface ActiveRun {
+  runId: string;
+  conversationId: string;
+  cwd: string;
+  startedAt: number;
   child: ChildProcessWithoutNullStreams;
   currentTurnRunId: string;
   pendingTurnRunIds: string[];
@@ -155,7 +161,9 @@ interface ActiveRun {
   pendingControlRequestIds: Set<string>;
   endTurnFallback?: ReturnType<typeof setTimeout>;
   currentTurnHasOutput: boolean;
-  ignoreTrailingResult: boolean;
+  /** 上一轮被 end_turn 兜底收尾后，只在这个时间点之前允许吞掉一条迟到的 result。 */
+  staleResultDeadline: number;
+  stopping: boolean;
 }
 
 const activeRuns = new Map<string, ActiveRun>();
@@ -177,6 +185,69 @@ const IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "imag
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES = 40 * 1024 * 1024;
 const MAX_PROJECT_STORE_BYTES = 50 * 1024 * 1024;
+/** end_turn 之后等待真正 result 的兜底时长，只在 CLI 完全不再输出时才会触发。 */
+const END_TURN_FALLBACK_DELAY_MS = 1200;
+/** 兜底收尾后允许吞掉迟到 result 的时间窗，超过这个窗口的 result 一定属于新的一轮。 */
+const STALE_RESULT_CREDIT_MS = 1500;
+const DEFAULT_CONTEXT_WINDOW = 200_000;
+const LARGE_CONTEXT_WINDOW = 1_000_000;
+
+function findConversationRun(conversationId: string) {
+  for (const run of activeRuns.values()) {
+    if (run.conversationId === conversationId) return run;
+  }
+  return undefined;
+}
+
+function describeActiveRun(run: ActiveRun) {
+  return {
+    runId: run.runId,
+    conversationId: run.conversationId,
+    currentTurnRunId: run.currentTurnRunId,
+    turnRunIds: [...run.unfinishedTurnRunIds],
+    startedAt: run.startedAt,
+    stopping: run.stopping,
+  };
+}
+
+/** 子代理（Task）产生的记录不能驱动主轮次的生命周期，也不能参与上下文占用计算。 */
+function isSidechainRecord(record: Record<string, unknown>) {
+  if (typeof record.parent_tool_use_id === "string" && record.parent_tool_use_id.length > 0) return true;
+  if (typeof record.parentToolUseId === "string" && record.parentToolUseId.length > 0) return true;
+  return record.isSidechain === true;
+}
+
+/** 等待正在停止的进程真的退出，避免新旧两个 Claude 进程同时改同一批文件。 */
+function waitForRunToClose(run: ActiveRun, timeoutMs: number) {
+  if (run.child.exitCode !== null || run.child.signalCode !== null) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = () => {
+      if (timer) clearTimeout(timer);
+      run.child.removeListener("close", finish);
+      resolve();
+    };
+    timer = setTimeout(finish, timeoutMs);
+    run.child.once("close", finish);
+  });
+}
+
+/** Windows 上 claude.cmd 由 cmd.exe 承载，只 kill 顶层进程会留下后台的 node 子进程。 */
+function killRunTree(run: ActiveRun) {
+  run.stopping = true;
+  const pid = run.child.pid;
+  if (process.platform === "win32" && typeof pid === "number") {
+    try {
+      const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+      killer.on("error", () => { run.child.kill(); });
+      killer.unref();
+      return true;
+    } catch {
+      return run.child.kill();
+    }
+  }
+  return run.child.kill();
+}
 
 protocol.registerSchemesAsPrivileged([{
   scheme: "claude-desk-attachment",
@@ -282,7 +353,7 @@ function ensureTray() {
 
 function quitApplication() {
   isQuitting = true;
-  for (const { child } of activeRuns.values()) child.kill();
+  for (const run of activeRuns.values()) killRunTree(run);
   app.quit();
 }
 
@@ -402,6 +473,10 @@ function isValidRunRequest(value: unknown): value is RunRequest {
   );
   return (
     typeof request.runId === "string" &&
+    request.runId.length > 0 &&
+    typeof request.conversationId === "string" &&
+    request.conversationId.length > 0 &&
+    request.conversationId.length <= 200 &&
     typeof request.prompt === "string" &&
     (request.prompt.trim().length > 0 || Boolean(request.attachments?.length)) &&
     typeof request.cwd === "string" &&
@@ -802,6 +877,50 @@ function importedUsage(record: Record<string, unknown>): ImportedContextUsage | 
   return Object.values(contextUsage).some((value) => value !== undefined) ? contextUsage : undefined;
 }
 
+function contextWindowForModel(model: string | undefined) {
+  return model && /\[1m\]|-1m$/i.test(model) ? LARGE_CONTEXT_WINDOW : DEFAULT_CONTEXT_WINDOW;
+}
+
+/**
+ * 一次请求真正占用的上下文 = input + cache_creation + cache_read。
+ * result.usage 是整轮所有请求的累加，modelUsage 更是整个会话的累加，都不能当成占用量。
+ */
+function assistantOccupancyTokens(record: Record<string, unknown>) {
+  if (isSidechainRecord(record)) return undefined;
+  const message = record.message && typeof record.message === "object" ? record.message as Record<string, unknown> : undefined;
+  const usage = message?.usage && typeof message.usage === "object" && !Array.isArray(message.usage)
+    ? message.usage as Record<string, unknown>
+    : undefined;
+  if (!usage) return undefined;
+  const amount = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+  const total = amount(usage.input_tokens) + amount(usage.cache_creation_input_tokens) + amount(usage.cache_read_input_tokens);
+  return total > 0 ? total : undefined;
+}
+
+/** 占用量超过窗口一定是把累加值当成了占用量，这种读数必须丢掉而不是显示成 5M。 */
+function validatedContextUsage(usage: ImportedContextUsage | undefined, model: string | undefined): ImportedContextUsage | undefined {
+  if (!usage) return undefined;
+  const contextWindow = usage.contextWindow && usage.contextWindow > 0 ? usage.contextWindow : contextWindowForModel(model);
+  const usedTokens = usage.usedTokens !== undefined && usage.usedTokens >= 0 && usage.usedTokens <= contextWindow
+    ? usage.usedTokens
+    : undefined;
+  if (usedTokens === undefined) {
+    if (usage.usedPercentage === undefined && usage.remainingPercentage === undefined) return undefined;
+    return {
+      contextWindow,
+      usedPercentage: usage.usedPercentage,
+      remainingPercentage: usage.remainingPercentage,
+    };
+  }
+  const usedPercentage = usage.usedPercentage ?? Math.min(100, Math.round((usedTokens / contextWindow) * 1000) / 10);
+  return {
+    usedTokens,
+    contextWindow,
+    usedPercentage,
+    remainingPercentage: usage.remainingPercentage ?? Math.max(0, Math.round((100 - usedPercentage) * 10) / 10),
+  };
+}
+
 function importedCompactSummary(record: Record<string, unknown>) {
   if (record.isCompactSummary !== true || !record.message || typeof record.message !== "object") return undefined;
   return importedUserText((record.message as Record<string, unknown>).content) || undefined;
@@ -919,7 +1038,25 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
     if (typeof record.gitBranch === "string" && record.gitBranch.length <= 200) gitBranch = record.gitBranch;
     const timestamp = parseTimestamp(record.timestamp);
     const usage = importedUsage(record);
-    if (usage) contextUsage = { ...contextUsage, ...usage };
+    if (usage) {
+      // 逐字段覆盖：undefined 不能把已经读到的值冲掉。
+      const merged: ImportedContextUsage = { ...contextUsage };
+      if (usage.usedTokens !== undefined && usage.usedTokens !== merged.usedTokens) {
+        merged.usedTokens = usage.usedTokens;
+        merged.usedPercentage = undefined;
+        merged.remainingPercentage = undefined;
+      }
+      if (usage.contextWindow !== undefined) merged.contextWindow = usage.contextWindow;
+      if (usage.usedPercentage !== undefined) merged.usedPercentage = usage.usedPercentage;
+      if (usage.remainingPercentage !== undefined) merged.remainingPercentage = usage.remainingPercentage;
+      contextUsage = merged;
+    }
+    if (record.type === "assistant") {
+      const occupancy = assistantOccupancyTokens(record);
+      if (occupancy !== undefined) {
+        contextUsage = { ...contextUsage, usedTokens: occupancy, usedPercentage: undefined, remainingPercentage: undefined };
+      }
+    }
     const compactSummary = importedCompactSummary(record);
     if (compactSummary && contextCompactions.length > 0) {
       contextCompactions[contextCompactions.length - 1].summary = compactSummary;
@@ -937,10 +1074,14 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
         preTokens: typeof metadata.preTokens === "number" ? metadata.preTokens : undefined,
         postTokens: typeof metadata.postTokens === "number" ? metadata.postTokens : undefined,
         durationMs: typeof metadata.durationMs === "number" ? metadata.durationMs : undefined,
+        // 压缩发生在这条消息之后，卡片就渲染在它下面而不是整个对话的顶部。
+        anchorMessageId: includeMessages ? messages.at(-1)?.id : undefined,
       });
       contextUsage = {
         ...contextUsage,
         usedTokens: typeof metadata.postTokens === "number" ? metadata.postTokens : contextUsage?.usedTokens,
+        usedPercentage: undefined,
+        remainingPercentage: undefined,
       };
     }
     if (timestamp !== undefined) {
@@ -949,6 +1090,8 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
     }
 
     if (record.isCompactSummary === true) continue;
+    // 子代理（Task）的记录属于工具内部过程，不是主对话的消息。
+    if (isSidechainRecord(record)) continue;
 
     if (record.type === "user" && record.message && typeof record.message === "object") {
       const message = record.message as Record<string, unknown>;
@@ -1053,7 +1196,7 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
     gitBranch,
     resolvedModel,
     permissionMode,
-    contextUsage,
+    contextUsage: validatedContextUsage(contextUsage, resolvedModel),
     contextCompactions: contextCompactions.length ? contextCompactions : undefined,
     ...(includeMessages ? { messages } : {}),
   };
@@ -1600,7 +1743,17 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
   if (!existsSync(request.cwd) || !statSync(request.cwd).isDirectory()) {
     throw new Error("工作目录不存在");
   }
-  if (activeRuns.has(request.runId)) throw new Error("任务已经在运行");
+  // 同一个对话只允许有一个 Claude 进程，否则两个进程会同时改同一批文件。
+  const runningForConversation = findConversationRun(request.conversationId);
+  if (runningForConversation && !runningForConversation.stopping) {
+    return { started: false, busy: true, runId: runningForConversation.runId };
+  }
+  if (runningForConversation) {
+    await waitForRunToClose(runningForConversation, 5_000);
+    const stillRunning = findConversationRun(request.conversationId);
+    if (stillRunning) return { started: false, busy: true, runId: stillRunning.runId };
+  }
+  if (activeRuns.has(request.runId)) return { started: false, busy: true, runId: request.runId };
   const resolvedAttachments = await Promise.all((request.attachments ?? []).map(async (attachment) => {
     const filePath = attachmentPath(attachment.storedName);
     if (!filePath) throw new Error("附件路径无效");
@@ -1652,6 +1805,9 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
 
   const owner = BrowserWindow.fromWebContents(event.sender);
   if (!owner) throw new Error("窗口已经关闭");
+  // 上面有多处 await，重新确认这段时间里没有别的请求为同一对话启动进程。
+  const raced = findConversationRun(request.conversationId);
+  if (raced) return { started: false, busy: true, runId: raced.runId };
 
   const invocation = getClaudeInvocation(args);
   const child = spawn(invocation.executable, invocation.args, {
@@ -1662,13 +1818,18 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     stdio: ["pipe", "pipe", "pipe"],
   });
   const activeRun: ActiveRun = {
+    runId: request.runId,
+    conversationId: request.conversationId,
+    cwd: request.cwd,
+    startedAt: Date.now(),
     child,
     currentTurnRunId: request.runId,
     pendingTurnRunIds: [],
     unfinishedTurnRunIds: new Set([request.runId]),
     pendingControlRequestIds: new Set(),
     currentTurnHasOutput: false,
-    ignoreTrailingResult: false,
+    staleResultDeadline: 0,
+    stopping: false,
   };
   activeRuns.set(request.runId, activeRun);
 
@@ -1689,8 +1850,9 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     if (nextTurnRunId) {
       activeRun.currentTurnRunId = nextTurnRunId;
       activeRun.currentTurnHasOutput = false;
-      activeRun.ignoreTrailingResult = completedFromEndTurn;
+      activeRun.staleResultDeadline = completedFromEndTurn ? Date.now() + STALE_RESULT_CREDIT_MS : 0;
     } else {
+      activeRun.staleResultDeadline = 0;
       activeRun.child.stdin.end();
     }
     if (observedSessionId) {
@@ -1698,12 +1860,15 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     }
   };
   const scheduleEndTurnFallback = (data: Record<string, unknown>) => {
-    // Claude CLI 2.1.x can leave stream-json stdin open after end_turn without emitting result.
+    // Claude CLI 2.1.x 偶尔在 end_turn 之后既不发 result 也不关 stdin，这里只做兜底：
+    // 任何一行新输出都会撤掉它，所以工具调用、子代理和后续文本都不会被误判成“这一轮结束了”。
     clearEndTurnFallback();
     const turnRunId = activeRun.currentTurnRunId;
     activeRun.endTurnFallback = setTimeout(() => {
       activeRun.endTurnFallback = undefined;
       if (activeRun.currentTurnRunId !== turnRunId || !activeRun.unfinishedTurnRunIds.has(turnRunId)) return;
+      // 还有没回答的权限请求，说明这一轮在等用户，不能提前收尾。
+      if (activeRun.pendingControlRequestIds.size > 0) return;
       completeCurrentTurn({
         type: "result",
         subtype: "success",
@@ -1712,50 +1877,66 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
         session_id: typeof data.session_id === "string" ? data.session_id : observedSessionId,
         completion_source: "assistant_end_turn",
       }, true);
-    }, 250);
+    }, END_TURN_FALLBACK_DELAY_MS);
   };
-  output.on("line", async (line) => {
+  const handleLine = async (line: string) => {
     if (!line.trim()) return;
+    let parsed: unknown;
     try {
-      const data: unknown = JSON.parse(line);
-      if (data && typeof data === "object") {
-        const sessionId = (data as Record<string, unknown>).session_id;
-        if (typeof sessionId === "string" && SESSION_ID_PATTERN.test(sessionId)) observedSessionId = sessionId;
-        if ((data as Record<string, unknown>).type === "system" && Array.isArray((data as Record<string, unknown>).slash_commands)) {
-          (data as Record<string, unknown>).slash_command_descriptions = await slashDescriptionsPromise;
-        }
-        if ((data as Record<string, unknown>).type === "control_request") {
-          const requestId = (data as Record<string, unknown>).request_id;
-          if (typeof requestId === "string" && requestId.length > 0 && requestId.length <= 200) {
-            activeRun.pendingControlRequestIds.add(requestId);
-            emit(owner, { runId: activeRun.currentTurnRunId, type: "control_request", data });
-          }
-          return;
-        }
-        const record = data as Record<string, unknown>;
-        if (record.type === "result") {
-          if (activeRun.ignoreTrailingResult && !activeRun.currentTurnHasOutput) {
-            activeRun.ignoreTrailingResult = false;
-            return;
-          }
-          completeCurrentTurn(record, false);
-          return;
-        }
-        if (record.type === "assistant" || record.type === "stream_event" || record.type === "user") {
-          activeRun.currentTurnHasOutput = true;
-          activeRun.ignoreTrailingResult = false;
-        }
-      }
-      emit(owner, { runId: activeRun.currentTurnRunId, type: "message", data });
-      if (data && typeof data === "object" && (data as Record<string, unknown>).type === "assistant") {
-        const message = (data as Record<string, unknown>).message;
-        if (message && typeof message === "object" && (message as Record<string, unknown>).stop_reason === "end_turn") {
-          scheduleEndTurnFallback(data as Record<string, unknown>);
-        }
-      }
+      parsed = JSON.parse(line);
     } catch {
+      clearEndTurnFallback();
       emit(owner, { runId: activeRun.currentTurnRunId, type: "raw", text: line });
+      return;
     }
+    // CLI 又输出了新的一行，说明上一次 end_turn 之后这一轮还在继续。
+    clearEndTurnFallback();
+    if (!parsed || typeof parsed !== "object") {
+      emit(owner, { runId: activeRun.currentTurnRunId, type: "message", data: parsed as Record<string, unknown> });
+      return;
+    }
+    const record = parsed as Record<string, unknown>;
+    if (typeof record.session_id === "string" && SESSION_ID_PATTERN.test(record.session_id)) {
+      observedSessionId = record.session_id;
+    }
+    if (record.type === "system" && Array.isArray(record.slash_commands)) {
+      record.slash_command_descriptions = await slashDescriptionsPromise;
+    }
+    if (record.type === "control_request") {
+      const requestId = record.request_id;
+      if (typeof requestId === "string" && requestId.length > 0 && requestId.length <= 200) {
+        activeRun.pendingControlRequestIds.add(requestId);
+        emit(owner, { runId: activeRun.currentTurnRunId, type: "control_request", data: record });
+      }
+      return;
+    }
+    const sidechain = isSidechainRecord(record);
+    if (record.type === "result" && !sidechain) {
+      const stale = activeRun.staleResultDeadline > 0
+        && !activeRun.currentTurnHasOutput
+        && Date.now() <= activeRun.staleResultDeadline;
+      activeRun.staleResultDeadline = 0;
+      // 兜底收尾之后紧跟着到达的 result 属于已经结束的那一轮，丢弃它不会让任何一轮丢失结束事件。
+      if (stale) return;
+      completeCurrentTurn(record, false);
+      return;
+    }
+    if (record.type === "assistant" || record.type === "stream_event" || record.type === "user") {
+      activeRun.currentTurnHasOutput = true;
+      activeRun.staleResultDeadline = 0;
+    }
+    emit(owner, { runId: activeRun.currentTurnRunId, type: "message", data: record });
+    if (record.type === "assistant" && !sidechain) {
+      const message = record.message;
+      if (message && typeof message === "object" && (message as Record<string, unknown>).stop_reason === "end_turn") {
+        scheduleEndTurnFallback(record);
+      }
+    }
+  };
+  // 逐行串行处理：handleLine 里有 await，若并发执行会把事件顺序打乱。
+  let lineQueue: Promise<void> = Promise.resolve();
+  output.on("line", (line) => {
+    lineQueue = lineQueue.then(() => handleLine(line)).catch(() => undefined);
   });
 
   let stderr = "";
@@ -1773,6 +1954,8 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
   child.on("close", async (code) => {
     clearEndTurnFallback();
     activeRuns.delete(request.runId);
+    // 等最后几行输出处理完，否则 exit 事件会插到还没派发的消息前面。
+    await lineQueue.catch(() => undefined);
     if (observedSessionId) {
       try {
         await normalizeClaudeDeskSession(request.cwd, observedSessionId, existingSessionPrefix);
@@ -1824,7 +2007,7 @@ ipcMain.handle("claude:append", async (_event, value: unknown) => {
     ? `\n\n用户附加了以下本地文件，请根据请求读取并使用它们：\n${filePaths.map((path) => `- ${path}`).join("\n")}`
     : "";
   const activeRun = activeRuns.get(request.runId);
-  if (!activeRun || activeRun.child.stdin.destroyed || activeRun.child.stdin.writableEnded) return { appended: false };
+  if (!activeRun || activeRun.stopping || activeRun.child.stdin.destroyed || activeRun.child.stdin.writableEnded) return { appended: false };
   activeRun.pendingTurnRunIds.push(request.turnRunId);
   activeRun.unfinishedTurnRunIds.add(request.turnRunId);
   try {
@@ -1883,10 +2066,13 @@ ipcMain.handle("claude:set-permission-mode", async (_event, value: unknown) => {
 });
 
 ipcMain.handle("claude:stop", (_event, runId: string) => {
+  if (typeof runId !== "string" || runId.length === 0) return false;
   const activeRun = activeRuns.get(runId);
   if (!activeRun) return false;
-  return activeRun.child.kill();
+  return killRunTree(activeRun);
 });
+
+ipcMain.handle("claude:runs", () => [...activeRuns.values()].map(describeActiveRun));
 
 if (hasSingleInstanceLock) app.whenReady().then(async () => {
   appSettings = await loadAppSettings();
@@ -1911,7 +2097,7 @@ app.on("window-all-closed", () => {
 app.on("before-quit", () => {
   isQuitting = true;
   updateManager.dispose();
-  for (const { child } of activeRuns.values()) child.kill();
+  for (const run of activeRuns.values()) killRunTree(run);
   tray?.destroy();
   tray = null;
   for (const notification of activeNotifications) notification.close();

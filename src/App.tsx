@@ -31,11 +31,15 @@ import type {
   QueuedPrompt,
   ReorderPosition,
   RunRequest,
+  StartRunResult,
   ThinkingEffort,
   ToolPermissionRequest,
   UserQuestion,
 } from "./types";
 import { describeSlashCommand, normalizeSlashCommands } from "./commands";
+
+/** 启动结果：busy 表示这个对话已经有 Claude 在跑，调用方应该把它放回队列。 */
+type StartOutcome = "started" | "busy" | "failed";
 
 interface RunMeta {
   conversationId: string;
@@ -43,6 +47,10 @@ interface RunMeta {
   responseId: string;
   userMessageId?: string;
   appendToResponse: boolean;
+  /** 追加轮次先排队，收到属于它的第一条事件时才把气泡切成运行中。 */
+  started: boolean;
+  /** 注册时间，用于对账时区分“刚刚启动”和“主进程里已经没有了”。 */
+  registeredAt: number;
   completed: boolean;
   successful: boolean;
   receivedText: boolean;
@@ -427,6 +435,80 @@ function getContextUsage(data: Record<string, unknown>): ContextUsage | undefine
   return { usedTokens, contextWindow, usedPercentage, remainingPercentage };
 }
 
+const DEFAULT_CONTEXT_WINDOW = 200_000;
+const LARGE_CONTEXT_WINDOW = 1_000_000;
+
+function contextWindowForModel(model: string | undefined) {
+  return model && /\[1m\]|-1m$/i.test(model) ? LARGE_CONTEXT_WINDOW : DEFAULT_CONTEXT_WINDOW;
+}
+
+/** 子代理（Task）的记录属于工具内部过程，它的用量不属于主对话的上下文占用。 */
+function isSidechainRecord(data: Record<string, unknown>) {
+  if (typeof data.parent_tool_use_id === "string" && data.parent_tool_use_id.length > 0) return true;
+  if (typeof data.parentToolUseId === "string" && data.parentToolUseId.length > 0) return true;
+  return data.isSidechain === true;
+}
+
+/**
+ * 一次请求真正占用的上下文 = input + cache_creation + cache_read。
+ * result.usage 是这一轮所有请求的累加，modelUsage 更是整个会话的累加，用它们会把用量显示成 5M。
+ */
+function getOccupancyTokens(data: Record<string, unknown>) {
+  if (data.type !== "assistant" || isSidechainRecord(data)) return undefined;
+  const message = data.message && typeof data.message === "object" ? data.message as Record<string, unknown> : undefined;
+  const usage = message?.usage && typeof message.usage === "object" ? message.usage as Record<string, unknown> : undefined;
+  if (!usage) return undefined;
+  const total = (numberValue(usage.input_tokens) ?? 0)
+    + (numberValue(usage.cache_creation_input_tokens) ?? 0)
+    + (numberValue(usage.cache_read_input_tokens) ?? 0);
+  return total > 0 ? total : undefined;
+}
+
+/** result.modelUsage[*].contextWindow 是 CLI 给出的权威窗口大小。 */
+function getResultContextWindow(data: Record<string, unknown>) {
+  if (data.type !== "result" || !data.modelUsage || typeof data.modelUsage !== "object") return undefined;
+  for (const value of Object.values(data.modelUsage as Record<string, unknown>)) {
+    if (!value || typeof value !== "object") continue;
+    const window = numberValue((value as Record<string, unknown>).contextWindow);
+    if (window !== undefined && window > 0) return window;
+  }
+  return undefined;
+}
+
+/** 占用量超过窗口一定是把累加值当成了占用量，这种读数必须丢掉而不是显示成 5M。 */
+function validateContextUsage(usage: ContextUsage | undefined, model?: string): ContextUsage | undefined {
+  if (!usage) return undefined;
+  const contextWindow = usage.contextWindow !== undefined && usage.contextWindow > 0
+    ? usage.contextWindow
+    : contextWindowForModel(model);
+  const usedTokens = usage.usedTokens !== undefined && usage.usedTokens <= contextWindow ? usage.usedTokens : undefined;
+  if (usedTokens === undefined) {
+    if (usage.usedPercentage === undefined && usage.remainingPercentage === undefined) return undefined;
+    return { contextWindow, usedPercentage: usage.usedPercentage, remainingPercentage: usage.remainingPercentage };
+  }
+  const usedPercentage = Math.min(100, usage.usedPercentage ?? Math.round((usedTokens / contextWindow) * 1_000) / 10);
+  return {
+    usedTokens,
+    contextWindow,
+    usedPercentage,
+    remainingPercentage: usage.remainingPercentage ?? Math.max(0, Math.round((100 - usedPercentage) * 10) / 10),
+  };
+}
+
+/** 逐字段覆盖：undefined 不能把已经读到的值冲掉，占用量变了旧百分比也必须失效。 */
+function mergeContextUsage(previous: ContextUsage | undefined, incoming: Partial<ContextUsage>, model?: string) {
+  const merged: ContextUsage = { ...previous };
+  if (incoming.usedTokens !== undefined && incoming.usedTokens !== merged.usedTokens) {
+    merged.usedTokens = incoming.usedTokens;
+    merged.usedPercentage = undefined;
+    merged.remainingPercentage = undefined;
+  }
+  if (incoming.contextWindow !== undefined) merged.contextWindow = incoming.contextWindow;
+  if (incoming.usedPercentage !== undefined) merged.usedPercentage = incoming.usedPercentage;
+  if (incoming.remainingPercentage !== undefined) merged.remainingPercentage = incoming.remainingPercentage;
+  return validateContextUsage(merged, model);
+}
+
 function getCompactBoundary(data: Record<string, unknown>): ContextCompaction | undefined {
   if (data.type !== "system" || data.subtype !== "compact_boundary") return undefined;
   const metadata = data.compactMetadata && typeof data.compactMetadata === "object"
@@ -631,6 +713,9 @@ function ContextStatus({ conversation, onCompact, disabled }: { conversation: Co
     : usage?.usedTokens !== undefined
       ? `上下文 ${formatTokenCount(usage.usedTokens)}${usage.contextWindow ? `/${formatTokenCount(usage.contextWindow)}` : ""}`
       : "上下文用量未知";
+  const usageDetail = usage?.usedTokens !== undefined
+    ? `${usageText}（${formatTokenCount(usage.usedTokens)}/${formatTokenCount(usage.contextWindow ?? DEFAULT_CONTEXT_WINDOW)}）`
+    : usageText;
   const compactText = latest?.status === "running"
     ? "正在压缩上下文…"
     : latest?.status === "error"
@@ -639,7 +724,7 @@ function ContextStatus({ conversation, onCompact, disabled }: { conversation: Co
         ? "已完成上下文压缩"
         : undefined;
   return (
-    <div className="context-status" title={latest?.summary ?? usageText}>
+    <div className="context-status" title={latest?.summary ?? usageDetail}>
       <span className="context-status-text">{compactText ?? usageText}</span>
       {latest?.status === "done" && latest.preTokens !== undefined && latest.postTokens !== undefined
         ? <small>{formatTokenCount(latest.preTokens)} → {formatTokenCount(latest.postTokens)}</small>
@@ -704,7 +789,7 @@ export default function App() {
     [activeProject, activeConversationId],
   );
   const activeRunId = activeConversationId ? activeRuns[activeConversationId] : undefined;
-  const activeResponseRunning = Boolean(activeConversation?.messages.some((message) => message.role === "assistant" && message.status === "running"));
+  const activeResponseRunning = Boolean(activeConversation?.messages.some((message) => message.role === "assistant" && (message.status === "running" || message.status === "queued")));
   const activeProcessRunning = Boolean(activeRunId) || activeResponseRunning;
   const pendingPermission = permissionQueue[0];
   const pendingQuestion = questionQueue[0];
@@ -937,6 +1022,10 @@ export default function App() {
           gitBranch: session.gitBranch ?? conversation.gitBranch,
           resolvedModel: session.resolvedModel ?? conversation.resolvedModel,
           permissionMode: history?.permissionMode ?? conversation.permissionMode,
+          // 重新读到消息时才跟着更新上下文用量和压缩记录：正在运行的会话被排除在外，
+          // 否则文件里滞后的读数会把实时占用覆盖掉，压缩卡片也会丢掉锚点。
+          contextUsage: history ? history.contextUsage : conversation.contextUsage,
+          contextCompactions: history ? history.contextCompactions ?? conversation.contextCompactions : conversation.contextCompactions,
           historyLoaded: conversation.source === "claude" && history ? true : conversation.historyLoaded,
         };
       });
@@ -1184,6 +1273,15 @@ export default function App() {
       return;
     }
 
+    // 追加的轮次先以“排队中”渲染，收到属于它的第一条事件才算真正开始。
+    if (!meta.started && (event.type === "message" || event.type === "raw" || event.type === "control_request")) {
+      meta.started = true;
+      const startedAt = Date.now();
+      updateResponse(meta, (message) => message.status === "queued"
+        ? { ...message, status: "running", responseStartedAt: message.responseStartedAt ?? startedAt }
+        : message);
+    }
+
     if (event.type === "control_request" && event.data) {
       const control = getControlRequest(event.data);
       if (control) {
@@ -1246,23 +1344,39 @@ export default function App() {
       }
 
       const contextUsage = getContextUsage(data);
-      if (contextUsage) {
+      const occupancyTokens = getOccupancyTokens(data);
+      const resultContextWindow = getResultContextWindow(data);
+      if (contextUsage || occupancyTokens !== undefined || resultContextWindow !== undefined) {
         updateConversation(meta.conversationId, (conversation) => ({
           ...conversation,
-          contextUsage: { ...conversation.contextUsage, ...contextUsage },
+          contextUsage: mergeContextUsage(conversation.contextUsage, {
+            ...contextUsage,
+            ...(occupancyTokens !== undefined ? { usedTokens: occupancyTokens, usedPercentage: undefined, remainingPercentage: undefined } : {}),
+            ...(resultContextWindow !== undefined ? { contextWindow: resultContextWindow } : {}),
+          }, conversation.resolvedModel ?? conversation.selectedModel),
         }));
       }
       const compactBoundary = getCompactBoundary(data);
       const compactSummary = getCompactSummary(data);
       if (compactBoundary) {
-        updateConversation(meta.conversationId, (conversation) => ({
-          ...conversation,
-          contextUsage: {
-            ...conversation.contextUsage,
-            usedTokens: compactBoundary.postTokens ?? conversation.contextUsage?.usedTokens,
-          },
-          contextCompactions: [...(conversation.contextCompactions ?? []).filter((item) => item.status !== "running"), compactBoundary].slice(-20),
-        }));
+        updateConversation(meta.conversationId, (conversation) => {
+          const compactions = conversation.contextCompactions ?? [];
+          const running = compactions.filter((item) => item.status === "running").at(-1);
+          return {
+            ...conversation,
+            contextUsage: mergeContextUsage(
+              conversation.contextUsage,
+              { usedTokens: compactBoundary.postTokens },
+              conversation.resolvedModel ?? conversation.selectedModel,
+            ),
+            // 压缩发生在这条消息之后，卡片就渲染在它下面，而不是堆在整个对话的顶部。
+            contextCompactions: [...compactions.filter((item) => item.status !== "running"), {
+              ...compactBoundary,
+              startedAt: compactBoundary.startedAt ?? running?.startedAt,
+              anchorMessageId: running?.anchorMessageId ?? conversation.messages.at(-1)?.id,
+            }].slice(-20),
+          };
+        });
       } else if (compactSummary) {
         updateConversation(meta.conversationId, (conversation) => {
           const compactions = conversation.contextCompactions ?? [];
@@ -1280,7 +1394,13 @@ export default function App() {
             const compactions = conversation.contextCompactions ?? [];
             const runningIndex = compactions.findIndex((item) => item.status === "running");
             if (compactState === "running" && runningIndex < 0) {
-              const runningCompaction: ContextCompaction = { id: makeId(), trigger: "unknown", status: "running", startedAt: Date.now() };
+              const runningCompaction: ContextCompaction = {
+                id: makeId(),
+                trigger: "unknown",
+                status: "running",
+                startedAt: Date.now(),
+                anchorMessageId: conversation.messages.at(-1)?.id,
+              };
               return {
                 ...conversation,
                 contextCompactions: [...compactions, runningCompaction].slice(-20),
@@ -1373,22 +1493,23 @@ export default function App() {
         updateResponse(meta, (message) => activityResults.reduce(applyActivityResult, message));
       }
 
-      if (data.type === "result") {
+      // 子代理（Task）的 result 只是工具内部过程结束：主进程不会用它收尾轮次，渲染层同样不能，
+      // 否则气泡会在两秒内显示“已完成”，而真正的回答还在后台继续输出。
+      if (data.type === "result" && !isSidechainRecord(data)) {
         flushPendingText(meta);
         meta.completed = true;
-        const nextMeta = [...runMeta.current.values()].find((item) => item !== meta && item.conversationId === meta.conversationId && !item.completed);
-        const hasPendingTurn = Boolean(nextMeta);
         const permissionRequests = getPermissionRequests(data);
         const isError = data.is_error === true;
         meta.successful = !isError && permissionRequests.length === 0;
         const resultText = typeof data.result === "string" ? data.result : "";
         const resultBlockId = makeId();
+        // 每一轮都有自己的气泡，这一轮的 result 只收尾自己，不再借别的轮次继续显示“运行中”。
         updateResponse(meta, (message) => ({
           ...(message.content || !resultText ? message : appendTimelineText(message, resultBlockId, resultText)),
           activeActivityId: undefined,
-          status: permissionRequests.length > 0 ? "stopped" : (isError ? "error" : (hasPendingTurn ? "running" : "done")),
+          status: permissionRequests.length > 0 ? "stopped" : (isError ? "error" : "done"),
           error: isError ? resultText || "Claude 未能完成这次任务" : undefined,
-          ...(!hasPendingTurn || isError || permissionRequests.length > 0 ? finishResponse(message) : {}),
+          ...finishResponse(message),
         }));
         if (permissionRequests.length > 0) {
           setPermissionQueue((current) => current.some((item) => item.responseId === meta.responseId)
@@ -1401,6 +1522,7 @@ export default function App() {
             }]);
         }
         runMeta.current.delete(event.runId);
+        const hasPendingTurn = [...runMeta.current.values()].some((item) => item.conversationId === meta.conversationId && !item.completed);
         if (!hasPendingTurn) {
           if (processRunIds.current.get(meta.conversationId) === meta.processRunId) processRunIds.current.delete(meta.conversationId);
           setActiveRuns((current) => {
@@ -1715,15 +1837,12 @@ export default function App() {
     }
   };
 
-  const startPrompt = useCallback(async (conversationId: string, prompt: string, attachments: Attachment[]) => {
+  const startPrompt = useCallback(async (conversationId: string, prompt: string, attachments: Attachment[]): Promise<StartOutcome> => {
     const project = projectsRef.current.find((item) => item.conversations.some((conversation) => conversation.id === conversationId));
     const conversation = project?.conversations.find((item) => item.id === conversationId);
-    if (
-      !project ||
-      !conversation ||
-      [...runMeta.current.values()].some((meta) => meta.conversationId === conversationId) ||
-      (conversation.source === "claude" && !conversation.historyLoaded)
-    ) return false;
+    if (!project || !conversation || (conversation.source === "claude" && !conversation.historyLoaded)) return "failed";
+    // 已经有轮次在跑就不能再开一个进程，交给调用方排队。
+    if ([...runMeta.current.values()].some((meta) => meta.conversationId === conversationId)) return "busy";
     const runId = makeId();
     const responseId = makeId();
     const now = Date.now();
@@ -1750,7 +1869,10 @@ export default function App() {
       conversationId,
       processRunId: runId,
       responseId,
+      userMessageId: userMessage.id,
       appendToResponse: false,
+      started: true,
+      registeredAt: now,
       completed: false,
       successful: false,
       receivedText: false,
@@ -1763,6 +1885,7 @@ export default function App() {
 
     const request: RunRequest = {
       runId,
+      conversationId,
       prompt,
       cwd: project.workspace,
       sessionId: conversation.sessionId,
@@ -1777,8 +1900,9 @@ export default function App() {
       permissionMode: conversation.permissionMode,
       attachments,
     };
+    let started: StartRunResult;
     try {
-      await window.claudeDesk.startRun(request);
+      started = await window.claudeDesk.startRun(request);
     } catch (error) {
       const meta = runMeta.current.get(runId);
       if (meta) updateResponse(meta, (message) => ({ ...message, status: "error", error: error instanceof Error ? error.message : "启动失败", ...finishResponse(message) }));
@@ -1789,41 +1913,64 @@ export default function App() {
       });
       runMeta.current.delete(runId);
       processRunIds.current.delete(conversationId);
-      return false;
+      return "failed";
     }
-    return true;
+    if (!started.started) {
+      // 主进程里这个对话已经有 Claude 在跑：撤掉刚插入的气泡，改成等它结束再发，避免两个进程同时改同一批文件。
+      runMeta.current.delete(runId);
+      updateConversation(conversationId, (current) => ({
+        ...current,
+        messages: current.messages.filter((message) => message.id !== userMessage.id && message.id !== responseId),
+      }));
+      const liveRunId = started.runId;
+      if (liveRunId) {
+        processRunIds.current.set(conversationId, liveRunId);
+        setActiveRuns((current) => ({ ...current, [conversationId]: liveRunId }));
+      } else {
+        if (processRunIds.current.get(conversationId) === runId) processRunIds.current.delete(conversationId);
+        setActiveRuns((current) => {
+          const next = { ...current };
+          if (next[conversationId] === runId) delete next[conversationId];
+          return next;
+        });
+      }
+      return "busy";
+    }
+    return "started";
   }, [modelConfig, updateConversation, updateResponse]);
 
   const appendPrompt = useCallback(async (conversationId: string, prompt: string, attachments: Attachment[]) => {
     const runId = processRunIds.current.get(conversationId);
     if (!runId) return false;
-    const turnRunId = makeId();
     const activeMeta = [...runMeta.current.values()].find((meta) => meta.conversationId === conversationId && !meta.completed);
     if (!activeMeta) return false;
-    const userMessageId = makeId();
+    const turnRunId = makeId();
+    const responseId = makeId();
     const now = Date.now();
-    updateConversation(conversationId, (conversation) => {
-      const responseIndex = conversation.messages.findIndex((message) => message.id === activeMeta.responseId);
-      const userMessage: ChatMessage = { id: userMessageId, role: "user", content: prompt, attachments, createdAt: now };
-      if (responseIndex < 0) return { ...conversation, updatedAt: now, messages: [...conversation.messages, userMessage] };
-      const response = conversation.messages[responseIndex];
-      return {
-        ...conversation,
-        updatedAt: now,
-        messages: [
-          ...conversation.messages.slice(0, responseIndex),
-          userMessage,
-          response,
-          ...conversation.messages.slice(responseIndex + 1),
-        ],
-      };
-    });
+    const userMessage: ChatMessage = { id: makeId(), role: "user", content: prompt, attachments, createdAt: now };
+    // 追加的轮次有自己的回复气泡，并且排在对话末尾：提问和回答就出现在用户当前看到的位置。
+    const response: ChatMessage = {
+      id: responseId,
+      role: "assistant",
+      content: "",
+      createdAt: now,
+      status: "queued",
+      activities: [],
+      timeline: [],
+    };
+    updateConversation(conversationId, (conversation) => ({
+      ...conversation,
+      updatedAt: now,
+      messages: [...conversation.messages, userMessage, response],
+    }));
     runMeta.current.set(turnRunId, {
       conversationId,
       processRunId: runId,
-      responseId: activeMeta.responseId,
-      userMessageId,
-      appendToResponse: true,
+      responseId,
+      userMessageId: userMessage.id,
+      appendToResponse: false,
+      started: false,
+      registeredAt: now,
       completed: false,
       successful: false,
       receivedText: false,
@@ -1841,7 +1988,7 @@ export default function App() {
     runMeta.current.delete(turnRunId);
     updateConversation(conversationId, (conversation) => ({
       ...conversation,
-      messages: conversation.messages.filter((message) => message.id !== userMessageId),
+      messages: conversation.messages.filter((message) => message.id !== userMessage.id && message.id !== responseId),
     }));
     if (activeMeta.completed && ![...runMeta.current.values()].some((meta) => meta.conversationId === conversationId && !meta.completed)) {
       updateResponse(activeMeta, (message) => ({
@@ -1860,13 +2007,28 @@ export default function App() {
     return false;
   }, [notifyConversationCompleted, updateConversation, updateResponse]);
 
+  const queuePromptFor = useCallback((conversationId: string, prompt: string, attachments: Attachment[], front = false) => {
+    const queuedPrompt: QueuedPrompt = { id: makeId(), prompt, attachments };
+    setPromptQueues((current) => ({
+      ...current,
+      [conversationId]: front
+        ? [queuedPrompt, ...(current[conversationId] ?? [])]
+        : [...(current[conversationId] ?? []), queuedPrompt],
+    }));
+  }, []);
+
   const sendPrompt = (prompt: string, attachments: Attachment[]) => {
     if (!activeConversation || (activeConversation.source === "claude" && !activeConversation.historyLoaded)) return;
-    const busy = [...runMeta.current.values()].some((meta) => meta.conversationId === activeConversation.id)
-      || permissionQueue.some((permission) => permission.conversationId === activeConversation.id)
-      || questionQueue.some((question) => question.conversationId === activeConversation.id);
+    const conversationId = activeConversation.id;
+    const busy = activeRuns[conversationId] !== undefined
+      || [...runMeta.current.values()].some((meta) => meta.conversationId === conversationId)
+      || permissionQueue.some((permission) => permission.conversationId === conversationId)
+      || questionQueue.some((question) => question.conversationId === conversationId);
     if (!busy) {
-      void startPrompt(activeConversation.id, prompt, attachments);
+      // 主进程里可能还留着上一次的 Claude 进程，这时候先排队等它退出，绝不并发开第二个。
+      void startPrompt(conversationId, prompt, attachments).then((outcome) => {
+        if (outcome === "busy") queuePromptFor(conversationId, prompt, attachments, true);
+      });
       return;
     }
     queuePrompt(prompt, attachments);
@@ -1874,8 +2036,7 @@ export default function App() {
 
   const queuePrompt = (prompt: string, attachments: Attachment[]) => {
     if (!activeConversation) return;
-    const queuedPrompt: QueuedPrompt = { id: makeId(), prompt, attachments };
-    setPromptQueues((current) => ({ ...current, [activeConversation.id]: [...(current[activeConversation.id] ?? []), queuedPrompt] }));
+    queuePromptFor(activeConversation.id, prompt, attachments);
   };
 
   const guideQueuedPrompt = (promptId: string) => {
@@ -1918,9 +2079,52 @@ export default function App() {
         }
         return { ...current, [conversationId]: remaining };
       });
-      void startPrompt(conversationId, nextPrompt.prompt, nextPrompt.attachments);
+      void startPrompt(conversationId, nextPrompt.prompt, nextPrompt.attachments).then((outcome) => {
+        if (outcome === "busy") queuePromptFor(conversationId, nextPrompt.prompt, nextPrompt.attachments, true);
+      });
     }
-  }, [activeRuns, permissionQueue, promptQueues, questionQueue, startPrompt]);
+  }, [activeRuns, permissionQueue, promptQueues, questionQueue, queuePromptFor, startPrompt]);
+
+  // 主进程掌握着运行状态的唯一真相：界面显示在跑但进程已经没了、或者进程还在跑但界面不知道，都在这里对账。
+  const reconcileActiveRuns = useCallback(async () => {
+    const runs = await window.claudeDesk.getActiveRuns().catch(() => null);
+    if (!runs) return;
+    const liveRunIds = new Set(runs.map((run) => run.runId));
+    for (const [conversationId, processRunId] of [...processRunIds.current]) {
+      if (liveRunIds.has(processRunId)) continue;
+      const metas = [...runMeta.current.entries()].filter(([, meta]) => meta.processRunId === processRunId);
+      // 刚刚启动的进程可能还没登记完，不能当成已经消失。
+      if (metas.some(([, meta]) => Date.now() - meta.registeredAt < 5_000)) continue;
+      processRunIds.current.delete(conversationId);
+      setActiveRuns((current) => {
+        const next = { ...current };
+        if (next[conversationId] === processRunId) delete next[conversationId];
+        return next;
+      });
+      for (const [turnRunId, meta] of metas) {
+        runMeta.current.delete(turnRunId);
+        if (meta.completed) continue;
+        meta.completed = true;
+        updateResponse(meta, (message) => message.status === "running" || message.status === "queued"
+          ? { ...message, status: "error", activeActivityId: undefined, error: "Claude 进程已经结束，但没有返回结果。", ...finishResponse(message) }
+          : message);
+      }
+    }
+    for (const run of runs) {
+      if (processRunIds.current.has(run.conversationId)) continue;
+      // 进程还在跑但界面丢了记录：先把对话标成忙，绝不再开第二个进程。
+      processRunIds.current.set(run.conversationId, run.runId);
+      setActiveRuns((current) => ({ ...current, [run.conversationId]: run.runId }));
+    }
+  }, [updateResponse]);
+
+  useEffect(() => {
+    if (!storageReady) return;
+    void reconcileActiveRuns();
+    const onFocus = () => { void reconcileActiveRuns(); };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [reconcileActiveRuns, storageReady]);
 
   const reorderPromptQueue = (sourceId: string, targetId: string, position: ReorderPosition) => {
     if (!activeConversation) return;
@@ -2040,6 +2244,8 @@ export default function App() {
         processRunId: "",
         responseId: pendingPermission.responseId,
         appendToResponse: false,
+        started: true,
+        registeredAt: Date.now(),
         completed: true,
         successful: false,
         receivedText: false,
@@ -2070,6 +2276,8 @@ export default function App() {
       processRunId: runId,
       responseId: pendingPermission.responseId,
       appendToResponse: true,
+      started: true,
+      registeredAt: Date.now(),
       completed: false,
       successful: false,
       receivedText: false,
@@ -2086,9 +2294,11 @@ export default function App() {
     }));
     runMeta.current.set(runId, meta);
     setActiveRuns((current) => ({ ...current, [conversation.id]: runId }));
+    processRunIds.current.set(conversation.id, runId);
 
     const request: RunRequest = {
       runId,
+      conversationId: conversation.id,
       prompt: `用户已授权你使用 ${names.join("、")}。请继续完成刚才因权限不足而中断的请求，不要再次要求用户授权。`,
       cwd: project.workspace,
       sessionId: pendingPermission.sessionId ?? conversation.sessionId,
@@ -2097,20 +2307,22 @@ export default function App() {
       allowedTools,
       permissionMode: conversation.permissionMode,
     };
-    try {
-      await window.claudeDesk.startRun(request);
-    } catch (error) {
-      updateResponse(meta, (message) => ({
-        ...message,
-        status: "error",
-        error: error instanceof Error ? error.message : "授权后继续运行失败",
-      }));
+    const failContinue = (detail: string) => {
+      updateResponse(meta, (message) => ({ ...message, status: "error", error: detail, ...finishResponse(message) }));
       setActiveRuns((current) => {
         const next = { ...current };
         if (next[conversation.id] === runId) delete next[conversation.id];
         return next;
       });
       runMeta.current.delete(runId);
+      if (processRunIds.current.get(conversation.id) === runId) processRunIds.current.delete(conversation.id);
+    };
+    try {
+      const started = await window.claudeDesk.startRun(request);
+      // 授权后继续要开新进程，这个对话里还有进程没退出时绝不能再开一个。
+      if (!started.started) failContinue("上一个 Claude 进程还没结束，请先停止它再继续。");
+    } catch (error) {
+      failContinue(error instanceof Error ? error.message : "授权后继续运行失败");
     }
   };
 
@@ -2156,21 +2368,23 @@ export default function App() {
     const processRunId = processRunIds.current.get(activeConversation.id) ?? activeRunId;
     if (!processRunId) return;
     const metas = [...runMeta.current.values()].filter((item) => item.conversationId === activeConversation.id && !item.completed);
-    if (metas.length > 0) {
-      for (const meta of metas) meta.completed = true;
-      updateResponse(metas[0], (message) => ({ ...message, status: "stopped", ...finishResponse(message) }));
+    // 每一轮都有自己的气泡，停止要把还没结束的轮次全部收尾，不能只收第一条。
+    const restore = metas.map((meta) => ({ meta, status: meta.started ? "running" as const : "queued" as const }));
+    for (const meta of metas) {
+      meta.completed = true;
+      updateResponse(meta, (message) => ({ ...message, status: "stopped", activeActivityId: undefined, ...finishResponse(message) }));
     }
+    const rollback = (detail: string) => {
+      for (const { meta, status } of restore) {
+        meta.completed = false;
+        updateResponse(meta, (message) => ({ ...message, status, responseDurationMs: undefined, error: detail }));
+      }
+    };
     try {
       const stopped = await window.claudeDesk.stopRun(processRunId);
-      if (!stopped && metas.length > 0) {
-        for (const meta of metas) meta.completed = false;
-        updateResponse(metas[0], (message) => ({ ...message, status: "running", responseDurationMs: undefined, error: "暂时无法停止 Claude CLI。" }));
-      }
+      if (!stopped && restore.length > 0) rollback("暂时无法停止 Claude CLI。");
     } catch (error) {
-      if (metas.length > 0) {
-        for (const meta of metas) meta.completed = false;
-        updateResponse(metas[0], (message) => ({ ...message, status: "running", responseDurationMs: undefined, error: error instanceof Error ? error.message : "停止失败" }));
-      }
+      if (restore.length > 0) rollback(error instanceof Error ? error.message : "停止失败");
     }
   };
 

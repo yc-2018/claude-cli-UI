@@ -637,6 +637,8 @@ button, select, textarea { -webkit-app-region: no-drag; }
 
 .message { display: flex; width: 100%; margin-bottom: 28px; }
 .context-compaction { display: grid; max-width: 760px; grid-template-columns: 26px minmax(0, 1fr); align-items: start; gap: 7px; margin: 0 auto 24px; padding: 10px 12px; border: 1px solid #dfdfd8; border-radius: 7px; background: #f7f7f3; color: #5d5d57; }
+/* 卡片跟在触发压缩的那条消息后面，可折叠工具行让上一条消息的间距变小，这里补回来。 */
+.message + .context-compaction { margin-top: 16px; }
 .context-compaction.running { border-color: #d8d6c6; background: #faf9ef; }
 .context-compaction.error { border-color: #e2c6c1; background: #fbf2f1; color: #8d4d46; }
 .context-compaction-icon { display: grid; width: 24px; height: 24px; place-items: center; border-radius: 50%; background: #ecece6; color: #6d6d65; }
@@ -742,6 +744,8 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .markdown th { background: #f1f1ee; }
 
 .thinking { display: flex; align-items: center; gap: 8px; height: 28px; color: #85857e; font-size: 12.5px; }
+.queued-hint { display: flex; align-items: center; gap: 8px; height: 28px; color: #98988f; font-size: 12.5px; }
+.queued-hint::before { display: inline-block; width: 7px; height: 7px; border: 1.5px solid #c9c9c1; border-radius: 50%; content: ""; }
 .spinner, .mini-spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid #d1d1cb; border-top-color: var(--accent); border-radius: 50%; animation: spin .85s linear infinite; }
 .mini-spinner { width: 12px; height: 12px; border-width: 1.5px; }
 @keyframes spin { to { transform: rotate(360deg); } }

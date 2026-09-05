@@ -72,7 +72,7 @@ await page.evaluate((workspace) => {
       permissionMode: "acceptEdits",
       slashCommands: ["/story", "/compact"],
       contextUsage: { usedTokens: 42000, contextWindow: 200000, usedPercentage: 21, remainingPercentage: 79 },
-      contextCompactions: [{ id: "visual-compact", trigger: "auto", status: "done", preTokens: 180000, postTokens: 42000, summary: "保留了项目目标和关键决策。" }],
+      contextCompactions: [{ id: "visual-compact", trigger: "auto", status: "done", preTokens: 180000, postTokens: 42000, summary: "保留了项目目标和关键决策。", anchorMessageId: "a1" }],
       messages: [
         { id: "u1", role: "user", content: "检查登录流程，找出刷新后会退出的问题并修复。", createdAt: now - 2000 },
         {
@@ -151,6 +151,10 @@ await page.waitForSelector(".composer");
 if (!(await page.locator(".context-status").textContent())?.includes("上下文")) throw new Error("context usage status was not visible in the desktop viewport");
 if (await page.locator('[aria-label="压缩上下文"]').count() !== 1) throw new Error("context compact button was not visible in the desktop viewport");
 if (await page.locator(".context-compaction").count() !== 1) throw new Error("compact history card was not visible in the desktop viewport");
+// 压缩卡片必须跟在触发它的那条消息后面，长对话里才能看出上下文是在哪一步被压缩的。
+if (!(await page.locator(".context-compaction").evaluate((card) => card.previousElementSibling?.classList.contains("message") ?? false))) {
+  throw new Error("compact history card was not anchored after the message that triggered it");
+}
 if (!(await page.locator(".sidebar-version").textContent())?.startsWith("claude-cli-UI v")) throw new Error("UI version was not shown in the sidebar footer");
 if (await page.locator('[aria-label="已置顶项目"]').count() !== 1 || await page.locator('[aria-label="已置顶会话"]').count() !== 1) {
   throw new Error("pinned project/conversation indicators were not rendered");

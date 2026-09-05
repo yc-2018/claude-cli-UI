@@ -129,7 +129,7 @@ export interface ChatMessage {
   responseStartedAt?: number;
   responseDurationMs?: number;
   createdAt: number;
-  status?: "running" | "done" | "error" | "stopped";
+  status?: "queued" | "running" | "done" | "error" | "stopped";
   activities?: Activity[];
   timeline?: ResponseTimelineItem[];
   activeActivityId?: string;
@@ -160,6 +160,8 @@ export interface ContextCompaction {
   durationMs?: number;
   summary?: string;
   error?: string;
+  /** 压缩发生时对话里的最后一条消息，用于把提示卡片渲染在正确的位置。 */
+  anchorMessageId?: string;
 }
 
 export interface Conversation {
@@ -232,6 +234,7 @@ export interface ModelConfig {
 
 export interface RunRequest {
   runId: string;
+  conversationId: string;
   prompt: string;
   cwd: string;
   sessionId?: string;
@@ -241,6 +244,22 @@ export interface RunRequest {
   allowedTools?: string[];
   permissionMode: PermissionMode;
   attachments?: Attachment[];
+}
+
+export interface StartRunResult {
+  started: boolean;
+  /** 该对话已经有一个正在运行的 Claude 进程，调用方需要改为排队。 */
+  busy?: boolean;
+  runId?: string;
+}
+
+export interface ActiveRunStatus {
+  runId: string;
+  conversationId: string;
+  currentTurnRunId: string;
+  turnRunIds: string[];
+  startedAt: number;
+  stopping: boolean;
 }
 
 export interface AppendRunRequest {

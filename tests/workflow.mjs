@@ -196,6 +196,17 @@ const refreshProjectSessions = async (page) => {
   await projectRow.locator('[title="刷新 Claude CLI 会话"]').evaluate((button) => button.click());
 };
 
+/**
+ * 拖动手柄平时是 pointer-events: none，只在行 hover 或 focus-within 时才可交互。
+ * 先聚焦手柄，这样即使上一步的重排把行移到了鼠标之外，拖拽也不会被父行拦住。
+ */
+const reorderDrag = async (row, handleSelector, target, targetPosition) => {
+  const handle = row.locator(handleSelector);
+  await row.hover();
+  await handle.evaluate((element) => element.focus());
+  await handle.dragTo(target, { targetPosition });
+};
+
 let electronApp;
 try {
   electronApp = await launch();
@@ -343,12 +354,24 @@ try {
       timestamp: new Date(Date.now() + 10).toISOString(),
       cwd: root,
       sessionId: importedSessionId,
-      message: { id: "refreshed-history-response", role: "assistant", model: "ThirdParty-B", content: [{ type: "text", text: "刷新后无需重启即可看到。" }] },
+      message: {
+        id: "refreshed-history-response",
+        role: "assistant",
+        model: "ThirdParty-B",
+        content: [{ type: "text", text: "刷新后无需重启即可看到。" }],
+        // 单次请求的真实占用：900 + 1100 + 28000 = 30000，也就是 200k 窗口的 15%。
+        usage: { input_tokens: 900, cache_creation_input_tokens: 1_100, cache_read_input_tokens: 28_000, output_tokens: 700 },
+      },
     },
   ].map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
   await refreshProjectSessions(page);
   await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((item) => item.textContent === "从 CLI 刷新进来的新消息"));
   if (!(await page.locator(".markdown").last().textContent())?.includes("无需重启")) throw new Error("manual project refresh did not reload CLI responses");
+  await page.waitForFunction(() => document.querySelector(".context-status-text")?.textContent?.includes("上下文 15%"));
+  const refreshedContextStatus = await page.locator(".context-status").textContent();
+  if (refreshedContextStatus?.includes("5.0M") || refreshedContextStatus?.includes("8.0M")) {
+    throw new Error(`cumulative billing tokens leaked into the context usage indicator: ${refreshedContextStatus}`);
+  }
   await page.waitForTimeout(450);
   const persistedImport = await page.evaluate(() => JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0]?.conversations?.find((conversation) => conversation.source === "claude"));
   if (!persistedImport || persistedImport.messages.length !== 0) throw new Error("imported CLI history was duplicated into local storage");
@@ -485,6 +508,13 @@ try {
     return responses.item(responses.length - 1)?.textContent?.includes("流式输出稳定");
   });
   if (!(await page.locator(".context-status").textContent())?.includes("上下文")) throw new Error("context usage status was not shown");
+  // 占用量只能来自单次请求的 input + cache_creation + cache_read（20k/200k = 10%），
+  // result.usage 与 modelUsage.inputTokens 是累加值，被误用就会显示成 5M。
+  await page.waitForFunction(() => document.querySelector(".context-status-text")?.textContent?.includes("上下文 10%"));
+  const liveContextStatus = await page.locator(".context-status").textContent();
+  if (liveContextStatus?.includes("M") || liveContextStatus?.includes("100%")) {
+    throw new Error(`cumulative token totals were shown as context usage: ${liveContextStatus}`);
+  }
   const compactButton = page.locator('[aria-label="压缩上下文"]');
   if (await compactButton.isDisabled()) throw new Error("context compact button was unexpectedly disabled");
   await compactButton.click();
@@ -492,6 +522,19 @@ try {
   if (!(await page.locator(".context-compaction.done").last().textContent())?.includes("120,000")) throw new Error("compact token reduction was not shown");
   await page.locator(".context-compaction.done summary").last().click();
   if (!(await page.locator(".context-compaction-summary").last().textContent())?.includes("已保留项目目标")) throw new Error("compact summary was not displayed");
+  // 压缩卡片必须紧跟在触发它的那条消息后面，否则长对话里根本看不到上下文正在被压缩。
+  const compactionPlacement = await page.evaluate(() => {
+    const nodes = [...(document.querySelector(".conversation")?.children ?? [])];
+    const cardIndex = nodes.findIndex((node) => node.classList.contains("context-compaction"));
+    return {
+      cardIndex,
+      lastIndex: nodes.length - 1,
+      previousIsMessage: nodes[cardIndex - 1]?.classList.contains("message") ?? false,
+    };
+  });
+  if (compactionPlacement.cardIndex <= 0 || !compactionPlacement.previousIsMessage || compactionPlacement.cardIndex !== compactionPlacement.lastIndex) {
+    throw new Error(`context compaction card was not anchored after the message that triggered it: ${JSON.stringify(compactionPlacement)}`);
+  }
   await page.waitForTimeout(500);
   const normalizedSession = await readFile(resolve(cliSessions, "22222222-2222-4222-8222-222222222222.jsonl"), "utf8");
   if (normalizedSession.includes('"entrypoint":"sdk-cli"') || normalizedSession.includes('"promptSource":"sdk"')) {
@@ -1011,6 +1054,21 @@ try {
     throw new Error("bash detail did not show the complete command and output");
   }
 
+  await page.locator(".composer textarea").fill("子代理测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForSelector('.message.assistant[data-status="running"]');
+  // 子代理的 end_turn 与 result 先到，主轮次必须继续等真正的回答，不能两秒钟就显示“已完成”。
+  await page.waitForTimeout(1_500);
+  if (await page.locator('.message.assistant[data-status="running"]').count() !== 1) {
+    throw new Error("subagent end_turn or result finished the main turn while Claude was still working");
+  }
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done", undefined, { timeout: 15_000 });
+  if (!(await page.locator(".markdown").last().textContent())?.includes("子代理测试完成")) {
+    throw new Error("subagent turn lost the final answer");
+  }
+  // 子代理那条 95 万 token 的用量不属于主对话占用，真实占用是 30k/200k = 15%。
+  await page.waitForFunction(() => document.querySelector(".context-status-text")?.textContent?.includes("上下文 15%"));
+
   await page.locator(".composer textarea").fill("后台托盘测试");
   await page.locator(".composer textarea").press("Enter");
   await page.waitForSelector('.message.assistant[data-status="running"]');
@@ -1031,7 +1089,7 @@ try {
   await page.waitForSelector('.message.assistant[data-status="running"]');
   if (await page.locator(".composer textarea").isDisabled()) throw new Error("composer was disabled while Claude was replying");
   const guidedPrompts = ["引导当前任务", "第二次追击", "第三次追击"];
-  for (const prompt of guidedPrompts) {
+  for (const [guidedIndex, prompt] of guidedPrompts.entries()) {
     await page.locator(".composer textarea").fill(prompt);
     await page.locator(".composer textarea").press("Enter");
     const guidedPrompt = page.locator(".prompt-queue-item", { hasText: prompt });
@@ -1042,6 +1100,23 @@ try {
     await page.waitForFunction((guidedText) => ![...document.querySelectorAll(".prompt-queue-item")].some((element) => element.textContent?.includes(guidedText)), prompt);
     if (await page.locator(".user-bubble", { hasText: prompt }).count() !== 1) throw new Error(`guided prompt disappeared from the conversation: ${prompt}`);
     if (await page.locator('.message.assistant[data-status="running"]').count() !== 1) throw new Error("guiding created a second running response");
+    // 追加的信息必须落在对话末尾（当前位置），并且自带一个属于它自己的排队气泡，而不是被塞进上一条回答里。
+    const guidedTail = await page.locator(".conversation .message").evaluateAll((messages) => messages.slice(-2).map((message) => ({
+      role: message.classList.contains("user") ? "user" : "assistant",
+      status: message.getAttribute("data-status"),
+      text: message.textContent ?? "",
+    })));
+    if (
+      guidedTail.length !== 2 ||
+      guidedTail[0].role !== "user" ||
+      !guidedTail[0].text.includes(prompt) ||
+      guidedTail[1].role !== "assistant" ||
+      !["queued", "running"].includes(guidedTail[1].status ?? "")
+    ) throw new Error(`appended prompt did not render at the current position: ${JSON.stringify(guidedTail)}`);
+    if (guidedIndex === 0) {
+      if (await page.locator(".message.assistant .queued-hint").count() < 1) throw new Error("appended turn did not show that it is waiting in line");
+      await page.screenshot({ path: resolve(artifacts, "workflow-queued-turn.png") });
+    }
   }
   const runningModelTrigger = page.locator(".model-select .composer-select-trigger");
   if (await runningModelTrigger.isDisabled()) throw new Error("model picker was disabled while Claude was replying");
@@ -1095,24 +1170,33 @@ try {
     [...document.querySelectorAll(".prompt-queue-content strong")].map((element) => element.textContent).join(",") ===
     "队列第三条,队列第二条已编辑"
   ));
-  await page.waitForFunction(() => document.querySelectorAll('.message.assistant[data-status="running"]').length === 0);
-  const guidedResponse = page.locator(".message.assistant").filter({ hasText: "引导当前任务" }).filter({ hasText: "第二次追击" }).filter({ hasText: "第三次追击" });
-  if (await guidedResponse.count() !== 1) throw new Error("guided prompts did not continue in the current response");
+  // 等三次追加各自的回答都收尾，再核对顺序；队列里的提示词会另起新一轮，不能拿“没有运行中”当收尾信号。
+  await page.waitForFunction(() => [...document.querySelectorAll(".message.assistant")].some((message) => (
+    message.getAttribute("data-status") === "done" && (message.textContent ?? "").includes("测试通过：第三次追击")
+  )), undefined, { timeout: 30_000 });
+  // 每一次追加都有自己的一问一答，回答不能被合并进上一条气泡，顺序也必须是发出的顺序。
   const guidedTurnOrder = await page.locator(".conversation .message").evaluateAll((messages) => messages.map((message) => ({
     role: message.classList.contains("user") ? "user" : "assistant",
+    status: message.getAttribute("data-status"),
     text: message.textContent ?? "",
   })).filter((message) => ["慢任务", "引导当前任务", "第二次追击", "第三次追击"].some((text) => message.text.includes(text))));
+  const guidedExpected = [
+    { role: "user", text: "慢任务" },
+    { role: "assistant", text: "慢任务阶段完成" },
+    { role: "user", text: "引导当前任务" },
+    { role: "assistant", text: "测试通过：引导当前任务" },
+    { role: "user", text: "第二次追击" },
+    { role: "assistant", text: "测试通过：第二次追击" },
+    { role: "user", text: "第三次追击" },
+    { role: "assistant", text: "测试通过：第三次追击" },
+  ];
   if (
-    guidedTurnOrder.length !== 5 ||
-    guidedTurnOrder[0].role !== "user" ||
-    guidedTurnOrder[1].role !== "user" ||
-    guidedTurnOrder[2].role !== "user" ||
-    guidedTurnOrder[3].role !== "user" ||
-    guidedTurnOrder[4].role !== "assistant" ||
-    !guidedTurnOrder[4].text.includes("慢任务阶段完成") ||
-    !guidedTurnOrder[4].text.includes("引导当前任务") ||
-    !guidedTurnOrder[4].text.includes("第二次追击") ||
-    !guidedTurnOrder[4].text.includes("第三次追击")
+    guidedTurnOrder.length !== guidedExpected.length ||
+    guidedExpected.some(({ role, text }, index) => (
+      guidedTurnOrder[index].role !== role ||
+      !guidedTurnOrder[index].text.includes(text) ||
+      (role === "assistant" && guidedTurnOrder[index].status !== "done")
+    ))
   ) throw new Error(`guided turn rendered in the wrong order: ${JSON.stringify(guidedTurnOrder)}`);
   await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((element) => element.textContent === "队列第三条"));
   await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((element) => element.textContent === "队列第二条已编辑"));
@@ -1375,10 +1459,7 @@ try {
   const projectA = page.locator('[data-project-id="order-project-a"]');
   const projectB = page.locator('[data-project-id="order-project-b"]');
   const projectC = page.locator('[data-project-id="order-project-c"]');
-  await projectC.locator(".project-row").hover();
-  await projectC.locator(".project-drag-handle").dragTo(projectA.locator(".project-row"), {
-    targetPosition: { x: 24, y: 2 },
-  });
+  await reorderDrag(projectC, ".project-drag-handle", projectA.locator(".project-row"), { x: 24, y: 2 });
   await page.waitForFunction(() => (
     [...document.querySelectorAll(".project-group")].map((element) => element.getAttribute("data-project-id")).join(",") ===
     "order-project-c,order-project-a,order-project-b"
@@ -1392,28 +1473,19 @@ try {
     document.querySelector('[data-project-id="order-project-b"]')?.getAttribute("data-pinned") === "true"
   ));
 
-  await projectA.locator(".project-row").hover();
-  await projectA.locator(".project-drag-handle").dragTo(projectB.locator(".project-row"), {
-    targetPosition: { x: 24, y: 2 },
-  });
+  await reorderDrag(projectA, ".project-drag-handle", projectB.locator(".project-row"), { x: 24, y: 2 });
   await page.waitForFunction(() => (
     [...document.querySelectorAll(".project-group")].map((element) => element.getAttribute("data-project-id")).join(",") ===
       "order-project-a,order-project-b,order-project-c" &&
     document.querySelector('[data-project-id="order-project-a"]')?.getAttribute("data-pinned") === "true"
   ));
-  await projectA.locator(".project-row").hover();
-  await projectA.locator(".project-drag-handle").dragTo(projectC.locator(".project-row"), {
-    targetPosition: { x: 24, y: 30 },
-  });
+  await reorderDrag(projectA, ".project-drag-handle", projectC.locator(".project-row"), { x: 24, y: 30 });
   await page.waitForFunction(() => (
     [...document.querySelectorAll(".project-group")].map((element) => element.getAttribute("data-project-id")).join(",") ===
       "order-project-b,order-project-c,order-project-a" &&
     document.querySelector('[data-project-id="order-project-a"]')?.getAttribute("data-pinned") === "false"
   ));
-  await projectA.locator(".project-row").hover();
-  await projectA.locator(".project-drag-handle").dragTo(page.locator(".sidebar-section-label"), {
-    targetPosition: { x: 24, y: 2 },
-  });
+  await reorderDrag(projectA, ".project-drag-handle", page.locator(".sidebar-section-label"), { x: 24, y: 2 });
   await page.waitForFunction(() => (
     [...document.querySelectorAll(".project-group")].map((element) => element.getAttribute("data-project-id")).join(",") ===
       "order-project-a,order-project-b,order-project-c" &&
@@ -1423,10 +1495,7 @@ try {
   const conversationA = projectA.locator('[data-conversation-id="order-conversation-a"]');
   const conversationB = projectA.locator('[data-conversation-id="order-conversation-b"]');
   const conversationC = projectA.locator('[data-conversation-id="order-conversation-c"]');
-  await conversationC.hover();
-  await conversationC.locator(".task-drag-handle").dragTo(conversationA, {
-    targetPosition: { x: 24, y: 2 },
-  });
+  await reorderDrag(conversationC, ".task-drag-handle", conversationA, { x: 24, y: 2 });
   await page.waitForFunction(() => (
     [...document.querySelectorAll('[data-project-id="order-project-a"] .task-row')]
       .map((element) => element.getAttribute("data-conversation-id")).join(",") ===
@@ -1442,20 +1511,14 @@ try {
     document.querySelector('[data-conversation-id="order-conversation-b"]')?.getAttribute("data-pinned") === "true"
   ));
 
-  await conversationA.hover();
-  await conversationA.locator(".task-drag-handle").dragTo(conversationB, {
-    targetPosition: { x: 24, y: 2 },
-  });
+  await reorderDrag(conversationA, ".task-drag-handle", conversationB, { x: 24, y: 2 });
   await page.waitForFunction(() => (
     [...document.querySelectorAll('[data-project-id="order-project-a"] .task-row')]
       .map((element) => element.getAttribute("data-conversation-id")).join(",") ===
       "order-conversation-a,order-conversation-b,order-conversation-c" &&
     document.querySelector('[data-conversation-id="order-conversation-a"]')?.getAttribute("data-pinned") === "true"
   ));
-  await conversationA.hover();
-  await conversationA.locator(".task-drag-handle").dragTo(conversationC, {
-    targetPosition: { x: 24, y: 32 },
-  });
+  await reorderDrag(conversationA, ".task-drag-handle", conversationC, { x: 24, y: 32 });
   await page.waitForFunction(() => (
     [...document.querySelectorAll('[data-project-id="order-project-a"] .task-row')]
       .map((element) => element.getAttribute("data-conversation-id")).join(",") ===

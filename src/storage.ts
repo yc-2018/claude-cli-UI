@@ -94,9 +94,10 @@ function normalizeMessage(value: unknown): ChatMessage | null {
   const message = value as Partial<ChatMessage>;
   const legacyMessage = value as Record<string, unknown>;
   if (typeof message.id !== "string" || (message.role !== "user" && message.role !== "assistant")) return null;
-  const validStatuses = new Set(["running", "done", "error", "stopped"]);
+  const validStatuses = new Set(["queued", "running", "done", "error", "stopped"]);
   const status = message.status && validStatuses.has(message.status) ? message.status : undefined;
-  const wasInterrupted = status === "running";
+  // 上次退出时还在跑（或还在排队）的回复不可能自己继续，恢复成已中断。
+  const wasInterrupted = status === "running" || status === "queued";
   const activities = Array.isArray(message.activities)
     ? message.activities.map(normalizeActivity).filter((activity): activity is Activity => activity !== null)
     : [];
@@ -197,11 +198,19 @@ function normalizeConversation(value: unknown): Conversation | null {
 function normalizeContextUsage(value: unknown): ContextUsage | undefined {
   if (!value || typeof value !== "object") return undefined;
   const item = value as Partial<ContextUsage>;
+  const contextWindow = typeof item.contextWindow === "number" && Number.isFinite(item.contextWindow) && item.contextWindow > 0
+    ? item.contextWindow
+    : undefined;
+  const rawUsedTokens = typeof item.usedTokens === "number" && Number.isFinite(item.usedTokens) ? Math.max(0, item.usedTokens) : undefined;
+  // 旧版本可能把整轮累加值当成占用量存下来了，超过窗口的读数直接丢弃。
+  const usedTokens = rawUsedTokens !== undefined && (contextWindow === undefined || rawUsedTokens <= contextWindow)
+    ? rawUsedTokens
+    : undefined;
   const usage: ContextUsage = {
-    usedTokens: typeof item.usedTokens === "number" && Number.isFinite(item.usedTokens) ? Math.max(0, item.usedTokens) : undefined,
-    contextWindow: typeof item.contextWindow === "number" && Number.isFinite(item.contextWindow) ? Math.max(0, item.contextWindow) : undefined,
-    usedPercentage: typeof item.usedPercentage === "number" && Number.isFinite(item.usedPercentage) ? Math.max(0, item.usedPercentage) : undefined,
-    remainingPercentage: typeof item.remainingPercentage === "number" && Number.isFinite(item.remainingPercentage) ? Math.max(0, item.remainingPercentage) : undefined,
+    usedTokens,
+    contextWindow,
+    usedPercentage: typeof item.usedPercentage === "number" && Number.isFinite(item.usedPercentage) ? Math.min(100, Math.max(0, item.usedPercentage)) : undefined,
+    remainingPercentage: typeof item.remainingPercentage === "number" && Number.isFinite(item.remainingPercentage) ? Math.min(100, Math.max(0, item.remainingPercentage)) : undefined,
   };
   return Object.values(usage).some((entry) => entry !== undefined) ? usage : undefined;
 }
@@ -223,6 +232,7 @@ function normalizeContextCompactions(value: unknown): ContextCompaction[] {
       durationMs: typeof item.durationMs === "number" ? item.durationMs : undefined,
       summary: typeof item.summary === "string" ? item.summary.slice(0, 200_000) : undefined,
       error: typeof item.error === "string" ? item.error.slice(0, 4_000) : undefined,
+      anchorMessageId: typeof item.anchorMessageId === "string" ? item.anchorMessageId : undefined,
     }];
   }).slice(-20);
 }
