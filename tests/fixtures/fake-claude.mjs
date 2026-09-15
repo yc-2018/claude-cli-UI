@@ -10,6 +10,9 @@ if (args.includes("--version")) {
 
 process.stdin.setEncoding("utf8");
 let slowTaskActive = false;
+// 真实 CLI 在工具调用循环中被追加提示时，会把它并进当前这一轮，不再单独回答。
+// 这个开关用来复刻那种“折叠”行为：注入的提示直接被吞掉，一个 result 都不会多发。
+let foldAppendedActive = false;
 const deferredInputs = [];
 const pendingControlResponses = new Map();
 const processPrompt = (input) => {
@@ -33,6 +36,7 @@ const processPrompt = (input) => {
       return;
     }
   }
+  if (foldAppendedActive) return;
   if (slowTaskActive) {
     deferredInputs.push(input);
     return;
@@ -170,6 +174,20 @@ const processPrompt = (input) => {
       slowTaskActive = false;
       for (const deferredInput of deferredInputs.splice(0)) processPrompt(deferredInput);
     }, 8_000);
+    return;
+  }
+
+  if (prompt.includes("折叠追加测试")) {
+    // 复刻真实 CLI 的“折叠”行为：这一轮进行中被追加的提示会被并进本轮，
+    // 只有这一轮自己的 result，追加的那一轮永远不会有任何输出。
+    foldAppendedActive = true;
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    setTimeout(() => {
+      const response = "折叠追加测试：第一轮已经把追加的提示一起回答了。";
+      send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: response }] }, session_id: sessionId });
+      send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
+      foldAppendedActive = false;
+    }, 3_000);
     return;
   }
 

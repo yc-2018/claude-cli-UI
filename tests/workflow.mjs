@@ -1310,6 +1310,35 @@ try {
   if (thirdIndex < 0 || editedSecondIndex !== thirdIndex + 1 || queuedUserMessages.includes("队列第一条")) {
     throw new Error(`queued prompts did not execute in the edited order: ${queuedUserMessages.join(" | ")}`);
   }
+  // 回归：CLI 在一轮进行中被追加提示时，可能把它并进当前这一轮而不再单独回答（真实 CLI 在工具
+  // 调用循环里就是这样）。此时追加轮次永远等不到属于自己的输出，过去会一直停在“排队中”，
+  // 主进程也因为还有未完成的轮次而不关 stdin，导致进程挂住、停止按钮永远不消失。
+  await page.locator(".composer textarea").fill("折叠追加测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForSelector('.message.assistant[data-status="running"]');
+  await page.locator(".composer textarea").fill("折叠追加的第二条");
+  await page.locator(".composer textarea").press("Enter");
+  const foldedPrompt = page.locator(".prompt-queue-item", { hasText: "折叠追加的第二条" });
+  await foldedPrompt.waitFor();
+  await foldedPrompt.locator(".guide-prompt").click();
+  await page.waitForFunction(() => document.querySelectorAll(".message.assistant .queued-hint").length === 1);
+  // 追加的轮次必须被明确收尾并说明原因，而不是一直挂在“排队中”。
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll(".message.assistant")].some((message) => (
+      message.getAttribute("data-status") === "error" &&
+      (message.textContent ?? "").includes("并进上一条回答")
+    ))
+  ), undefined, { timeout: 25_000 });
+  await page.waitForFunction(() => document.querySelectorAll(".message.assistant .queued-hint").length === 0);
+  // 收尾之后进程必须真的结束：停止按钮消失，没有轮次还停在运行中。
+  await page.waitForFunction(() => document.querySelectorAll(".send-button.stop").length === 0, undefined, { timeout: 25_000 });
+  if (await page.locator('.message.assistant[data-status="running"]').count() !== 0) {
+    throw new Error("folded appended turn left a response stuck in the running state");
+  }
+  if (!(await page.locator(".user-bubble", { hasText: "折叠追加的第二条" }).count())) {
+    throw new Error("folded appended prompt disappeared from the conversation");
+  }
+
   await inFolder(page, ".task-select", { hasText: "来自终端的历史对话" }).click();
   await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "来自终端的历史对话");
   await page.waitForTimeout(500);

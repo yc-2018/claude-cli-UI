@@ -163,6 +163,8 @@ interface ActiveRun {
   unfinishedTurnRunIds: Set<string>;
   pendingControlRequestIds: Set<string>;
   endTurnFallback?: ReturnType<typeof setTimeout>;
+  /** 切到追加轮次后等它第一条输出的兜底计时器，超时说明这条提示被并进了上一轮。 */
+  unansweredTurnFallback?: ReturnType<typeof setTimeout>;
   currentTurnHasOutput: boolean;
   /** 上一轮被 end_turn 兜底收尾后，只在这个时间点之前允许吞掉一条迟到的 result。 */
   staleResultDeadline: number;
@@ -192,6 +194,14 @@ const MAX_PROJECT_STORE_BYTES = 50 * 1024 * 1024;
 const END_TURN_FALLBACK_DELAY_MS = 1200;
 /** 兜底收尾后允许吞掉迟到 result 的时间窗，超过这个窗口的 result 一定属于新的一轮。 */
 const STALE_RESULT_CREDIT_MS = 1500;
+/**
+ * 一轮收尾后切到排队中的追加轮次，等它出现「这一轮真的开始了」信号的时长。
+ * CLI 有两种行为：把追加的提示排成独立的下一轮（会先发 system/init，实测约 13ms），
+ * 或者在工具调用循环中把它并进当前这一轮（那这一轮永远不会有任何信号）。
+ * 后一种情况下必须主动收尾，否则 stdin 不会关闭，CLI 进程会一直挂着等输入。
+ * 窗口取得比实测值宽得多：误杀一个正常轮次会同时丢掉提示和回答，代价远大于多等几秒。
+ */
+const APPENDED_TURN_SILENCE_MS = 6000;
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const LARGE_CONTEXT_WINDOW = 1_000_000;
 
@@ -1862,8 +1872,13 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     if (activeRun.endTurnFallback) clearTimeout(activeRun.endTurnFallback);
     activeRun.endTurnFallback = undefined;
   };
+  const clearUnansweredTurnFallback = () => {
+    if (activeRun.unansweredTurnFallback) clearTimeout(activeRun.unansweredTurnFallback);
+    activeRun.unansweredTurnFallback = undefined;
+  };
   const completeCurrentTurn = (data: Record<string, unknown>, completedFromEndTurn: boolean) => {
     clearEndTurnFallback();
+    clearUnansweredTurnFallback();
     const completedTurnRunId = activeRun.currentTurnRunId;
     if (!activeRun.unfinishedTurnRunIds.has(completedTurnRunId)) return;
     emit(owner, { runId: completedTurnRunId, type: "message", data });
@@ -1873,6 +1888,7 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
       activeRun.currentTurnRunId = nextTurnRunId;
       activeRun.currentTurnHasOutput = false;
       activeRun.staleResultDeadline = completedFromEndTurn ? Date.now() + STALE_RESULT_CREDIT_MS : 0;
+      scheduleUnansweredTurnFallback();
     } else {
       activeRun.staleResultDeadline = 0;
       activeRun.child.stdin.end();
@@ -1880,6 +1896,26 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     if (observedSessionId) {
       void normalizeClaudeDeskSession(request.cwd, observedSessionId, existingSessionPrefix).catch(() => undefined);
     }
+  };
+  const scheduleUnansweredTurnFallback = () => {
+    clearUnansweredTurnFallback();
+    const turnRunId = activeRun.currentTurnRunId;
+    activeRun.unansweredTurnFallback = setTimeout(() => {
+      activeRun.unansweredTurnFallback = undefined;
+      if (activeRun.currentTurnRunId !== turnRunId || !activeRun.unfinishedTurnRunIds.has(turnRunId)) return;
+      // 这一轮已经出过输出，说明 CLI 真的把它当独立轮次在跑，不能收尾。
+      if (activeRun.currentTurnHasOutput) return;
+      // 还有没回答的权限请求或提问，说明 CLI 在等用户，不是没打算回答这条。
+      if (activeRun.pendingControlRequestIds.size > 0) return;
+      completeCurrentTurn({
+        type: "result",
+        subtype: "error_appended_turn_unanswered",
+        is_error: true,
+        result: "这条追加的提示没有得到单独回答：Claude 已经把它并进上一条回答里了。",
+        session_id: observedSessionId,
+        completion_source: "appended_turn_unanswered",
+      }, false);
+    }, APPENDED_TURN_SILENCE_MS);
   };
   const scheduleEndTurnFallback = (data: Record<string, unknown>) => {
     // Claude CLI 2.1.x 偶尔在 end_turn 之后既不发 result 也不关 stdin，这里只做兜底：
@@ -1908,6 +1944,7 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
       parsed = JSON.parse(line);
     } catch {
       clearEndTurnFallback();
+      clearUnansweredTurnFallback();
       emit(owner, { runId: activeRun.currentTurnRunId, type: "raw", text: line });
       return;
     }
@@ -1924,6 +1961,9 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     if (record.type === "system" && Array.isArray(record.slash_commands)) {
       record.slash_command_descriptions = await slashDescriptionsPromise;
     }
+    // CLI 每开始新的一轮都会先发 system/init（实测在上一轮 result 之后约 13ms），
+    // 这是“这一轮真的被当成独立轮次在跑”最早、也最可靠的信号。被折叠的追加提示没有它。
+    if (record.type === "system" && record.subtype === "init") clearUnansweredTurnFallback();
     if (record.type === "control_request") {
       const requestId = record.request_id;
       if (typeof requestId === "string" && requestId.length > 0 && requestId.length <= 200) {
@@ -1946,6 +1986,7 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     if (record.type === "assistant" || record.type === "stream_event" || record.type === "user") {
       activeRun.currentTurnHasOutput = true;
       activeRun.staleResultDeadline = 0;
+      clearUnansweredTurnFallback();
     }
     emit(owner, { runId: activeRun.currentTurnRunId, type: "message", data: record });
     if (record.type === "assistant" && !sidechain) {
@@ -1969,12 +2010,14 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
 
   child.on("error", (error) => {
     clearEndTurnFallback();
+    clearUnansweredTurnFallback();
     activeRuns.delete(request.runId);
     for (const turnRunId of activeRun.unfinishedTurnRunIds) emit(owner, { runId: turnRunId, type: "error", message: error.message });
   });
 
   child.on("close", async (code) => {
     clearEndTurnFallback();
+    clearUnansweredTurnFallback();
     activeRuns.delete(request.runId);
     // 等最后几行输出处理完，否则 exit 事件会插到还没派发的消息前面。
     await lineQueue.catch(() => undefined);
