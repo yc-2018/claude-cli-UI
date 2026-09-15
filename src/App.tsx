@@ -87,10 +87,10 @@ interface CliCommandNotice {
   copied: boolean;
 }
 
-function finishResponse(message: ChatMessage, now = Date.now()): Pick<ChatMessage, "responseDurationMs" | "responseCompletedAt"> {
-  if (!message.responseStartedAt) return {};
+function finishResponse(message: ChatMessage, now = Date.now()): Pick<ChatMessage, "responseDurationMs" | "responseCompletedAt" | "retry"> {
+  if (!message.responseStartedAt) return { retry: undefined };
   // 耗时和完成时刻一起记：CLI 两个都会给（“for 1h 43m 18s · done 0:11”），只留耗时就看不出是几点结束的。
-  return { responseDurationMs: Math.max(0, now - message.responseStartedAt), responseCompletedAt: now };
+  return { responseDurationMs: Math.max(0, now - message.responseStartedAt), responseCompletedAt: now, retry: undefined };
 }
 
 function appendResponseContent(current: string | undefined, addition: string) {
@@ -1322,6 +1322,21 @@ export default function App() {
 
     if (event.type === "message" && event.data) {
       const data = event.data;
+      if (data.type === "system" && data.subtype === "api_retry" && typeof data.attempt === "number") {
+        const error = data.error && typeof data.error === "object" ? data.error as Record<string, unknown> : undefined;
+        updateResponse(meta, (message) => ({
+          ...message,
+          retry: {
+            attempt: data.attempt as number,
+            maxRetries: typeof data.max_retries === "number" ? data.max_retries : undefined,
+            delayMs: typeof data.retry_delay_ms === "number" ? data.retry_delay_ms : undefined,
+            status: typeof data.error_status === "number" ? data.error_status : undefined,
+            message: typeof error?.message === "string" ? shorten(error.message, 120) : undefined,
+            at: Date.now(),
+          },
+        }));
+        return;
+      }
       if (data.type === "system" && typeof data.session_id === "string") {
         const descriptions = data.slash_command_descriptions && typeof data.slash_command_descriptions === "object"
           ? data.slash_command_descriptions as Record<string, unknown>
@@ -1422,7 +1437,7 @@ export default function App() {
       if (blockStart?.type === "text" || blockStart?.type === "thinking") {
         flushPendingText(meta);
         if (blockStart.type === "text") meta.activeTextBlockId = makeId();
-        updateResponse(meta, (message) => ({ ...message, activeActivityId: undefined }));
+        updateResponse(meta, (message) => ({ ...message, activeActivityId: undefined, retry: undefined }));
       }
       if (blockStart?.type === "tool_use" && typeof blockStart.name === "string") {
         flushPendingText(meta);
@@ -1433,13 +1448,13 @@ export default function App() {
           summary: summarizeToolInput(blockStart.input),
           ...(detail ? { detail } : {}),
         };
-        updateResponse(meta, (message) => ({ ...upsertTimelineActivity(message, activity), activeActivityId: activity.id }));
+        updateResponse(meta, (message) => ({ ...upsertTimelineActivity(message, activity), activeActivityId: activity.id, retry: undefined }));
         meta.activeTextBlockId = undefined;
       }
 
       const delta = getTextDelta(data);
       if (delta) {
-        if (!meta.receivedText) updateResponse(meta, (message) => ({ ...message, activeActivityId: undefined }));
+        if (!meta.receivedText) updateResponse(meta, (message) => ({ ...message, activeActivityId: undefined, retry: undefined }));
         if (!meta.activeTextBlockId) meta.activeTextBlockId = makeId();
         meta.receivedText = true;
         meta.pendingText += delta;
@@ -1448,7 +1463,7 @@ export default function App() {
 
       const thinkingDelta = getThinkingDelta(data);
       if (thinkingDelta) {
-        if (!meta.receivedThinking) updateResponse(meta, (message) => ({ ...message, activeActivityId: undefined }));
+        if (!meta.receivedThinking) updateResponse(meta, (message) => ({ ...message, activeActivityId: undefined, retry: undefined }));
         if (meta.appendToResponse && !meta.receivedThinking) meta.pendingThinking += "\n\n";
         meta.receivedThinking = true;
         meta.pendingThinking += thinkingDelta;
@@ -1460,7 +1475,7 @@ export default function App() {
         const receivedText = meta.receivedText;
         const receivedThinking = meta.receivedThinking;
         updateResponse(meta, (message) => {
-          let next = message;
+          let next = message.retry ? { ...message, retry: undefined } : message;
           for (const block of getAssistantContent(data)) {
             if (block.type === "text" && typeof block.text === "string") {
               next = { ...next, activeActivityId: undefined };
@@ -2216,6 +2231,14 @@ export default function App() {
           updatedAt: Date.now(),
         }));
       }
+      // CLI 给的建议是「按这条命令 + 写进 settings.local.json」，与「本对话始终允许」的承诺不符：
+      // 换一条命令就会重新弹框，还会往项目里留下永久规则。改为整工具 + 仅本次会话。
+      const blanketPermissions = names.map((toolName) => ({
+        type: "addRules",
+        rules: [{ toolName }],
+        behavior: "allow",
+        destination: "session",
+      }));
       const response = decision === "deny"
         ? { runId: pendingPermission.runId, requestId: pendingPermission.requestId, behavior: "deny" as const, message: `用户拒绝使用 ${names.join("、")}` }
         : {
@@ -2223,9 +2246,7 @@ export default function App() {
           requestId: pendingPermission.requestId,
           behavior: "allow" as const,
           updatedInput: pendingPermission.input,
-          ...(decision === "conversation" && pendingPermission.permissionSuggestions?.length
-            ? { updatedPermissions: pendingPermission.permissionSuggestions }
-            : {}),
+          ...(decision === "conversation" ? { updatedPermissions: blanketPermissions } : {}),
         };
       try {
         const result = await window.claudeDesk.respondControl(response);

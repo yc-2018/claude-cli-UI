@@ -139,6 +139,17 @@ export interface ChatMessage {
   activeActivityId?: string;
   error?: string;
   attachments?: Attachment[];
+  /** CLI 正在重试这一轮的 API 请求：没有它界面只会一直停在「正在准备回答」。 */
+  retry?: ApiRetryState;
+}
+
+export interface ApiRetryState {
+  attempt: number;
+  maxRetries?: number;
+  delayMs?: number;
+  status?: number;
+  message?: string;
+  at: number;
 }
 
 export interface SlashCommand {

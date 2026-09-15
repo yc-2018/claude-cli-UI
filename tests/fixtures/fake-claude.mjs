@@ -227,6 +227,69 @@ const processPrompt = (input) => {
     return;
   }
 
+  if (prompt.includes("API重试测试")) {
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    // CLI 真实会发的重试事件：渲染层丢掉它，界面就只会一直停在「正在准备回答」。
+    send({
+      type: "system",
+      subtype: "api_retry",
+      attempt: 1,
+      max_retries: 10,
+      retry_delay_ms: 2000,
+      error_status: 429,
+      error: { message: "Overloaded" },
+      session_id: sessionId,
+    });
+    setTimeout(() => {
+      send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "重试之后回答成功。" }] }, session_id: sessionId });
+      send({ type: "result", subtype: "success", is_error: false, result: "重试之后回答成功。", session_id: sessionId });
+    }, 900);
+    return;
+  }
+
+  if (prompt.includes("直连权限测试")) {
+    const requestId = "control-direct-permission";
+    const firstInput = { command: "mkdir alpha" };
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    send({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "tool-ps-1", name: "PowerShell", input: firstInput }] }, session_id: sessionId });
+    send({
+      type: "control_request",
+      request_id: requestId,
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "PowerShell",
+        input: firstInput,
+        tool_use_id: "tool-ps-1",
+        // 真实 CLI 给的建议是「按这一条命令 + 写进磁盘」，UI 不能原样回显。
+        permission_suggestions: [{
+          type: "addRules",
+          rules: [{ toolName: "PowerShell", ruleContent: "mkdir alpha" }],
+          behavior: "allow",
+          destination: "localSettings",
+        }],
+      },
+      session_id: sessionId,
+    });
+    pendingControlResponses.set(requestId, ({ response }) => {
+      const granted = response?.response?.updatedPermissions ?? [];
+      const blanket = granted.find((entry) => entry?.destination === "session"
+        && Array.isArray(entry.rules)
+        && entry.rules.some((rule) => rule?.toolName === "PowerShell" && rule?.ruleContent === undefined));
+      if (!blanket) {
+        process.stderr.write(`expected a blanket session-scoped PowerShell rule, got ${JSON.stringify(granted)}`);
+        process.exitCode = 2;
+        return;
+      }
+      // 拿到整工具授权后，换一条命令就不该再问了。
+      const secondInput = { command: "mkdir beta" };
+      send({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "tool-ps-2", name: "PowerShell", input: secondInput }] }, session_id: sessionId });
+      send({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-ps-2", content: "beta" }] }, session_id: sessionId });
+      send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "两条命令都执行完了。" }] }, session_id: sessionId });
+      send({ type: "result", subtype: "success", is_error: false, result: "两条命令都执行完了。", session_id: sessionId });
+    });
+    return;
+  }
+
   if (prompt.includes("权限测试") && !allowedTools.includes("WebSearch")) {
     send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
     send({

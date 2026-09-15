@@ -5,14 +5,18 @@ import { resolve } from "node:path";
 const root = resolve(import.meta.dirname, "..");
 const artifacts = resolve(root, "artifacts");
 const profile = resolve(artifacts, `visual-profile-${Date.now()}`);
+// 必须指向空的隔离目录：否则会扫到开发者真实的 ~/.claude/projects，把真实会话并进被测项目。
+const claudeConfig = resolve(profile, "claude-config");
 const fakeCli = resolve(root, "tests", "fixtures", "fake-claude.mjs");
 await mkdir(artifacts, { recursive: true });
+await mkdir(resolve(claudeConfig, "projects"), { recursive: true });
 
 const electronApp = await electron.launch({
   args: [root],
   cwd: root,
   env: {
     ...process.env,
+    CLAUDE_CONFIG_DIR: claudeConfig,
     CLAUDE_DESK_USER_DATA_DIR: profile,
     CLAUDE_DESK_DISABLE_PROJECT_DISCOVERY: "1",
     CLAUDE_DESK_TEST_WORKSPACE: root,
@@ -156,9 +160,33 @@ if (!(await page.locator(".context-compaction").evaluate((card) => card.previous
   throw new Error("compact history card was not anchored after the message that triggered it");
 }
 if (!(await page.locator(".sidebar-version").textContent())?.startsWith("claude-cli-UI v")) throw new Error("UI version was not shown in the sidebar footer");
-if (await page.locator('[aria-label="已置顶项目"]').count() !== 1 || await page.locator('[aria-label="已置顶会话"]').count() !== 1) {
-  throw new Error("pinned project/conversation indicators were not rendered");
+// 置顶的项目整个搬进「置顶」段，它的置顶会话跟着走；同一个会话在「全部对话」里还会再出现一次。
+if (await page.locator('[data-section="pinned"] [aria-label="已置顶项目"]').count() !== 1 ||
+  await page.locator('[data-section="pinned"] [aria-label="已置顶会话"]').count() !== 1) {
+  throw new Error("pinned project/conversation indicators were not rendered in the pinned section");
 }
+const sidebarSections = await page.locator(".sidebar-section-label").evaluateAll((elements) => (
+  elements.map((element) => element.getAttribute("data-section-label")).join(",")
+));
+if (sidebarSections !== "pinned,all,projects") throw new Error(`sidebar sections were not laid out top-to-bottom: ${sidebarSections}`);
+const allConversationIds = await page.locator('[data-section="all"] .task-row').evaluateAll((elements) =>
+  elements.map((el) => el.getAttribute("data-conversation-id"))
+);
+if (!allConversationIds.includes("visual-conversation") || !allConversationIds.includes("visual-conversation-2")) {
+  throw new Error(`all-conversations section did not include the seeded test conversations (found: ${allConversationIds.join(",")})`);
+}
+if (await page.locator('[data-section="projects"] .project-group').count() !== 0) {
+  throw new Error("pinned project was still duplicated in the projects section");
+}
+// 树形前缀：非末行 ├─、末行 └─，对话一多才看得出层级。
+const treeBranches = await page.locator('[data-section="pinned"] .project-group[data-project-id="visual-project"] .project-conversations .tree-branch').evaluateAll((elements) => (
+  elements.map((element) => element.textContent).join(",")
+));
+if (treeBranches !== "├─,└─") throw new Error(`conversation rows did not render tree connectors: ${treeBranches}`);
+await page.locator('[data-section-label="all"]').click();
+await page.waitForFunction(() => document.querySelectorAll('[data-section="all"]').length === 0);
+await page.locator('[data-section-label="all"]').click();
+await page.waitForFunction(() => document.querySelectorAll('[data-section="all"] .task-row').length === 2);
 await page.screenshot({ path: resolve(artifacts, "conversation.png") });
 if (!(await page.locator(".response-duration").textContent())?.includes("本次回答耗时 · 8 秒")) throw new Error("completed response duration was not rendered");
 // 只存了开始时刻和耗时的旧数据也要补出完成时刻，长任务才知道是几点结束的。
@@ -219,7 +247,7 @@ if (permissionMenuLayout.left < 0 || permissionMenuLayout.top < 0 || permissionM
 await page.screenshot({ path: resolve(artifacts, "permission-picker.png") });
 await page.keyboard.press("Escape");
 
-const localDeleteRow = page.locator(".task-row", { hasText: "添加数据导出功能" });
+const localDeleteRow = page.locator(".project-conversations .task-row", { hasText: "添加数据导出功能" });
 await localDeleteRow.hover();
 const conversationActionLayout = await localDeleteRow.locator(".task-pin, .task-rename, .task-delete").evaluateAll((elements) => (
   elements
@@ -249,7 +277,7 @@ await page.locator(".delete-confirm-button.secondary").click();
 await page.waitForSelector(".delete-confirm-dialog", { state: "detached" });
 await page.waitForFunction(() => document.activeElement?.matches(".composer textarea"));
 
-const activeConversationBeforeCollapse = await page.locator(".task-row.active").getAttribute("data-conversation-id");
+const activeConversationBeforeCollapse = await page.locator(".project-conversations .task-row.active").getAttribute("data-conversation-id");
 await page.locator(".composer textarea").fill("折叠项目时保留的草稿");
 await page.locator(".project-toggle").click();
 await page.waitForSelector(".project-conversations", { state: "detached" });

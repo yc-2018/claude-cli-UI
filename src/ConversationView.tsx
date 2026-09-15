@@ -5,7 +5,25 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import type { Activity, ActivityDetail, ActivityDiffLine, Attachment, ChatMessage, ContextCompaction, ResponseTimelineItem } from "./types";
+import type { Activity, ActivityDetail, ActivityDiffLine, ApiRetryState, Attachment, ChatMessage, ContextCompaction, ResponseTimelineItem } from "./types";
+
+/** CLI 正在重试这一轮的 API 请求。不显示的话界面只会一直停在「正在准备回答」。 */
+function RetryNotice({ retry }: { retry: ApiRetryState }) {
+  const attempt = retry.maxRetries ? `第 ${retry.attempt}/${retry.maxRetries} 次` : `第 ${retry.attempt} 次`;
+  const delay = retry.delayMs !== undefined && retry.delayMs > 0
+    ? ` · 约 ${retry.delayMs >= 1000 ? `${Math.round(retry.delayMs / 100) / 10}s` : `${retry.delayMs}ms`} 后重试`
+    : "";
+  return (
+    <div className="retry-notice">
+      <span className="spinner" />
+      <span>
+        API 请求失败，正在重试（{attempt}）{delay}
+        {retry.status !== undefined ? ` · HTTP ${retry.status}` : ""}
+      </span>
+      {retry.message ? <small className="retry-reason">{retry.message}</small> : null}
+    </div>
+  );
+}
 
 function getToolIcon(name: string) {
   const normalized = name.toLowerCase();
@@ -311,7 +329,8 @@ function AssistantResponse({ message }: { message: ChatMessage }) {
           {message.content ? <div className="markdown"><MarkdownMessage content={message.content} /></div> : null}
         </>
       )}
-      {message.status === "running" && !message.content && !message.thinking && (message.activities?.length ?? 0) === 0
+      {message.status === "running" && message.retry ? <RetryNotice retry={message.retry} /> : null}
+      {message.status === "running" && !message.retry && !message.content && !message.thinking && (message.activities?.length ?? 0) === 0
         ? <div className="thinking"><span className="spinner" />Claude 正在准备回答</div>
         : null}
       {/* 排队中的轮次还没轮到自己，只提示位置，不显示计时也不显示转圈。 */}

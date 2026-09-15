@@ -204,8 +204,30 @@ const reorderDrag = async (row, handleSelector, target, targetPosition) => {
   const handle = row.locator(handleSelector);
   await row.hover();
   await handle.evaluate((element) => element.focus());
-  await handle.dragTo(target, { targetPosition });
+  // Playwright's dragTo doesn't work reliably with button[draggable], use manual events
+  await handle.evaluate((el, targetPos) => {
+    const dt = new DataTransfer();
+    el.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt }));
+  }, targetPosition);
+  await target.evaluate((el, targetPos) => {
+    const rect = el.getBoundingClientRect();
+    const clientX = rect.left + (targetPos?.x ?? rect.width / 2);
+    const clientY = rect.top + (targetPos?.y ?? rect.height / 2);
+    const dt = new DataTransfer();
+    el.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt, clientX, clientY }));
+    el.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt, clientX, clientY }));
+  }, targetPosition);
+  await handle.evaluate((el) => {
+    const dt = new DataTransfer();
+    el.dispatchEvent(new DragEvent('dragend', { bubbles: true, cancelable: true, dataTransfer: dt }));
+  });
 };
+
+/**
+ * 会话行在所属项目的文件夹里和「全部对话」段各渲染一次，断言默认只认文件夹里那一份，
+ * 否则 Playwright 严格模式会因为一个选择器命中两个元素而报歧义。
+ */
+const inFolder = (page, selector, options) => page.locator(`.project-conversations ${selector}`, options);
 
 let electronApp;
 try {
@@ -337,10 +359,10 @@ try {
   await page.waitForSelector(".composer");
   if (await page.locator(".project-group").count() !== 1) throw new Error("new project was not created");
   await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 2);
-  const importedRow = page.locator(".task-row", { hasText: "来自终端的历史对话" });
-  const localConversationId = await page.locator(".task-row.active").getAttribute("data-conversation-id");
+  const importedRow = inFolder(page, ".task-row", { hasText: "来自终端的历史对话" });
+  const localConversationId = await inFolder(page, ".task-row.active").getAttribute("data-conversation-id");
   if (!localConversationId) throw new Error("new local conversation was not active");
-  const localRow = page.locator(`[data-conversation-id="${localConversationId}"]`);
+  const localRow = inFolder(page, `[data-conversation-id="${localConversationId}"]`);
   const unsentDraft = "切换会话后仍应保留的未发送草稿";
   await page.locator(".composer textarea").fill(unsentDraft);
   if (!(await importedRow.textContent())?.includes("Claude CLI")) throw new Error("imported CLI session was not identified in the sidebar");
@@ -443,7 +465,7 @@ try {
     },
   ].map((entry) => JSON.stringify(entry)).join("\n"), "utf8");
   await refreshProjectSessions(page);
-  const hiddenRow = page.locator(".task-row", { hasText: "准备从 UI 移除的 CLI 会话" });
+  const hiddenRow = inFolder(page, ".task-row", { hasText: "准备从 UI 移除的 CLI 会话" });
   await hiddenRow.waitFor();
   await hiddenRow.hover();
   await hiddenRow.locator(".task-delete").click();
@@ -459,7 +481,7 @@ try {
   if (deletedSessionStillExists) throw new Error("deleted Claude CLI session remained at its original path");
   await refreshProjectSessions(page);
   if (await page.locator(".task-row", { hasText: "准备从 UI 移除的 CLI 会话" }).count()) throw new Error("deleted CLI session returned after refresh");
-  await page.locator(".task-select", { hasText: "新对话" }).click();
+  await inFolder(page, ".task-select", { hasText: "新对话" }).click();
 
   const workspaceOpenResult = await page.evaluate((workspace) => window.claudeDesk.openWorkspace(workspace), root);
   if (!workspaceOpenResult.opened) throw new Error(`valid workspace was not opened: ${workspaceOpenResult.error}`);
@@ -507,7 +529,7 @@ try {
   if (await page.locator(".project-name strong").textContent() !== "我的 Claude 项目") throw new Error("project custom name was not shown");
   if (await page.locator(".project-name small").textContent() !== workspaceDirectoryName) throw new Error("project real directory name was not shown");
 
-  await page.locator('.task-row.active .task-rename[title="重命名对话"]').evaluate((button) => button.click());
+  await inFolder(page, '.task-row.active .task-rename[title="重命名对话"]').evaluate((button) => button.click());
   await page.locator('input[aria-label="对话名称"]').fill("手动会话名");
   await page.locator('input[aria-label="对话名称"]').press("Enter");
   if (await page.locator(".task-heading h2").textContent() !== "手动会话名") throw new Error("conversation rename was not reflected in the header");
@@ -608,7 +630,7 @@ try {
   }
   await page.locator('[aria-label="CMD 命令已复制"]').click();
   await page.waitForSelector(".cli-command-popover", { state: "detached" });
-  await page.locator('.task-row.active .task-rename[title="重命名对话"]').evaluate((button) => button.click());
+  await inFolder(page, '.task-row.active .task-rename[title="重命名对话"]').evaluate((button) => button.click());
   await page.locator('input[aria-label="对话名称"]').fill("UI 同步会话名");
   await page.locator('input[aria-label="对话名称"]').press("Enter");
   await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "UI 同步会话名");
@@ -708,7 +730,7 @@ try {
     throw new Error("message branch reused source transcript UUIDs");
   }
   await refreshProjectSessions(page);
-  if (await page.locator(".task-row strong").filter({ hasText: /^CLI 外部改名 \(2\)$/ }).count() !== 1) {
+  if (await inFolder(page, ".task-row strong").filter({ hasText: /^CLI 外部改名 \(2\)$/ }).count() !== 1) {
     throw new Error("message branch disappeared after refreshing CLI sessions");
   }
   await page.locator(".composer textarea").fill("分支继续测试");
@@ -722,7 +744,7 @@ try {
     return project?.conversations?.find((conversation) => conversation.title === "CLI 外部改名 (2)")?.sessionId;
   });
   if (activeBranchSessionId !== branchSessionId) throw new Error("continuing a branch switched back to the source session");
-  await page.locator(".task-row strong").filter({ hasText: /^CLI 外部改名$/ }).click();
+  await inFolder(page, ".task-row strong").filter({ hasText: /^CLI 外部改名$/ }).click();
   await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "CLI 外部改名");
 
   await page.locator(".composer textarea").evaluate((textarea, payload) => {
@@ -991,6 +1013,31 @@ try {
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
   if (await page.locator(".permission-dialog").count()) throw new Error("persisted conversation permission prompted again");
 
+  // #1 API 重试：CLI 重试时渲染层必须显示重试状态而不是一直停在「正在准备回答」
+  await page.locator(".composer textarea").fill("API重试测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForSelector(".retry-notice");
+  const retryNoticeText = await page.locator(".retry-notice").textContent();
+  if (!retryNoticeText?.includes("第 1/10 次")) throw new Error(`retry notice did not show attempt count: ${retryNoticeText}`);
+  if (await page.locator(".thinking").count() > 0) throw new Error("preparing-answer placeholder shown alongside retry notice");
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  if (await page.locator(".retry-notice").count() > 0) throw new Error("retry notice was not cleared after response completed");
+
+  // #4 直连权限：「本对话始终允许」必须发整工具 session 规则，不得原样回显按命令的 localSettings 建议
+  await page.locator(".composer textarea").fill("直连权限测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForSelector(".permission-dialog");
+  if (!(await page.locator(".permission-dialog").textContent())?.includes("PowerShell")) {
+    throw new Error("direct permission dialog did not identify the PowerShell tool");
+  }
+  await page.locator(".permission-allow-conversation").click();
+  await page.waitForSelector(".permission-dialog", { state: "detached" });
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  if (!(await page.locator(".message.assistant").last().textContent())?.includes("两条命令都执行完了")) {
+    throw new Error("direct permission test did not complete both commands (fake CLI may have rejected the rule shape)");
+  }
+  if (await page.locator(".permission-dialog").count()) throw new Error("blanket conversation permission re-prompted on second different command");
+
   await page.locator(".project-row").first().hover();
   await page.locator('.project-action[title="新建对话"]').click();
   await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 4);
@@ -998,9 +1045,9 @@ try {
 
   await page.locator(".composer textarea").fill("后台提醒测试 第二个对话");
   await page.locator(".composer textarea").press("Enter");
-  const backgroundConversationRow = page.locator(".task-row", { hasText: "后台提醒测试 第二个对话" });
+  const backgroundConversationRow = inFolder(page, ".task-row", { hasText: "后台提醒测试 第二个对话" });
   await backgroundConversationRow.locator(".conversation-running-icon").waitFor();
-  await page.locator(".task-row strong").filter({ hasText: /^CLI 外部改名$/ }).click();
+  await inFolder(page, ".task-row strong").filter({ hasText: /^CLI 外部改名$/ }).click();
   await page.waitForSelector(".completion-toast");
   if (!(await page.locator(".completion-toast").textContent())?.includes("后台提醒测试 第二个对话")) {
     throw new Error("background completion reminder did not identify the finished conversation");
@@ -1017,7 +1064,7 @@ try {
   await page.locator(".composer textarea").press("Enter");
   await page.waitForSelector(".conversation-intro");
   if (await page.locator(".message").count()) throw new Error("/clear did not clear only the active conversation");
-  await page.locator(".task-row strong").filter({ hasText: /^CLI 外部改名$/ }).click();
+  await inFolder(page, ".task-row strong").filter({ hasText: /^CLI 外部改名$/ }).click();
   await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "这是首次会话名称测试内容");
 
   await electronApp.evaluate(({ ipcMain }) => {
@@ -1263,7 +1310,7 @@ try {
   if (thirdIndex < 0 || editedSecondIndex !== thirdIndex + 1 || queuedUserMessages.includes("队列第一条")) {
     throw new Error(`queued prompts did not execute in the edited order: ${queuedUserMessages.join(" | ")}`);
   }
-  await page.locator(".task-select", { hasText: "来自终端的历史对话" }).click();
+  await inFolder(page, ".task-select", { hasText: "来自终端的历史对话" }).click();
   await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "来自终端的历史对话");
   await page.waitForTimeout(500);
   await page.screenshot({ path: resolve(artifacts, "workflow-complete.png") });
@@ -1338,14 +1385,14 @@ try {
   }
   if (await page.locator('.message.assistant[data-status="running"]').count()) throw new Error("running state survived restart");
   await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "来自终端的历史对话");
-  if (await page.locator(".task-row.active", { hasText: "来自终端的历史对话" }).count() !== 1) {
+  if (await inFolder(page, ".task-row.active", { hasText: "来自终端的历史对话" }).count() !== 1) {
     throw new Error("last active conversation was not restored after restart");
   }
-  await page.locator(".task-select", { hasText: "来自终端的历史对话" }).click();
+  await inFolder(page, ".task-select", { hasText: "来自终端的历史对话" }).click();
   await page.waitForFunction(() => document.querySelector(".user-bubble")?.textContent === "来自终端的历史对话");
   if (await page.locator(".markdown", { hasText: "恢复的回答" }).count() === 0) throw new Error("CLI session was not reloaded after restart");
 
-  const localConversationRow = page.locator(".task-row").filter({ has: page.getByText("CLI 外部改名", { exact: true }) });
+  const localConversationRow = inFolder(page, ".task-row").filter({ has: page.getByText("CLI 外部改名", { exact: true }) });
   await electronApp.evaluate(({ BrowserWindow }) => {
     const window = BrowserWindow.getAllWindows()[0];
     globalThis.__deleteFocusCalls = 0;
@@ -1384,7 +1431,7 @@ try {
   const deletedLocalSessionStillExists = await readFile(localSessionPath, "utf8").then(() => true, () => false);
   if (deletedLocalSessionStillExists) throw new Error("deleted UI-created session remained in Claude CLI history");
 
-  await page.locator(".task-row strong").filter({ hasText: /^CLI 外部改名 \(2\)$/ }).click();
+  await inFolder(page, ".task-row strong").filter({ hasText: /^CLI 外部改名 \(2\)$/ }).click();
   await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "CLI 外部改名 (2)");
   await page.waitForFunction(() => document.activeElement?.matches(".composer textarea"));
   await page.keyboard.type("删除后切换会话焦点测试");
@@ -1401,7 +1448,7 @@ try {
   if (await page.locator(".composer textarea").inputValue() !== "删除后新建会话焦点测试") {
     throw new Error("composer did not accept keyboard input after deleting and creating a conversation");
   }
-  await page.locator(".task-row.active .task-delete").evaluate((button) => button.click());
+  await inFolder(page, ".task-row.active .task-delete").evaluate((button) => button.click());
   await page.locator(".delete-confirm-button.danger").click();
   await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 5);
   await page.waitForSelector(".project-row.active");
@@ -1426,7 +1473,7 @@ try {
   page = await electronApp.firstWindow();
   watchErrors(page);
   await page.waitForSelector(".task-row.active");
-  if (await page.locator(".task-row.active").count() !== 1 || await page.locator(".composer").count() !== 1) {
+  if (await inFolder(page, ".task-row.active").count() !== 1 || await page.locator(".composer").count() !== 1) {
     throw new Error("missing saved project did not fall back to the first available conversation");
   }
 
@@ -1510,40 +1557,64 @@ try {
   watchErrors(page);
   await page.waitForFunction(() => document.querySelectorAll(".project-group").length === 3);
 
-  const projectA = page.locator('[data-project-id="order-project-a"]');
-  const projectB = page.locator('[data-project-id="order-project-b"]');
-  const projectC = page.locator('[data-project-id="order-project-c"]');
+  // 「全部对话」是按最近更新倒序的派生列表，不用先选项目就能看到全部会话。
+  const allSectionOrder = await page.locator('[data-section="all"] .task-row').evaluateAll((elements) => (
+    elements.map((element) => element.getAttribute("data-conversation-id")).join(",")
+  ));
+  if (allSectionOrder !== "order-conversation-b,order-conversation-c,order-conversation-a,order-conversation-d,order-conversation-e") {
+    throw new Error(`all-conversations section was not sorted by recency: ${allSectionOrder}`);
+  }
+  if (!(await page.locator('[data-section="pinned"] .task-list-empty').count())) {
+    throw new Error("pinned section did not show its empty hint before anything was pinned");
+  }
+
+  // data-project-id 现在同时挂在项目组和会话行上，选择器必须限定到 .project-group，否则 Playwright 严格模式会报歧义。
+  const projectA = page.locator('.project-group[data-project-id="order-project-a"]');
+  const projectB = page.locator('.project-group[data-project-id="order-project-b"]');
+  const projectC = page.locator('.project-group[data-project-id="order-project-c"]');
+  const pinnedSectionLabel = page.locator('[data-section-label="pinned"]');
+  const projectsSectionLabel = page.locator('[data-section-label="projects"]');
   await reorderDrag(projectC, ".project-drag-handle", projectA.locator(".project-row"), { x: 24, y: 2 });
   await page.waitForFunction(() => (
-    [...document.querySelectorAll(".project-group")].map((element) => element.getAttribute("data-project-id")).join(",") ===
+    [...document.querySelectorAll('[data-section="projects"] .project-group')]
+      .map((element) => element.getAttribute("data-project-id")).join(",") ===
     "order-project-c,order-project-a,order-project-b"
   ));
 
+  // 置顶项目整个搬进「置顶」段，并从「项目」段消失。
   await projectB.locator(".project-row").hover();
   await projectB.locator('[title="置顶项目"]').click();
   await page.waitForFunction(() => (
-    [...document.querySelectorAll(".project-group")].map((element) => element.getAttribute("data-project-id")).join(",") ===
-      "order-project-b,order-project-c,order-project-a" &&
-    document.querySelector('[data-project-id="order-project-b"]')?.getAttribute("data-pinned") === "true"
+    [...document.querySelectorAll('[data-section="pinned"] .project-group')]
+      .map((element) => element.getAttribute("data-project-id")).join(",") === "order-project-b" &&
+    [...document.querySelectorAll('[data-section="projects"] .project-group')]
+      .map((element) => element.getAttribute("data-project-id")).join(",") === "order-project-c,order-project-a" &&
+    document.querySelector('.project-group[data-project-id="order-project-b"]')?.getAttribute("data-pinned") === "true"
   ));
 
-  await reorderDrag(projectA, ".project-drag-handle", projectB.locator(".project-row"), { x: 24, y: 2 });
+  // 跨段排序已取消，改置顶/取消置顶一律靠拖到段标题完成。
+  await pinnedSectionLabel.scrollIntoViewIfNeeded();
+  await reorderDrag(projectA, ".project-drag-handle", pinnedSectionLabel, { x: 24, y: 2 });
   await page.waitForFunction(() => (
-    [...document.querySelectorAll(".project-group")].map((element) => element.getAttribute("data-project-id")).join(",") ===
-      "order-project-a,order-project-b,order-project-c" &&
-    document.querySelector('[data-project-id="order-project-a"]')?.getAttribute("data-pinned") === "true"
+    [...document.querySelectorAll('[data-section="pinned"] .project-group')]
+      .map((element) => element.getAttribute("data-project-id")).join(",") === "order-project-a,order-project-b" &&
+    [...document.querySelectorAll('[data-section="projects"] .project-group')]
+      .map((element) => element.getAttribute("data-project-id")).join(",") === "order-project-c" &&
+    document.querySelector('.project-group[data-project-id="order-project-a"]')?.getAttribute("data-pinned") === "true"
   ));
-  await reorderDrag(projectA, ".project-drag-handle", projectC.locator(".project-row"), { x: 24, y: 30 });
+  await reorderDrag(projectA, ".project-drag-handle", projectsSectionLabel, { x: 24, y: 2 });
   await page.waitForFunction(() => (
-    [...document.querySelectorAll(".project-group")].map((element) => element.getAttribute("data-project-id")).join(",") ===
-      "order-project-b,order-project-c,order-project-a" &&
-    document.querySelector('[data-project-id="order-project-a"]')?.getAttribute("data-pinned") === "false"
+    [...document.querySelectorAll('[data-section="pinned"] .project-group')]
+      .map((element) => element.getAttribute("data-project-id")).join(",") === "order-project-b" &&
+    [...document.querySelectorAll('[data-section="projects"] .project-group')]
+      .map((element) => element.getAttribute("data-project-id")).join(",") === "order-project-a,order-project-c" &&
+    document.querySelector('.project-group[data-project-id="order-project-a"]')?.getAttribute("data-pinned") === "false"
   ));
-  await reorderDrag(projectA, ".project-drag-handle", page.locator(".sidebar-section-label"), { x: 24, y: 2 });
+  await reorderDrag(projectA, ".project-drag-handle", pinnedSectionLabel, { x: 24, y: 2 });
   await page.waitForFunction(() => (
-    [...document.querySelectorAll(".project-group")].map((element) => element.getAttribute("data-project-id")).join(",") ===
-      "order-project-a,order-project-b,order-project-c" &&
-    document.querySelector('[data-project-id="order-project-a"]')?.getAttribute("data-pinned") === "true"
+    [...document.querySelectorAll('[data-section="pinned"] .project-group')]
+      .map((element) => element.getAttribute("data-project-id")).join(",") === "order-project-a,order-project-b" &&
+    document.querySelector('.project-group[data-project-id="order-project-a"]')?.getAttribute("data-pinned") === "true"
   ));
 
   const conversationA = projectA.locator('[data-conversation-id="order-conversation-a"]');
@@ -1551,7 +1622,7 @@ try {
   const conversationC = projectA.locator('[data-conversation-id="order-conversation-c"]');
   await reorderDrag(conversationC, ".task-drag-handle", conversationA, { x: 24, y: 2 });
   await page.waitForFunction(() => (
-    [...document.querySelectorAll('[data-project-id="order-project-a"] .task-row')]
+    [...document.querySelectorAll('.project-group[data-project-id="order-project-a"] .task-row')]
       .map((element) => element.getAttribute("data-conversation-id")).join(",") ===
     "order-conversation-c,order-conversation-a,order-conversation-b"
   ));
@@ -1559,25 +1630,45 @@ try {
   await conversationB.hover();
   await conversationB.locator('[title="置顶会话"]').click();
   await page.waitForFunction(() => (
-    [...document.querySelectorAll('[data-project-id="order-project-a"] .task-row')]
+    [...document.querySelectorAll('.project-group[data-project-id="order-project-a"] .task-row')]
       .map((element) => element.getAttribute("data-conversation-id")).join(",") ===
       "order-conversation-b,order-conversation-c,order-conversation-a" &&
-    document.querySelector('[data-conversation-id="order-conversation-b"]')?.getAttribute("data-pinned") === "true"
+    document.querySelector('.project-group[data-project-id="order-project-a"] [data-conversation-id="order-conversation-b"]')
+      ?.getAttribute("data-pinned") === "true"
   ));
 
   await reorderDrag(conversationA, ".task-drag-handle", conversationB, { x: 24, y: 2 });
   await page.waitForFunction(() => (
-    [...document.querySelectorAll('[data-project-id="order-project-a"] .task-row')]
+    [...document.querySelectorAll('.project-group[data-project-id="order-project-a"] .task-row')]
       .map((element) => element.getAttribute("data-conversation-id")).join(",") ===
       "order-conversation-a,order-conversation-b,order-conversation-c" &&
-    document.querySelector('[data-conversation-id="order-conversation-a"]')?.getAttribute("data-pinned") === "true"
+    document.querySelector('.project-group[data-project-id="order-project-a"] [data-conversation-id="order-conversation-a"]')
+      ?.getAttribute("data-pinned") === "true"
   ));
   await reorderDrag(conversationA, ".task-drag-handle", conversationC, { x: 24, y: 32 });
   await page.waitForFunction(() => (
-    [...document.querySelectorAll('[data-project-id="order-project-a"] .task-row')]
+    [...document.querySelectorAll('.project-group[data-project-id="order-project-a"] .task-row')]
       .map((element) => element.getAttribute("data-conversation-id")).join(",") ===
       "order-conversation-b,order-conversation-c,order-conversation-a" &&
-    document.querySelector('[data-conversation-id="order-conversation-a"]')?.getAttribute("data-pinned") === "false"
+    document.querySelector('.project-group[data-project-id="order-project-a"] [data-conversation-id="order-conversation-a"]')
+      ?.getAttribute("data-pinned") === "false"
+  ));
+
+  // 未置顶项目里的会话一旦置顶，就从原文件夹搬到置顶段，但「全部对话」里仍然看得到。
+  const conversationE = projectC.locator('[data-conversation-id="order-conversation-e"]');
+  await conversationE.hover();
+  await conversationE.locator('[title="置顶会话"]').click();
+  await page.waitForFunction(() => (
+    document.querySelectorAll('[data-section="pinned"] .loose-conversations [data-conversation-id="order-conversation-e"]').length === 1 &&
+    document.querySelectorAll('.project-group[data-project-id="order-project-c"] [data-conversation-id="order-conversation-e"]').length === 0 &&
+    document.querySelectorAll('[data-section="all"] [data-conversation-id="order-conversation-e"]').length === 1
+  ));
+  const looseConversationE = page.locator('[data-section="pinned"] .loose-conversations [data-conversation-id="order-conversation-e"]');
+  await looseConversationE.hover();
+  await looseConversationE.locator('[title="取消置顶会话"]').click();
+  await page.waitForFunction(() => (
+    document.querySelectorAll('[data-section="pinned"] .loose-conversations [data-conversation-id="order-conversation-e"]').length === 0 &&
+    document.querySelectorAll('.project-group[data-project-id="order-project-c"] [data-conversation-id="order-conversation-e"]').length === 1
   ));
 
   const dragGapAcceptance = await page.evaluate(() => {
@@ -1594,12 +1685,12 @@ try {
       handle.dispatchEvent(new DragEvent("dragend", { bubbles: true, cancelable: true, dataTransfer }));
       return dragOverEvent.defaultPrevented;
     };
-    const projectList = document.querySelector(".project-list");
-    const projectLabel = document.querySelector(".sidebar-section-label");
+    const projectList = document.querySelector('[data-section="pinned"]');
+    const projectLabel = document.querySelector('[data-section-label="pinned"]');
     const settingsTrigger = document.querySelector(".settings-trigger");
-    const projectHandle = document.querySelector('[data-project-id="order-project-a"] .project-drag-handle');
-    const conversationList = document.querySelector('[data-project-id="order-project-a"] .project-conversations');
-    const conversationHandle = document.querySelector('[data-conversation-id="order-conversation-a"] .task-drag-handle');
+    const projectHandle = document.querySelector('.project-group[data-project-id="order-project-a"] .project-drag-handle');
+    const conversationList = document.querySelector('.project-group[data-project-id="order-project-a"] .project-conversations');
+    const conversationHandle = document.querySelector('.project-group[data-project-id="order-project-a"] [data-conversation-id="order-conversation-a"] .task-drag-handle');
     if (!projectList || !projectLabel || !settingsTrigger || !projectHandle || !conversationList || !conversationHandle) return null;
     return {
       project: dispatchGapDrag(projectHandle, projectList, projectList.getBoundingClientRect().bottom - 2),
@@ -1619,7 +1710,7 @@ try {
 
   await projectA.locator(".project-row").hover();
   await projectA.locator('[title="刷新 Claude CLI 会话"]').click();
-  await page.waitForFunction(() => !document.querySelector('[data-project-id="order-project-a"] [title="刷新 Claude CLI 会话"]')?.hasAttribute("disabled"));
+  await page.waitForFunction(() => !document.querySelector('.project-group[data-project-id="order-project-a"] [title="刷新 Claude CLI 会话"]')?.hasAttribute("disabled"));
   const orderAfterRefresh = await projectA.locator(".task-row").evaluateAll((elements) => (
     elements.map((element) => element.getAttribute("data-conversation-id"))
   ));
@@ -1647,18 +1738,24 @@ try {
   await page.waitForFunction(() => document.querySelectorAll(".project-group").length === 3);
   const restoredOrder = await page.evaluate(() => ({
     projects: [...document.querySelectorAll(".project-group")].map((element) => element.getAttribute("data-project-id")),
-    conversations: [...document.querySelectorAll('[data-project-id="order-project-a"] .task-row')]
+    conversations: [...document.querySelectorAll('.project-group[data-project-id="order-project-a"] .task-row')]
       .map((element) => element.getAttribute("data-conversation-id")),
-    projectAPinned: document.querySelector('[data-project-id="order-project-a"]')?.getAttribute("data-pinned"),
-    projectBPinned: document.querySelector('[data-project-id="order-project-b"]')?.getAttribute("data-pinned"),
-    conversationPinned: document.querySelector('[data-conversation-id="order-conversation-b"]')?.getAttribute("data-pinned"),
+    projectAPinned: document.querySelector('.project-group[data-project-id="order-project-a"]')?.getAttribute("data-pinned"),
+    projectBPinned: document.querySelector('.project-group[data-project-id="order-project-b"]')?.getAttribute("data-pinned"),
+    conversationPinned: document.querySelector('.project-group[data-project-id="order-project-a"] [data-conversation-id="order-conversation-b"]')
+      ?.getAttribute("data-pinned"),
+    pinnedSectionProjects: [...document.querySelectorAll('[data-section="pinned"] .project-group')]
+      .map((element) => element.getAttribute("data-project-id")),
+    sections: [...document.querySelectorAll(".sidebar-section-label")].map((element) => element.getAttribute("data-section-label")),
   }));
   if (
     restoredOrder.projects.join(",") !== "order-project-a,order-project-b,order-project-c" ||
     restoredOrder.conversations.join(",") !== "order-conversation-b,order-conversation-c,order-conversation-a" ||
     restoredOrder.projectAPinned !== "true" ||
     restoredOrder.projectBPinned !== "true" ||
-    restoredOrder.conversationPinned !== "true"
+    restoredOrder.conversationPinned !== "true" ||
+    restoredOrder.pinnedSectionProjects.join(",") !== "order-project-a,order-project-b" ||
+    restoredOrder.sections.join(",") !== "pinned,all,projects"
   ) throw new Error(`project/conversation order or pin state did not survive restart: ${JSON.stringify(restoredOrder)}`);
 
   await electronApp.close();

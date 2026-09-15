@@ -155,13 +155,29 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .new-task-button:hover { background: #fff; border-color: #c9c9c2; }
 
 .sidebar-section-label {
-  padding: 0 9px 7px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 3px 9px 7px;
+  border: 0;
+  background: transparent;
   color: #8a8a83;
   font-size: 11px;
   font-weight: 650;
+  text-align: left;
+  cursor: pointer;
 }
+.sidebar-section-label:hover { color: #56564f; }
+.sidebar-section-label > span:first-of-type { flex: 1; }
+.sidebar-section-count { color: var(--faint); font-weight: 600; font-variant-numeric: tabular-nums; }
+.sidebar-section-label.pin-drop { color: var(--accent); }
+.sidebar-section-label.pin-drop .sidebar-section-count { color: var(--accent); }
 
-.task-list, .project-list { min-height: 0; flex: 1; overflow: auto; }
+.sidebar-sections { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: auto; }
+.sidebar-section { flex: 0 0 auto; margin-bottom: 6px; }
+
+.task-list, .project-list { min-height: 0; }
 .task-list-empty { padding: 10px 9px; color: var(--faint); font-size: 12px; }
 
 .project-list { display: block; }
@@ -187,8 +203,9 @@ button, select, textarea { -webkit-app-region: no-drag; }
 }
 
 .reorder-handle:active { cursor: grabbing; }
-.project-row:hover > .reorder-handle, .project-row:focus-within > .reorder-handle,
-.task-row:hover > .reorder-handle, .task-row:focus-within > .reorder-handle {
+.project-group:hover .reorder-handle, .project-row:hover > .reorder-handle, .project-row:focus-within > .reorder-handle,
+.task-row:hover > .reorder-handle, .task-row:focus-within > .reorder-handle,
+.project-row.dragging > .reorder-handle, .task-row.dragging > .reorder-handle {
   opacity: 1;
   pointer-events: auto;
 }
@@ -253,11 +270,22 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .project-action:disabled { cursor: default; opacity: .55; }
 .project-row:hover .project-action { display: grid; }
 .project-action .spinning { animation: spin .85s linear infinite; }
-.project-conversations { padding-left: 18px; }
-.project-conversations .task-row { min-height: 34px; }
-.project-conversations .task-select { align-items: center; padding-block: 5px; }
-.project-conversations .task-select > svg { margin-top: 0; }
-.project-conversations .task-select strong { font-size: 12px; font-weight: 520; }
+.conversation-rows { padding-left: 6px; }
+.tree-branch {
+  flex: 0 0 auto;
+  width: 15px;
+  color: #c4c4bc;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1;
+  text-align: center;
+  user-select: none;
+}
+.task-row.active .tree-branch { color: #a6a69d; }
+.conversation-rows .task-row { min-height: 34px; }
+.conversation-rows .task-select { align-items: center; padding-block: 5px; }
+.conversation-rows .task-select > svg { margin-top: 0; }
+.conversation-rows .task-select strong { font-size: 12px; font-weight: 520; }
 
 .empty-conversation {
   height: 30px;
@@ -774,6 +802,9 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .thinking { display: flex; align-items: center; gap: 8px; height: 28px; color: #85857e; font-size: 12.5px; }
 .queued-hint { display: flex; align-items: center; gap: 8px; height: 28px; color: #98988f; font-size: 12.5px; }
 .queued-hint::before { display: inline-block; width: 7px; height: 7px; border: 1.5px solid #c9c9c1; border-radius: 50%; content: ""; }
+.retry-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 28px; padding: 5px 9px; border: 1px solid #edd9b4; border-radius: 6px; background: #fdf6e7; color: #8a6414; font-size: 12.5px; }
+.retry-notice .spinner { border-color: #eddcba; border-top-color: #c98a16; }
+.retry-reason { flex-basis: 100%; padding-left: 21px; color: #9c7b38; font-size: 11.5px; }
 .spinner, .mini-spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid #d1d1cb; border-top-color: var(--accent); border-radius: 50%; animation: spin .85s linear infinite; }
 .mini-spinner { width: 12px; height: 12px; border-width: 1.5px; }
 @keyframes spin { to { transform: rotate(360deg); } }

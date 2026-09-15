@@ -19,7 +19,7 @@ import {
   Star,
   Trash2,
 } from "lucide-react";
-import type { AppSettings, AppUpdateState, Project, ReorderPosition } from "./types";
+import type { AppSettings, AppUpdateState, Conversation, Project, ReorderPosition } from "./types";
 
 interface Props {
   projects: Project[];
@@ -52,18 +52,25 @@ interface Props {
 interface EditingName {
   kind: "project" | "conversation";
   id: string;
+  // 同一个会话在所属文件夹和「全部对话」里各渲染一次，重命名输入框只能出现在点了改名的那一份上：
+  // 两个 autoFocus 输入框会互相抢焦点，先失焦的那个立刻触发保存，改名框还没输入就消失了。
+  section: SectionKey;
   value: string;
 }
+
+type SectionKey = "pinned" | "all" | "projects";
 
 type DragItem = {
   kind: "project";
   id: string;
   pinned: boolean;
+  section: SectionKey;
 } | {
   kind: "conversation";
   projectId: string;
   id: string;
   pinned: boolean;
+  section: SectionKey;
 };
 
 type DropTarget = DragItem & { position: ReorderPosition };
@@ -124,11 +131,13 @@ export default function Sidebar({
   onToggle,
 }: Props) {
   const [closedProjects, setClosedProjects] = useState<Set<string>>(() => new Set());
+  const [closedSections, setClosedSections] = useState<Set<SectionKey>>(() => new Set());
   const [editingName, setEditingName] = useState<EditingName | null>(null);
   const [refreshingProjects, setRefreshingProjects] = useState<Set<string>>(() => new Set());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [draggedItem, setDraggedItem] = useState<DragItem | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
+  const [pinDropSection, setPinDropSection] = useState<SectionKey | null>(null);
   const draggedItemRef = useRef<DragItem | null>(null);
   const dropTargetRef = useRef<DropTarget | null>(null);
   const settingsRef = useRef<HTMLDivElement | null>(null);
@@ -173,6 +182,15 @@ export default function Sidebar({
     });
   };
 
+  const toggleSection = (section: SectionKey) => {
+    setClosedSections((current) => {
+      const next = new Set(current);
+      if (next.has(section)) next.delete(section);
+      else next.add(section);
+      return next;
+    });
+  };
+
   const saveEditingName = (editing: EditingName) => {
     if (editing.kind === "project") onRenameProject(editing.id, editing.value);
     else onRenameConversation(editing.id, editing.value);
@@ -208,10 +226,38 @@ export default function Sidebar({
     dropTargetRef.current = null;
     setDraggedItem(null);
     setDropTarget(null);
+    setPinDropSection(null);
+  };
+
+  // 拖到「置顶」标题 = 置顶；拖到「项目」标题 = 取消置顶。替代了过去拖到唯一标题的做法。
+  const dragOverPinTarget = (event: React.DragEvent<HTMLElement>, section: SectionKey) => {
+    const source = draggedItemRef.current;
+    if (!source) return;
+    const wantPinned = section === "pinned";
+    if (source.pinned === wantPinned) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    updateDropTarget(null);
+    setPinDropSection(section);
+  };
+
+  const dropOnPinTarget = (event: React.DragEvent<HTMLElement>, section: SectionKey) => {
+    const source = draggedItemRef.current;
+    if (!source) return;
+    const wantPinned = section === "pinned";
+    if (source.pinned === wantPinned) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (source.kind === "project") onToggleProjectPinned(source.id);
+    else onToggleConversationPinned(source.projectId, source.id);
+    clearDrag();
   };
 
   const sameDragScope = (source: DragItem | null, target: DragItem) => {
     if (!source || source.kind !== target.kind) return false;
+    // 三个区段各自排序：跨区段拖拽由标题栏负责改置顶，不走重排。
+    if (source.section !== target.section) return false;
     if (source.kind === "conversation" && target.kind === "conversation") {
       return source.projectId === target.projectId;
     }
@@ -297,18 +343,21 @@ export default function Sidebar({
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
     const eventTarget = event.target instanceof Element ? event.target : null;
+    // 标题栏那一下由 dragOverPinTarget 接管，这里不要抢着算重排位置。
+    if (eventTarget?.closest(".sidebar-section-label")) return;
+    setPinDropSection(null);
+    const scope = event.currentTarget.querySelector<HTMLElement>(`[data-section="${source.section}"]`);
+    if (!scope) {
+      updateDropTarget(null);
+      return;
+    }
     if (source.kind === "conversation") {
-      const group = eventTarget?.closest<HTMLElement>(".project-group");
-      if (!group || group.dataset.projectId !== source.projectId) {
-        updateDropTarget(null);
-        return;
-      }
       const project = projects.find((item) => item.id === source.projectId);
       if (!project) {
         updateDropTarget(null);
         return;
       }
-      const rows = Array.from(group.querySelectorAll<HTMLElement>(".task-row"));
+      const rows = Array.from(scope.querySelectorAll<HTMLElement>(`.task-row[data-project-id="${source.projectId}"]`));
       const candidates = rows.flatMap((element) => {
         const conversation = project.conversations.find((item) => item.id === element.dataset.conversationId);
         return conversation ? [{
@@ -318,23 +367,20 @@ export default function Sidebar({
             projectId: project.id,
             id: conversation.id,
             pinned: Boolean(conversation.pinned),
+            section: source.section,
           },
         }] : [];
       });
       nearestDropTarget(event.clientY, candidates);
       return;
     }
-    if (!eventTarget?.closest(".sidebar-section-label, .project-list")) {
-      updateDropTarget(null);
-      return;
-    }
-    const groups = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(".project-list > .project-group"));
+    const groups = Array.from(scope.querySelectorAll<HTMLElement>(".project-list > .project-group"));
     const candidates = groups.flatMap((group) => {
       const project = projects.find((item) => item.id === group.dataset.projectId);
       const row = group.querySelector<HTMLElement>(".project-row");
       return project && row ? [{
         element: row,
-        item: { kind: "project" as const, id: project.id, pinned: Boolean(project.pinned) },
+        item: { kind: "project" as const, id: project.id, pinned: Boolean(project.pinned), section: source.section },
       }] : [];
     });
     nearestDropTarget(event.clientY, candidates);
@@ -369,6 +415,244 @@ export default function Sidebar({
     );
   }
 
+  const renderConversationRow = (
+    conversation: Conversation,
+    projectId: string,
+    section: SectionKey,
+    isLast: boolean,
+    draggable: boolean,
+  ) => {
+    const conversationDragItem: DragItem = {
+      kind: "conversation",
+      projectId,
+      id: conversation.id,
+      pinned: Boolean(conversation.pinned),
+      section,
+    };
+    const conversationDropPosition = dropTarget?.kind === "conversation" &&
+      dropTarget.projectId === projectId && dropTarget.id === conversation.id && dropTarget.section === section
+      ? dropTarget.position
+      : null;
+    const editing = editingName?.kind === "conversation" && editingName.id === conversation.id && editingName.section === section;
+    return (
+      <div
+        className={`task-row ${activeConversationId === conversation.id ? "active" : ""} ${runningConversationIds.has(conversation.id) ? "running" : ""} ${conversation.pinned ? "pinned" : ""} ${draggedItem?.kind === "conversation" && draggedItem.id === conversation.id && draggedItem.section === section ? "dragging" : ""} ${conversationDropPosition ? `drop-${conversationDropPosition}` : ""}`}
+        data-conversation-id={conversation.id}
+        data-project-id={projectId}
+        data-pinned={conversation.pinned ? "true" : "false"}
+        key={conversation.id}
+        onDragOver={draggable ? (event) => dragOver(event, conversationDragItem) : undefined}
+        onDrop={draggable ? (event) => dropItem(event, conversationDragItem) : undefined}
+      >
+        <span className="tree-branch" aria-hidden="true">{isLast ? "└─" : "├─"}</span>
+        {editing || !draggable ? null : (
+          <button
+            aria-label={`拖动会话 ${conversation.title} 排序`}
+            className="reorder-handle task-drag-handle"
+            draggable
+            onDragEnd={clearDrag}
+            onDragStart={(event) => startDrag(event, conversationDragItem)}
+            title="拖动排序；拖到「项目」标题取消置顶"
+            type="button"
+          >
+            <GripVertical size={12} />
+          </button>
+        )}
+        {editing ? (
+          <div className="rename-editor conversation-rename-editor">
+            <MessageSquareText size={14} />
+            <input
+              aria-label="对话名称"
+              autoFocus
+              maxLength={100}
+              value={editingName.value}
+              onChange={(event) => setEditingName({ ...editingName, value: event.target.value })}
+              onKeyDown={(event) => renameKeyDown(event, editingName)}
+              onBlur={() => saveEditingName(editingName)}
+            />
+          </div>
+        ) : (
+          <>
+            <button className="task-select" onClick={() => onSelectConversation(conversation.id)}>
+              {runningConversationIds.has(conversation.id)
+                ? <LoaderCircle className="conversation-running-icon" size={14} aria-label="会话正在运行" />
+                : <MessageSquareText size={14} />}
+              <span>
+                <span className="conversation-title-line">
+                  <strong>{conversation.title}</strong>
+                  {conversation.pinned ? <Pin className="pin-indicator" size={10} aria-label="已置顶会话" /> : null}
+                </span>
+                <small className="conversation-meta">
+                  {conversation.source === "claude" ? <span>Claude CLI</span> : null}
+                  {conversation.gitBranch ? <span title={conversation.gitBranch}>{conversation.gitBranch}</span> : null}
+                  <time dateTime={new Date(conversation.updatedAt).toISOString()}>{formatConversationTime(conversation.updatedAt)}</time>
+                </small>
+              </span>
+            </button>
+            <button
+              aria-label={conversation.pinned ? `取消置顶会话 ${conversation.title}` : `置顶会话 ${conversation.title}`}
+              aria-pressed={Boolean(conversation.pinned)}
+              className="task-pin"
+              onClick={() => onToggleConversationPinned(projectId, conversation.id)}
+              title={conversation.pinned ? "取消置顶会话" : "置顶会话"}
+            >
+              {conversation.pinned ? <PinOff size={13} /> : <Pin size={13} />}
+            </button>
+            <button
+              className="task-rename"
+              onClick={() => setEditingName({ kind: "conversation", id: conversation.id, section, value: conversation.title })}
+              title="重命名对话"
+            >
+              <Pencil size={13} />
+            </button>
+            <button
+              className="task-delete"
+              onClick={() => onDeleteConversation(projectId, conversation.id)}
+              title={conversation.sessionId ? "删除对话和 CLI /resume 历史" : "删除对话"}
+            >
+              <Trash2 size={13} />
+            </button>
+          </>
+        )}
+      </div>
+    );
+  };
+
+  const renderProjectGroup = (project: Project, section: SectionKey, conversations: Conversation[]) => {
+    const closed = closedProjects.has(project.id);
+    const projectRunning = project.conversations.some((conversation) => runningConversationIds.has(conversation.id));
+    const projectDragItem: DragItem = { kind: "project", id: project.id, pinned: Boolean(project.pinned), section };
+    const projectDropPosition = dropTarget?.kind === "project" && dropTarget.id === project.id && dropTarget.section === section
+      ? dropTarget.position
+      : null;
+    const editing = editingName?.kind === "project" && editingName.id === project.id && editingName.section === section;
+    return (
+      <section
+        className={`project-group ${project.pinned ? "pinned" : ""} ${draggedItem?.kind === "project" && draggedItem.id === project.id && draggedItem.section === section ? "dragging" : ""} ${projectDropPosition ? `drop-${projectDropPosition}` : ""}`}
+        data-pinned={project.pinned ? "true" : "false"}
+        data-project-id={project.id}
+        key={project.id}
+      >
+        <div
+          className={`project-row ${activeProjectId === project.id && !activeConversationId ? "active" : ""}`}
+          onDragOver={(event) => dragOver(event, projectDragItem)}
+          onDrop={(event) => dropItem(event, projectDragItem)}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            onOpenProject(project.workspace);
+          }}
+          title="右键在文件管理器中打开"
+        >
+          {editing ? null : (
+            <button
+              aria-label={`拖动项目 ${project.customName ?? project.name} 排序`}
+              className="reorder-handle project-drag-handle"
+              draggable
+              onDragEnd={clearDrag}
+              onDragStart={(event) => startDrag(event, projectDragItem)}
+              title="拖动排序（拖到「置顶」标题可置顶，拖到「项目」标题可取消置顶）"
+              type="button"
+            >
+              <GripVertical size={13} />
+            </button>
+          )}
+          {editing ? (
+            <div className="rename-editor project-rename-editor">
+              <Folder size={14} />
+              <input
+                aria-label="项目名称"
+                autoFocus
+                value={editingName.value}
+                onChange={(event) => setEditingName({ ...editingName, value: event.target.value })}
+                onKeyDown={(event) => renameKeyDown(event, editingName)}
+                onBlur={() => saveEditingName(editingName)}
+              />
+            </div>
+          ) : (
+            <button
+              className="project-toggle"
+              onClick={() => toggleProject(project.id)}
+              title={project.workspace}
+            >
+              {closed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+              <Folder size={14} />
+              <span className="project-name">
+                <strong>{project.customName ?? project.name}</strong>
+                {project.customName ? <small>{project.name}</small> : null}
+              </span>
+              {project.pinned ? <Pin className="pin-indicator" size={11} aria-label="已置顶项目" /> : null}
+              {projectRunning ? <LoaderCircle className="project-running-icon" size={13} aria-label="项目中有会话正在运行" /> : null}
+            </button>
+          )}
+          {editing ? null : (
+            <>
+              <button className="project-action" onClick={() => onNewConversation(project.id)} title="新建对话"><Plus size={14} /></button>
+              <button
+                aria-label={`刷新 ${project.customName ?? project.name} 的 Claude CLI 会话`}
+                className="project-action refresh"
+                disabled={refreshingProjects.has(project.id)}
+                onClick={() => { void refreshProject(project.id); }}
+                title="刷新 Claude CLI 会话"
+              >
+                <RefreshCw className={refreshingProjects.has(project.id) ? "spinning" : undefined} size={13} />
+              </button>
+              <button
+                aria-label={project.pinned ? `取消置顶项目 ${project.customName ?? project.name}` : `置顶项目 ${project.customName ?? project.name}`}
+                aria-pressed={Boolean(project.pinned)}
+                className="project-action pin"
+                onClick={() => onToggleProjectPinned(project.id)}
+                title={project.pinned ? "取消置顶项目" : "置顶项目"}
+              >
+                {project.pinned ? <PinOff size={13} /> : <Pin size={13} />}
+              </button>
+              <button
+                className="project-action rename"
+                onClick={() => setEditingName({ kind: "project", id: project.id, section, value: project.customName ?? project.name })}
+                title="重命名项目"
+              >
+                <Pencil size={13} />
+              </button>
+              <button className="project-action delete" onClick={() => onDeleteProject(project.id)} title="删除项目"><Trash2 size={13} /></button>
+            </>
+          )}
+        </div>
+        {!closed ? (
+          <div className="conversation-rows project-conversations">
+            {conversations.map((conversation, index) =>
+              renderConversationRow(conversation, project.id, section, index === conversations.length - 1, true))}
+            {conversations.length === 0 ? (
+              <button className="empty-conversation" onClick={() => onNewConversation(project.id)}>新建对话</button>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
+    );
+  };
+
+  const pinnedProjects = projects.filter((project) => project.pinned);
+  const unpinnedProjects = projects.filter((project) => !project.pinned);
+  // 置顶区里的对话只从「未置顶项目」里捞：置顶项目已经整个搬进来了，它的对话跟着走。
+  const pinnedConversations = unpinnedProjects.flatMap((project) =>
+    project.conversations.filter((conversation) => conversation.pinned).map((conversation) => ({ conversation, projectId: project.id })));
+  const allConversations = projects
+    .flatMap((project) => project.conversations.map((conversation) => ({ conversation, projectId: project.id })))
+    .sort((a, b) => b.conversation.updatedAt - a.conversation.updatedAt);
+  const pinnedEmpty = pinnedProjects.length === 0 && pinnedConversations.length === 0;
+  const sectionLabel = (section: SectionKey, text: string, count: number, pinTarget: boolean) => (
+    <button
+      className={`sidebar-section-label ${pinTarget && pinDropSection === section ? "pin-drop" : ""}`}
+      data-section-label={section}
+      onClick={() => toggleSection(section)}
+      onDragOver={pinTarget ? (event) => dragOverPinTarget(event, section) : undefined}
+      onDrop={pinTarget ? (event) => dropOnPinTarget(event, section) : undefined}
+      type="button"
+    >
+      {closedSections.has(section) ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+      <span>{text}</span>
+      <span className="sidebar-section-count">{count}</span>
+    </button>
+  );
+
   return (
     <aside className="sidebar" onDragOver={dragOverSidebar} onDrop={dropOnSidebar}>
       <div className="sidebar-brand">
@@ -380,209 +664,47 @@ export default function Sidebar({
         <Plus size={16} />
         <span>新建项目</span>
       </button>
-      <div className="sidebar-section-label">项目</div>
-      <nav className="project-list" aria-label="项目列表">
-        {projects.length === 0 ? <div className="task-list-empty">还没有项目</div> : null}
-        {projects.map((project) => {
-          const closed = closedProjects.has(project.id);
-          const projectRunning = project.conversations.some((conversation) => runningConversationIds.has(conversation.id));
-          const projectDragItem: DragItem = { kind: "project", id: project.id, pinned: Boolean(project.pinned) };
-          const projectDropPosition = dropTarget?.kind === "project" && dropTarget.id === project.id
-            ? dropTarget.position
-            : null;
-          return (
-            <section
-              className={`project-group ${project.pinned ? "pinned" : ""} ${draggedItem?.kind === "project" && draggedItem.id === project.id ? "dragging" : ""} ${projectDropPosition ? `drop-${projectDropPosition}` : ""}`}
-              data-pinned={project.pinned ? "true" : "false"}
-              data-project-id={project.id}
-              key={project.id}
-            >
-              <div
-                className={`project-row ${activeProjectId === project.id && !activeConversationId ? "active" : ""}`}
-                onDragOver={(event) => dragOver(event, projectDragItem)}
-                onDrop={(event) => dropItem(event, projectDragItem)}
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  onOpenProject(project.workspace);
-                }}
-                title="右键在文件管理器中打开"
-              >
-                {editingName?.kind === "project" && editingName.id === project.id ? null : (
-                  <button
-                    aria-label={`拖动项目 ${project.customName ?? project.name} 排序`}
-                    className="reorder-handle project-drag-handle"
-                    draggable
-                    onDragEnd={clearDrag}
-                    onDragStart={(event) => startDrag(event, projectDragItem)}
-                    title="拖动排序（拖到置顶区域可置顶，拖回普通区域可取消置顶）"
-                    type="button"
-                  >
-                    <GripVertical size={13} />
-                  </button>
-                )}
-                {editingName?.kind === "project" && editingName.id === project.id ? (
-                  <div className="rename-editor project-rename-editor">
-                    <Folder size={14} />
-                    <input
-                      aria-label="项目名称"
-                      autoFocus
-                      value={editingName.value}
-                      onChange={(event) => setEditingName({ ...editingName, value: event.target.value })}
-                      onKeyDown={(event) => renameKeyDown(event, editingName)}
-                      onBlur={() => saveEditingName(editingName)}
-                    />
-                  </div>
-                ) : (
-                  <button
-                    className="project-toggle"
-                    onClick={() => toggleProject(project.id)}
-                    title={project.workspace}
-                  >
-                    {closed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-                    <Folder size={14} />
-                    <span className="project-name">
-                      <strong>{project.customName ?? project.name}</strong>
-                      {project.customName ? <small>{project.name}</small> : null}
-                    </span>
-                    {project.pinned ? <Pin className="pin-indicator" size={11} aria-label="已置顶项目" /> : null}
-                    {projectRunning ? <LoaderCircle className="project-running-icon" size={13} aria-label="项目中有会话正在运行" /> : null}
-                  </button>
-                )}
-                {editingName?.kind === "project" && editingName.id === project.id ? null : (
-                  <>
-                    <button className="project-action" onClick={() => onNewConversation(project.id)} title="新建对话"><Plus size={14} /></button>
-                    <button
-                      aria-label={`刷新 ${project.customName ?? project.name} 的 Claude CLI 会话`}
-                      className="project-action refresh"
-                      disabled={refreshingProjects.has(project.id)}
-                      onClick={() => { void refreshProject(project.id); }}
-                      title="刷新 Claude CLI 会话"
-                    >
-                      <RefreshCw className={refreshingProjects.has(project.id) ? "spinning" : undefined} size={13} />
-                    </button>
-                    <button
-                      aria-label={project.pinned ? `取消置顶项目 ${project.customName ?? project.name}` : `置顶项目 ${project.customName ?? project.name}`}
-                      aria-pressed={Boolean(project.pinned)}
-                      className="project-action pin"
-                      onClick={() => onToggleProjectPinned(project.id)}
-                      title={project.pinned ? "取消置顶项目" : "置顶项目"}
-                    >
-                      {project.pinned ? <PinOff size={13} /> : <Pin size={13} />}
-                    </button>
-                    <button
-                      className="project-action rename"
-                      onClick={() => setEditingName({ kind: "project", id: project.id, value: project.customName ?? project.name })}
-                      title="重命名项目"
-                    >
-                      <Pencil size={13} />
-                    </button>
-                    <button className="project-action delete" onClick={() => onDeleteProject(project.id)} title="删除项目"><Trash2 size={13} /></button>
-                  </>
-                )}
-              </div>
-              {!closed ? (
-                <div className="project-conversations">
-                  {project.conversations.map((conversation) => {
-                    const conversationDragItem: DragItem = {
-                      kind: "conversation",
-                      projectId: project.id,
-                      id: conversation.id,
-                      pinned: Boolean(conversation.pinned),
-                    };
-                    const conversationDropPosition = dropTarget?.kind === "conversation" &&
-                      dropTarget.projectId === project.id && dropTarget.id === conversation.id
-                      ? dropTarget.position
-                      : null;
-                    return (
-                    <div
-                      className={`task-row ${activeConversationId === conversation.id ? "active" : ""} ${runningConversationIds.has(conversation.id) ? "running" : ""} ${conversation.pinned ? "pinned" : ""} ${draggedItem?.kind === "conversation" && draggedItem.id === conversation.id ? "dragging" : ""} ${conversationDropPosition ? `drop-${conversationDropPosition}` : ""}`}
-                      data-conversation-id={conversation.id}
-                      data-pinned={conversation.pinned ? "true" : "false"}
-                      key={conversation.id}
-                      onDragOver={(event) => dragOver(event, conversationDragItem)}
-                      onDrop={(event) => dropItem(event, conversationDragItem)}
-                    >
-                      {editingName?.kind === "conversation" && editingName.id === conversation.id ? null : (
-                        <button
-                          aria-label={`拖动会话 ${conversation.title} 排序`}
-                          className="reorder-handle task-drag-handle"
-                          draggable
-                          onDragEnd={clearDrag}
-                          onDragStart={(event) => startDrag(event, conversationDragItem)}
-                          title="拖动排序（仅限当前项目，拖到置顶区域可置顶）"
-                          type="button"
-                        >
-                          <GripVertical size={12} />
-                        </button>
-                      )}
-                      {editingName?.kind === "conversation" && editingName.id === conversation.id ? (
-                        <div className="rename-editor conversation-rename-editor">
-                          <MessageSquareText size={14} />
-                          <input
-                            aria-label="对话名称"
-                            autoFocus
-                            maxLength={100}
-                            value={editingName.value}
-                            onChange={(event) => setEditingName({ ...editingName, value: event.target.value })}
-                            onKeyDown={(event) => renameKeyDown(event, editingName)}
-                            onBlur={() => saveEditingName(editingName)}
-                          />
-                        </div>
-                      ) : (
-                        <>
-                          <button className="task-select" onClick={() => onSelectConversation(conversation.id)}>
-                            {runningConversationIds.has(conversation.id)
-                              ? <LoaderCircle className="conversation-running-icon" size={14} aria-label="会话正在运行" />
-                              : <MessageSquareText size={14} />}
-                            <span>
-                              <span className="conversation-title-line">
-                                <strong>{conversation.title}</strong>
-                                {conversation.pinned ? <Pin className="pin-indicator" size={10} aria-label="已置顶会话" /> : null}
-                              </span>
-                              <small className="conversation-meta">
-                                {conversation.source === "claude" ? <span>Claude CLI</span> : null}
-                                {conversation.gitBranch ? <span title={conversation.gitBranch}>{conversation.gitBranch}</span> : null}
-                                <time dateTime={new Date(conversation.updatedAt).toISOString()}>{formatConversationTime(conversation.updatedAt)}</time>
-                              </small>
-                            </span>
-                          </button>
-                          <button
-                            aria-label={conversation.pinned ? `取消置顶会话 ${conversation.title}` : `置顶会话 ${conversation.title}`}
-                            aria-pressed={Boolean(conversation.pinned)}
-                            className="task-pin"
-                            onClick={() => onToggleConversationPinned(project.id, conversation.id)}
-                            title={conversation.pinned ? "取消置顶会话" : "置顶会话"}
-                          >
-                            {conversation.pinned ? <PinOff size={13} /> : <Pin size={13} />}
-                          </button>
-                          <button
-                            className="task-rename"
-                            onClick={() => setEditingName({ kind: "conversation", id: conversation.id, value: conversation.title })}
-                            title="重命名对话"
-                          >
-                            <Pencil size={13} />
-                          </button>
-                          <button
-                            className="task-delete"
-                            onClick={() => onDeleteConversation(project.id, conversation.id)}
-                            title={conversation.sessionId ? "删除对话和 CLI /resume 历史" : "删除对话"}
-                          >
-                            <Trash2 size={13} />
-                          </button>
-                        </>
-                      )}
-                    </div>
-                    );
-                  })}
-                  {project.conversations.length === 0 ? (
-                    <button className="empty-conversation" onClick={() => onNewConversation(project.id)}>新建对话</button>
-                  ) : null}
+      <div className="sidebar-sections">
+        <div className="sidebar-section" data-section-group="pinned">
+          {sectionLabel("pinned", "置顶", pinnedProjects.length + pinnedConversations.length, true)}
+          {!closedSections.has("pinned") ? (
+            <nav className="project-list" data-section="pinned" aria-label="置顶">
+              {pinnedEmpty ? <div className="task-list-empty">把项目或对话拖到这里置顶</div> : null}
+              {pinnedProjects.map((project) => renderProjectGroup(project, "pinned", project.conversations))}
+              {pinnedConversations.length > 0 ? (
+                <div className="conversation-rows loose-conversations">
+                  {pinnedConversations.map(({ conversation, projectId }, index) =>
+                    renderConversationRow(conversation, projectId, "pinned", index === pinnedConversations.length - 1, true))}
                 </div>
               ) : null}
-            </section>
-          );
-        })}
-      </nav>
+            </nav>
+          ) : null}
+        </div>
+        <div className="sidebar-section" data-section-group="all">
+          {sectionLabel("all", "全部对话", allConversations.length, false)}
+          {!closedSections.has("all") ? (
+            <nav className="project-list" data-section="all" aria-label="全部对话">
+              {allConversations.length === 0 ? <div className="task-list-empty">还没有对话</div> : null}
+              {allConversations.length > 0 ? (
+                <div className="conversation-rows loose-conversations">
+                  {allConversations.map(({ conversation, projectId }, index) =>
+                    renderConversationRow(conversation, projectId, "all", index === allConversations.length - 1, false))}
+                </div>
+              ) : null}
+            </nav>
+          ) : null}
+        </div>
+        <div className="sidebar-section" data-section-group="projects">
+          {sectionLabel("projects", "项目", unpinnedProjects.length, true)}
+          {!closedSections.has("projects") ? (
+            <nav className="project-list" data-section="projects" aria-label="项目列表">
+              {unpinnedProjects.length === 0 ? <div className="task-list-empty">还没有项目</div> : null}
+              {unpinnedProjects.map((project) =>
+                renderProjectGroup(project, "projects", project.conversations.filter((conversation) => !conversation.pinned)))}
+            </nav>
+          ) : null}
+        </div>
+      </div>
       <div className="sidebar-bottom">
         <div className="settings-anchor" ref={settingsRef}>
           {settingsOpen ? (
