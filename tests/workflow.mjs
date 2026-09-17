@@ -360,7 +360,7 @@ try {
   await page.keyboard.press("Escape");
   await page.waitForSelector(".settings-popover", { state: "detached" });
 
-  await page.click(".new-task-button");
+  await page.locator('[data-section-label="projects"] .sidebar-section-action').click();
   await page.waitForSelector(".composer");
   if (await page.locator(".project-group").count() !== 1) throw new Error("new project was not created");
   await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 2);
@@ -1915,12 +1915,12 @@ try {
     restoredOrder.projectBPinned !== "true" ||
     restoredOrder.conversationPinned !== "true" ||
     restoredOrder.pinnedSectionProjects.join(",") !== "order-project-a,order-project-b" ||
-    restoredOrder.sections.join(",") !== "pinned,scratch,projects"
+    restoredOrder.sections.join(",") !== "pinned,projects,scratch"
   ) throw new Error(`project/conversation order or pin state did not survive restart: ${JSON.stringify(restoredOrder)}`);
 
   // 临时对话：不选文件夹也能直接开一次对话，它归在内建的「临时对话」分组下，
   // 不出现在「项目」段，并且能真的把 CLI 跑起来（cwd 是 userData 下的 scratch 目录）。
-  await page.locator('[data-section="scratch"] .empty-conversation').click();
+  await page.locator('[data-section-label="scratch"] .sidebar-section-action').click();
   await page.waitForFunction(() => document.querySelectorAll('[data-section="scratch"] .task-row').length === 1);
   if (await page.locator(".project-group").count() !== 3) {
     throw new Error("the scratch group leaked into the project section");

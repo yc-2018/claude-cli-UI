@@ -134,54 +134,72 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .icon-button:hover { background: var(--hover); color: #2f2f2b; }
 .new-icon { margin-top: 2px; background: #e8e8e3; color: #3c3c38; }
 
-.new-task-button {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  height: 34px;
-  margin: 11px 0 16px;
-  padding: 0 10px;
-  border: 1px solid #d7d7d1;
-  border-radius: 6px;
-  background: #fafaf8;
-  color: #3b3b37;
-  font-size: 13px;
-  font-weight: 540;
-  box-shadow: 0 1px 1px rgb(20 20 18 / 4%);
-  cursor: pointer;
-}
-
-.new-task-button:hover { background: #fff; border-color: #c9c9c2; }
-
 .sidebar-section-label {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 2px;
   width: 100%;
-  padding: 3px 9px 7px;
+  padding: 3px 5px 7px 9px;
   border: 0;
   background: transparent;
   color: #8a8a83;
   font-size: 11px;
   font-weight: 650;
   text-align: left;
+}
+
+.sidebar-section-toggle {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
 }
-.sidebar-section-label:hover { color: #56564f; }
-.sidebar-section-label > span:first-of-type { flex: 1; }
+
+.sidebar-section-toggle:hover { color: #56564f; }
+.sidebar-section-toggle > span:first-of-type { flex: 1; }
 .sidebar-section-count { color: var(--faint); font-weight: 600; font-variant-numeric: tabular-nums; }
 .sidebar-section-label.pin-drop { color: var(--accent); }
 .sidebar-section-label.pin-drop .sidebar-section-count { color: var(--accent); }
+.sidebar-section-action {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #97978f;
+  cursor: pointer;
+}
 
-.sidebar-sections { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: auto; }
+.sidebar-section-action:hover { background: #dcdcd6; color: #343430; }
+
+.sidebar-sections { display: flex; flex: 1; flex-direction: column; min-height: 0; margin-top: 11px; overflow: auto; }
 .sidebar-section { flex: 0 0 auto; margin-bottom: 6px; }
 
 .task-list, .project-list { min-height: 0; }
 .task-list-empty { padding: 10px 9px; color: var(--faint); font-size: 12px; }
 
 .project-list { display: block; }
-.project-group { position: relative; margin-bottom: 5px; }
+/* 项目和它名下的对话框在一起，层级比单靠 ├─ └─ 前缀更直观。 */
+.project-group {
+  position: relative;
+  margin-bottom: 6px;
+  padding: 2px 4px 4px;
+  border: 1px solid #dcdcd6;
+  border-radius: 7px;
+}
+
 .project-row { display: flex; height: 32px; align-items: center; border-radius: 5px; }
 .project-row:hover { background: var(--hover); }
 .project-row.active { background: var(--active); }

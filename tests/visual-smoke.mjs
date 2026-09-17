@@ -176,7 +176,34 @@ if (await page.locator('[data-section="pinned"] [aria-label="已置顶项目"]')
 const sidebarSections = await page.locator(".sidebar-section-label").evaluateAll((elements) => (
   elements.map((element) => element.getAttribute("data-section-label")).join(",")
 ));
-if (sidebarSections !== "pinned,scratch,projects") throw new Error(`sidebar sections were not laid out top-to-bottom: ${sidebarSections}`);
+if (sidebarSections !== "pinned,projects,scratch") throw new Error(`sidebar sections were not laid out top-to-bottom: ${sidebarSections}`);
+// 顶部那个「新建项目」大按钮已经去掉：新建入口改成各分组标题右侧的加号，项目段和临时对话段各一个，置顶段没有。
+if (await page.locator(".new-task-button").count()) {
+  throw new Error("the removed top-level new-project button is still rendered");
+}
+if (await page.locator(".sidebar-section-action").count() !== 2 ||
+  await page.locator('[data-section-label="projects"] .sidebar-section-action[aria-label="新建项目"]').count() !== 1 ||
+  await page.locator('[data-section-label="scratch"] .sidebar-section-action[aria-label="新建临时对话"]').count() !== 1) {
+  throw new Error("section headers did not carry the new-project / new-scratch-conversation shortcuts");
+}
+if (!(await page.locator(".sidebar-section-toggle").count())) {
+  throw new Error("section headers lost their collapse toggle");
+}
+// 临时对话段的入口只在标题栏，段内不再重复放一个文字按钮。
+if (await page.locator('[data-section="scratch"] .empty-conversation').count()) {
+  throw new Error("the scratch section duplicated its new-conversation entry inside the list");
+}
+// 每个项目连同名下的对话包在一个带边框的盒子里，层级不看前缀也分得清。
+const projectBorders = await page.locator(".project-group").evaluateAll((elements) => ({
+  total: elements.length,
+  bordered: elements.filter((element) => {
+    const style = getComputedStyle(element);
+    return style.borderTopStyle !== "none" && parseFloat(style.borderTopWidth) > 0;
+  }).length,
+}));
+if (projectBorders.total === 0 || projectBorders.bordered !== projectBorders.total) {
+  throw new Error(`project groups were not drawn as bordered cards: ${JSON.stringify(projectBorders)}`);
+}
 // 「临时对话」段取代了「全部对话」：没有临时对话时只留空状态和新建入口，不再把项目里的会话重复列一遍。
 if (await page.locator('[data-section="all"]').count()) {
   throw new Error("the removed all-conversations section is still rendered");
@@ -195,9 +222,9 @@ const treeBranches = await page.locator('[data-section="pinned"] .project-group[
   elements.map((element) => element.textContent).join(",")
 ));
 if (treeBranches !== "├─,└─") throw new Error(`conversation rows did not render tree connectors: ${treeBranches}`);
-await page.locator('[data-section-label="scratch"]').click();
+await page.locator('[data-section-label="scratch"] .sidebar-section-toggle').click();
 await page.waitForFunction(() => document.querySelectorAll('[data-section="scratch"]').length === 0);
-await page.locator('[data-section-label="scratch"]').click();
+await page.locator('[data-section-label="scratch"] .sidebar-section-toggle').click();
 await page.waitForFunction(() => document.querySelectorAll('[data-section="scratch"] .task-list-empty').length === 1);
 await page.screenshot({ path: resolve(artifacts, "conversation.png") });
 if (!(await page.locator(".response-duration").textContent())?.includes("本次回答耗时 · 8 秒")) throw new Error("completed response duration was not rendered");

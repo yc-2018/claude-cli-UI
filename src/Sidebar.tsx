@@ -642,19 +642,36 @@ export default function Sidebar({
   // 已置顶的临时对话只留在置顶段，不在这里重复渲染。
   const scratchConversations = scratchProject?.conversations.filter((conversation) => !conversation.pinned) ?? [];
   const pinnedEmpty = pinnedProjects.length === 0 && pinnedConversations.length === 0;
-  const sectionLabel = (section: SectionKey, text: string, count: number, pinTarget: boolean) => (
-    <button
-      className={`sidebar-section-label ${pinTarget && pinDropSection === section ? "pin-drop" : ""}`}
+  // 标题栏既要能折叠，又要挂一个「新建」入口，所以拆成两层：外层保留 .sidebar-section-label 承接拖拽，内层按钮负责折叠。
+  const sectionLabel = (
+    section: SectionKey,
+    text: string,
+    count: number,
+    options: { pinTarget?: boolean; action?: { label: string; onClick(): void } } = {},
+  ) => (
+    <div
+      className={`sidebar-section-label ${options.pinTarget && pinDropSection === section ? "pin-drop" : ""}`}
       data-section-label={section}
-      onClick={() => toggleSection(section)}
-      onDragOver={pinTarget ? (event) => dragOverPinTarget(event, section) : undefined}
-      onDrop={pinTarget ? (event) => dropOnPinTarget(event, section) : undefined}
-      type="button"
+      onDragOver={options.pinTarget ? (event) => dragOverPinTarget(event, section) : undefined}
+      onDrop={options.pinTarget ? (event) => dropOnPinTarget(event, section) : undefined}
     >
-      {closedSections.has(section) ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-      <span>{text}</span>
-      <span className="sidebar-section-count">{count}</span>
-    </button>
+      <button className="sidebar-section-toggle" onClick={() => toggleSection(section)} type="button">
+        {closedSections.has(section) ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+        <span>{text}</span>
+        <span className="sidebar-section-count">{count}</span>
+      </button>
+      {options.action ? (
+        <button
+          aria-label={options.action.label}
+          className="sidebar-section-action"
+          onClick={options.action.onClick}
+          title={options.action.label}
+          type="button"
+        >
+          <Plus size={13} />
+        </button>
+      ) : null}
+    </div>
   );
 
   return (
@@ -664,13 +681,9 @@ export default function Sidebar({
         <span>claude-cli-UI</span>
         <button className="icon-button sidebar-toggle" onClick={onToggle} title="收起侧边栏"><PanelLeftClose size={18} /></button>
       </div>
-      <button className="new-task-button" onClick={onNewProject}>
-        <Plus size={16} />
-        <span>新建项目</span>
-      </button>
       <div className="sidebar-sections">
         <div className="sidebar-section" data-section-group="pinned">
-          {sectionLabel("pinned", "置顶", pinnedProjects.length + pinnedConversations.length, true)}
+          {sectionLabel("pinned", "置顶", pinnedProjects.length + pinnedConversations.length, { pinTarget: true })}
           {!closedSections.has("pinned") ? (
             <nav className="project-list" data-section="pinned" aria-label="置顶">
               {pinnedEmpty ? <div className="task-list-empty">把项目或对话拖到这里置顶</div> : null}
@@ -684,8 +697,23 @@ export default function Sidebar({
             </nav>
           ) : null}
         </div>
+        <div className="sidebar-section" data-section-group="projects">
+          {sectionLabel("projects", "项目", unpinnedProjects.length, {
+            pinTarget: true,
+            action: { label: "新建项目", onClick: onNewProject },
+          })}
+          {!closedSections.has("projects") ? (
+            <nav className="project-list" data-section="projects" aria-label="项目列表">
+              {unpinnedProjects.length === 0 ? <div className="task-list-empty">还没有项目</div> : null}
+              {unpinnedProjects.map((project) =>
+                renderProjectGroup(project, "projects", project.conversations.filter((conversation) => !conversation.pinned)))}
+            </nav>
+          ) : null}
+        </div>
         <div className="sidebar-section" data-section-group="scratch">
-          {sectionLabel("scratch", "临时对话", scratchConversations.length, false)}
+          {sectionLabel("scratch", "临时对话", scratchConversations.length, {
+            action: { label: "新建临时对话", onClick: onNewScratchConversation },
+          })}
           {!closedSections.has("scratch") ? (
             <nav className="project-list" data-section="scratch" aria-label="临时对话">
               {scratchConversations.length === 0 ? <div className="task-list-empty">不用选文件夹，直接开一次对话</div> : null}
@@ -695,17 +723,6 @@ export default function Sidebar({
                     renderConversationRow(conversation, scratchProject.id, "scratch", index === scratchConversations.length - 1, true))}
                 </div>
               ) : null}
-              <button className="empty-conversation" onClick={onNewScratchConversation}>新建临时对话</button>
-            </nav>
-          ) : null}
-        </div>
-        <div className="sidebar-section" data-section-group="projects">
-          {sectionLabel("projects", "项目", unpinnedProjects.length, true)}
-          {!closedSections.has("projects") ? (
-            <nav className="project-list" data-section="projects" aria-label="项目列表">
-              {unpinnedProjects.length === 0 ? <div className="task-list-empty">还没有项目</div> : null}
-              {unpinnedProjects.map((project) =>
-                renderProjectGroup(project, "projects", project.conversations.filter((conversation) => !conversation.pinned)))}
             </nav>
           ) : null}
         </div>
