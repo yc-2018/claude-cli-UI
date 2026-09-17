@@ -107,13 +107,61 @@ jobs:
           name: claude-cli-UI-windows-${{ github.sha }}
           path: release
 
+      # Assets are uploaded one at a time: the parallel upload performed by
+      # softprops/action-gh-release intermittently fails with "Error saving asset"
+      # once several large binaries are pushed at once.
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: |
-            release/*.exe
-            release/*.blockmap
-            release/latest*.yml
-            release/portable-update.json
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+
+          # Keep the release as a draft until every asset is verified, so a partial
+          # upload is never visible to users or to the auto-updater.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; reusing it."
+          else
+            gh release create "$tag" --draft --verify-tag --generate-notes
+          fi
+
+          shopt -s nullglob
+          assets=()
+          for candidate in release/*.exe release/*.blockmap release/latest*.yml release/portable-update.json; do
+            if [ -f "$candidate" ]; then
+              assets+=("$candidate")
+            fi
+          done
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "::error::No release assets found in release/" >&2
+            exit 1
+          fi
+
+          for asset in "${assets[@]}"; do
+            name="${asset##*/}"
+            uploaded=0
+            for attempt in 1 2 3; do
+              if gh release upload "$tag" "$asset" --clobber; then
+                uploaded=1
+                break
+              fi
+              echo "::warning::Upload of $name failed (attempt $attempt/3)"
+              sleep $((attempt * 15))
+            done
+            if [ "$uploaded" -ne 1 ]; then
+              echo "::error::Uploading $name failed after 3 attempts" >&2
+              exit 1
+            fi
+          done
+
+          expected="$(printf '%s\n' "${assets[@]##*/}" | sort)"
+          actual="$(gh release view "$tag" --json assets --jq '.assets[].name' | sort)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Release $tag does not carry the expected asset set" >&2
+            diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
+            exit 1
+          fi
+
+          gh release edit "$tag" --draft=false
+          echo "Published $tag with ${#assets[@]} assets."
