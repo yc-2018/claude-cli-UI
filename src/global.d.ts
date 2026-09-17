@@ -6,6 +6,7 @@ declare global {
   interface Window {
     claudeDesk: {
       selectWorkspace(): Promise<string | null>;
+      getScratchWorkspace(): Promise<string>;
       openWorkspace(workspace: string): Promise<{ opened: boolean; error?: string }>;
       getClaudeInfo(): Promise<{ available: boolean; version?: string }>;
       getModels(workspace: string): Promise<ModelConfig>;

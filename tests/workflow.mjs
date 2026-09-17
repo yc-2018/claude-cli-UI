@@ -155,6 +155,16 @@ await writeFile(resolve(cliSessions, `${importedSessionId}.jsonl`), [
   },
 ].map((entry) => JSON.stringify(entry)).join("\n"), "utf8");
 
+// 模型映射走文件而不是环境变量：展开模型菜单会重新读一遍配置，只有可变的来源才验证得到刷新。
+const modelsFile = resolve(profile, "test-models.json");
+const writeTestModels = (models) => writeFile(modelsFile, JSON.stringify(models), "utf8");
+await writeTestModels({
+  Sonnet: "ThirdParty-A",
+  Opus: "ThirdParty-A",
+  Fable: "ThirdParty-B",
+  Haiku: "ThirdParty-B",
+});
+
 const launch = () => electron.launch({
   ...(packagedExecutable ? { executablePath: packagedExecutable } : {}),
   args: packagedExecutable ? [] : [root],
@@ -171,12 +181,7 @@ const launch = () => electron.launch({
     CLAUDE_DESK_TEST_UPDATE_INSTALL: "1",
     CLAUDE_DESK_TEST_EXPECT_EFFORT: "high",
     PORTABLE_EXECUTABLE_FILE: currentPortablePath,
-    CLAUDE_DESK_TEST_MODELS: JSON.stringify({
-      Sonnet: "ThirdParty-A",
-      Opus: "ThirdParty-A",
-      Fable: "ThirdParty-B",
-      Haiku: "ThirdParty-B",
-    }),
+    CLAUDE_DESK_TEST_MODELS_FILE: modelsFile,
     CLAUDE_DESK_CLAUDE_EXECUTABLE: process.execPath,
     CLAUDE_DESK_CLAUDE_PREFIX_ARGS: JSON.stringify([fakeCli]),
   },
@@ -224,7 +229,7 @@ const reorderDrag = async (row, handleSelector, target, targetPosition) => {
 };
 
 /**
- * 会话行在所属项目的文件夹里和「全部对话」段各渲染一次，断言默认只认文件夹里那一份，
+ * 会话行可能在所属项目的文件夹里和「置顶」段各渲染一次，断言默认只认文件夹里那一份，
  * 否则 Playwright 严格模式会因为一个选择器命中两个元素而报歧义。
  */
 const inFolder = (page, selector, options) => page.locator(`.project-conversations ${selector}`, options);
@@ -503,6 +508,53 @@ try {
   if (!["Sonnet · ThirdParty-A", "Opus · ThirdParty-A", "Fable · ThirdParty-B", "Haiku · ThirdParty-B"].every((label) => modelOptions.includes(label))) {
     throw new Error(`dynamic models missing: ${modelOptions.join(", ")}`);
   }
+  // 换路由后同一个角色会指向别的实际模型，所以每次展开菜单都要重新读配置；
+  // 1M 变体的容量只能从模型标识看出来，菜单和上下文状态都必须打上标记。
+  await page.keyboard.press("Escape");
+  await writeTestModels({
+    Sonnet: "Router2-Sonnet",
+    Opus: "Router2-Opus[1m]",
+    Fable: "ThirdParty-B",
+    Haiku: "ThirdParty-B",
+  });
+  await page.locator(".model-select .composer-select-trigger").click();
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll(".model-select .composer-select-option small")].some((node) => node.textContent === "Router2-Opus[1m]")
+  ));
+  const refreshedModelOptions = await page.locator(".model-select .composer-select-option").evaluateAll((options) => options.map((option) => ({
+    role: option.querySelector("strong")?.textContent ?? "",
+    actual: option.querySelector("small")?.textContent ?? "",
+    badge: option.querySelector(".composer-select-badge")?.textContent ?? "",
+  })));
+  if (!refreshedModelOptions.some((option) => option.actual === "Router2-Sonnet")) {
+    throw new Error(`opening the model menu did not refresh the router mapping: ${JSON.stringify(refreshedModelOptions)}`);
+  }
+  const largeContextOption = refreshedModelOptions.find((option) => option.actual === "Router2-Opus[1m]");
+  if (largeContextOption?.badge !== "1M") {
+    throw new Error(`the 1M model was not marked in the picker: ${JSON.stringify(refreshedModelOptions)}`);
+  }
+  if (refreshedModelOptions.some((option) => option.actual === "ThirdParty-A")) {
+    throw new Error(`stale router mapping survived the refresh: ${JSON.stringify(refreshedModelOptions)}`);
+  }
+  // 选到 1M 模型之后，上下文状态条必须能看出这份容量，而不是只剩一个百分比。
+  await page.locator('.model-select .composer-select-option[data-value="opus"]').click();
+  await page.waitForFunction(() => document.querySelector(".context-window-badge")?.textContent === "1M");
+  await page.keyboard.press("Escape");
+  await writeTestModels({
+    Sonnet: "ThirdParty-A",
+    Opus: "ThirdParty-A",
+    Fable: "ThirdParty-B",
+    Haiku: "ThirdParty-B",
+  });
+  await page.locator(".model-select .composer-select-trigger").click();
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll(".model-select .composer-select-option small")].every((node) => node.textContent !== "Router2-Opus[1m]")
+  ));
+  if (await page.locator(".context-window-badge").count()) {
+    throw new Error("the 1M badge stayed after the router stopped resolving to a 1M model");
+  }
+  // 上面为了验证 1M 标记把会话切到了 opus，后面的断言依赖它仍是 fable，这里顺手切回去。
+  await page.locator('.model-select .composer-select-option[data-value="fable"]').click();
   await page.locator(".composer textarea").fill("/model");
   await page.locator(".composer textarea").press("Enter");
   await page.waitForFunction(() => document.querySelector('.model-select .composer-select-trigger')?.getAttribute("aria-expanded") === "true");
@@ -585,9 +637,45 @@ try {
   }
   const compactButton = page.locator('[aria-label="压缩上下文"]');
   if (await compactButton.isDisabled()) throw new Error("context compact button was unexpectedly disabled");
+  // 压缩过程本身必须可见：CLI 的 compact_progress 是顶层 type、既没有 subtype 也没有 status，
+  // 漏接它的话整段压缩都是空白，界面只会在结束后蹦出一张卡。running 卡片存在时间很短，先挂观察器再点。
+  await page.evaluate(() => {
+    window.__compactionProgress = { phases: [], texts: [] };
+    const record = () => {
+      for (const node of document.querySelectorAll(".context-compaction.running")) {
+        const phase = node.getAttribute("data-compaction-phase") ?? "";
+        const text = node.textContent ?? "";
+        if (phase && window.__compactionProgress.phases.at(-1) !== phase) window.__compactionProgress.phases.push(phase);
+        if (text && window.__compactionProgress.texts.at(-1) !== text) window.__compactionProgress.texts.push(text);
+      }
+    };
+    record();
+    new MutationObserver(record).observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+  });
   await compactButton.click();
   await page.waitForSelector(".context-compaction.done", { timeout: 15_000 });
-  if (!(await page.locator(".context-compaction.done").last().textContent())?.includes("120,000")) throw new Error("compact token reduction was not shown");
+  const compactionProgress = await page.evaluate(() => window.__compactionProgress);
+  if (!compactionProgress.phases.includes("pre_hooks") || !compactionProgress.phases.includes("compacting")) {
+    throw new Error(`compaction progress phases were not rendered: ${JSON.stringify(compactionProgress.phases)}`);
+  }
+  if (!compactionProgress.texts.some((text) => text.includes("正在执行压缩前钩子"))) {
+    throw new Error(`compaction hook phase had no readable copy: ${JSON.stringify(compactionProgress.texts)}`);
+  }
+  // compact_start 带的 hint_text 是这次压缩为何发生的唯一说明，丢了就只剩一句「正在压缩上下文」。
+  if (!compactionProgress.texts.some((text) => text.includes("上下文接近上限"))) {
+    throw new Error(`compact_start hint was not rendered: ${JSON.stringify(compactionProgress.texts)}`);
+  }
+  const compactionDoneText = await page.locator(".context-compaction.done").last().textContent();
+  // wire 上是 compact_metadata.pre_tokens（snake_case），磁盘 JSONL 才是 compactMetadata.preTokens。
+  // 只认 camelCase 的话这些读数全是 undefined，卡片会退回那句没有信息量的兜底文案。
+  if (!compactionDoneText?.includes("120,000") || !compactionDoneText?.includes("14,000")) {
+    throw new Error(`compact token reduction was not shown: ${compactionDoneText}`);
+  }
+  if (!compactionDoneText?.includes("手动")) throw new Error(`compact trigger was not shown: ${compactionDoneText}`);
+  if (!compactionDoneText?.includes("106,000")) throw new Error(`cumulative dropped tokens were not shown: ${compactionDoneText}`);
+  if (compactionDoneText?.includes("正在整理较早的对话内容")) {
+    throw new Error(`compaction card fell back to the placeholder copy: ${compactionDoneText}`);
+  }
   await page.locator(".context-compaction.done summary").last().click();
   if (!(await page.locator(".context-compaction-summary").last().textContent())?.includes("已保留项目目标")) throw new Error("compact summary was not displayed");
   // 压缩卡片必须紧跟在触发它的那条消息后面，否则长对话里根本看不到上下文正在被压缩。
@@ -1013,15 +1101,55 @@ try {
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
   if (await page.locator(".permission-dialog").count()) throw new Error("persisted conversation permission prompted again");
 
-  // #1 API 重试：CLI 重试时渲染层必须显示重试状态而不是一直停在「正在准备回答」
+  // #1 API 重试：CLI 重试时渲染层必须显示重试状态而不是一直停在「正在准备回答」。
+  // 提示只在重试期间存在，逐次 waitForSelector 采样会被主进程的偶发卡顿整段错过，
+  // 所以挂 MutationObserver 把出现过的文案和「是否与占位提示同时出现」都记下来再断言。
+  const watchRetryNotices = () => page.evaluate(() => {
+    window.__retryNotices = [];
+    window.__retryWithPlaceholder = false;
+    const record = () => {
+      const notice = document.querySelector(".retry-notice");
+      if (!notice) return;
+      const text = notice.textContent ?? "";
+      if (text && window.__retryNotices.at(-1) !== text) window.__retryNotices.push(text);
+      if (document.querySelector(".thinking")) window.__retryWithPlaceholder = true;
+    };
+    record();
+    new MutationObserver(record).observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+  });
+  await watchRetryNotices();
   await page.locator(".composer textarea").fill("API重试测试");
   await page.locator(".composer textarea").press("Enter");
-  await page.waitForSelector(".retry-notice");
-  const retryNoticeText = await page.locator(".retry-notice").textContent();
-  if (!retryNoticeText?.includes("第 1/10 次")) throw new Error(`retry notice did not show attempt count: ${retryNoticeText}`);
-  if (await page.locator(".thinking").count() > 0) throw new Error("preparing-answer placeholder shown alongside retry notice");
+  await page.waitForFunction(() => (window.__retryNotices?.length ?? 0) > 0);
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
   if (await page.locator(".retry-notice").count() > 0) throw new Error("retry notice was not cleared after response completed");
+  if (await page.evaluate(() => window.__retryWithPlaceholder)) throw new Error("preparing-answer placeholder shown alongside retry notice");
+  const retryNotices = await page.evaluate(() => window.__retryNotices);
+  const firstRetry = retryNotices.find((text) => text.includes("第 1/10 次"));
+  if (!firstRetry) throw new Error(`retry notice did not show attempt count: ${JSON.stringify(retryNotices)}`);
+  // error 是字符串 overloaded、状态码走 error_status 529：两者都要能映射成可读文案，否则真实重试提示等于没显示。
+  if (!firstRetry.includes("服务过载")) throw new Error(`retry notice did not surface the real error string: ${firstRetry}`);
+  if (!firstRetry.includes("529")) throw new Error(`retry notice did not surface the HTTP status: ${firstRetry}`);
+  // 连响应头都没回的重试没有状态码，只有 no_response.waited_ms 能说明它在等什么。
+  const noResponseRetry = retryNotices.find((text) => text.includes("第 2/10 次"));
+  if (!noResponseRetry) throw new Error(`no-response retry was not rendered: ${JSON.stringify(retryNotices)}`);
+  if (!noResponseRetry.includes("已等待 30s")) {
+    throw new Error(`retry notice did not surface the no-response wait: ${noResponseRetry}`);
+  }
+
+  // #1b 子代理重试：走的是 tool_progress.subagent_retry，不认这条的话主对话同样只停在「正在准备回答」
+  await watchRetryNotices();
+  await page.locator(".composer textarea").fill("子代理重试测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForFunction(() => (window.__retryNotices?.length ?? 0) > 0);
+  // 子代理恢复后 CLI 只是少发 subagent_retry，没有别的信号，提示必须靠它撤掉。
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  if (await page.locator(".retry-notice").count() > 0) throw new Error("subagent retry notice was not cleared after recovery");
+  if (await page.evaluate(() => window.__retryWithPlaceholder)) throw new Error("preparing-answer placeholder shown alongside subagent retry notice");
+  const subagentRetries = await page.evaluate(() => window.__retryNotices);
+  const subagentRetry = subagentRetries.find((text) => text.includes("第 2/10 次"));
+  if (!subagentRetry) throw new Error(`subagent retry notice was not rendered: ${JSON.stringify(subagentRetries)}`);
+  if (!subagentRetry.includes("Explore")) throw new Error(`subagent retry notice did not name the agent: ${subagentRetry}`);
 
   // #4 直连权限：「本对话始终允许」必须发整工具 session 规则，不得原样回显按命令的 localSettings 建议
   await page.locator(".composer textarea").fill("直连权限测试");
@@ -1586,12 +1714,16 @@ try {
   watchErrors(page);
   await page.waitForFunction(() => document.querySelectorAll(".project-group").length === 3);
 
-  // 「全部对话」是按最近更新倒序的派生列表，不用先选项目就能看到全部会话。
-  const allSectionOrder = await page.locator('[data-section="all"] .task-row').evaluateAll((elements) => (
-    elements.map((element) => element.getAttribute("data-conversation-id")).join(",")
-  ));
-  if (allSectionOrder !== "order-conversation-b,order-conversation-c,order-conversation-a,order-conversation-d,order-conversation-e") {
-    throw new Error(`all-conversations section was not sorted by recency: ${allSectionOrder}`);
+  // 「临时对话」段取代了原来的「全部对话」：没有临时对话时只显示空状态和新建入口，
+  // 不再把每个会话在侧边栏里重复渲染一遍。
+  if (await page.locator('[data-section="all"]').count()) {
+    throw new Error("the removed all-conversations section is still rendered");
+  }
+  if (await page.locator('[data-section="scratch"] .task-row').count()) {
+    throw new Error("scratch section listed conversations that belong to real projects");
+  }
+  if (!(await page.locator('[data-section="scratch"] .task-list-empty').count())) {
+    throw new Error("scratch section did not show its empty hint before any temporary conversation existed");
   }
   if (!(await page.locator('[data-section="pinned"] .task-list-empty').count())) {
     throw new Error("pinned section did not show its empty hint before anything was pinned");
@@ -1683,14 +1815,13 @@ try {
       ?.getAttribute("data-pinned") === "false"
   ));
 
-  // 未置顶项目里的会话一旦置顶，就从原文件夹搬到置顶段，但「全部对话」里仍然看得到。
+  // 未置顶项目里的会话一旦置顶，就从原文件夹搬到置顶段，只在一处出现。
   const conversationE = projectC.locator('[data-conversation-id="order-conversation-e"]');
   await conversationE.hover();
   await conversationE.locator('[title="置顶会话"]').click();
   await page.waitForFunction(() => (
     document.querySelectorAll('[data-section="pinned"] .loose-conversations [data-conversation-id="order-conversation-e"]').length === 1 &&
-    document.querySelectorAll('.project-group[data-project-id="order-project-c"] [data-conversation-id="order-conversation-e"]').length === 0 &&
-    document.querySelectorAll('[data-section="all"] [data-conversation-id="order-conversation-e"]').length === 1
+    document.querySelectorAll('.project-group[data-project-id="order-project-c"] [data-conversation-id="order-conversation-e"]').length === 0
   ));
   const looseConversationE = page.locator('[data-section="pinned"] .loose-conversations [data-conversation-id="order-conversation-e"]');
   await looseConversationE.hover();
@@ -1784,8 +1915,44 @@ try {
     restoredOrder.projectBPinned !== "true" ||
     restoredOrder.conversationPinned !== "true" ||
     restoredOrder.pinnedSectionProjects.join(",") !== "order-project-a,order-project-b" ||
-    restoredOrder.sections.join(",") !== "pinned,all,projects"
+    restoredOrder.sections.join(",") !== "pinned,scratch,projects"
   ) throw new Error(`project/conversation order or pin state did not survive restart: ${JSON.stringify(restoredOrder)}`);
+
+  // 临时对话：不选文件夹也能直接开一次对话，它归在内建的「临时对话」分组下，
+  // 不出现在「项目」段，并且能真的把 CLI 跑起来（cwd 是 userData 下的 scratch 目录）。
+  await page.locator('[data-section="scratch"] .empty-conversation').click();
+  await page.waitForFunction(() => document.querySelectorAll('[data-section="scratch"] .task-row').length === 1);
+  if (await page.locator(".project-group").count() !== 3) {
+    throw new Error("the scratch group leaked into the project section");
+  }
+  const scratchGroupName = await page.locator(".workspace-chip strong").textContent();
+  if (scratchGroupName !== "临时对话") throw new Error(`temporary conversation was not scoped to the scratch group: ${scratchGroupName}`);
+  await page.locator(".composer textarea").fill("临时对话测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  // 项目持久化带 350ms 防抖，而且流式输出期间每次状态更新都会把它重置；刚收到 done 就立刻
+  // 读存储只会读到这一轮开始前的快照，所以这里主动等落盘而不是断言一次。
+  const readScratch = () => page.evaluate(async () => {
+    const projects = await window.claudeDesk.getProjectStore();
+    const scratch = Array.isArray(projects) ? projects.find((project) => project.kind === "scratch") : undefined;
+    return {
+      workspace: scratch?.workspace ?? "",
+      conversations: scratch?.conversations?.length ?? 0,
+      pinned: scratch?.pinned ?? null,
+    };
+  });
+  let scratchRun = await readScratch();
+  for (let attempt = 0; attempt < 50 && scratchRun.conversations !== 1; attempt += 1) {
+    await page.waitForTimeout(100);
+    scratchRun = await readScratch();
+  }
+  if (scratchRun.conversations !== 1 || !scratchRun.workspace.replace(/\\/g, "/").endsWith("/scratch")) {
+    throw new Error(`temporary conversation was not persisted under the scratch workspace: ${JSON.stringify(scratchRun)}`);
+  }
+  // 临时对话分组不能被置顶：置顶会让同一批会话在「置顶」和「临时对话」两段里重复出现。
+  if (scratchRun.pinned !== null) {
+    throw new Error(`the scratch group accepted a pin state: ${JSON.stringify(scratchRun)}`);
+  }
 
   await electronApp.close();
   electronApp = undefined;

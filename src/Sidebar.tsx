@@ -34,6 +34,7 @@ interface Props {
   onSelectConversation(id: string): void;
   onNewProject(): void;
   onNewConversation(projectId: string): void;
+  onNewScratchConversation(): void;
   onRefreshProject(projectId: string): Promise<void>;
   onOpenProject(workspace: string): void;
   onDeleteConversation(projectId: string, conversationId: string): void;
@@ -52,13 +53,13 @@ interface Props {
 interface EditingName {
   kind: "project" | "conversation";
   id: string;
-  // 同一个会话在所属文件夹和「全部对话」里各渲染一次，重命名输入框只能出现在点了改名的那一份上：
+  // 同一个会话可能在所属文件夹和「置顶」里各渲染一次，重命名输入框只能出现在点了改名的那一份上：
   // 两个 autoFocus 输入框会互相抢焦点，先失焦的那个立刻触发保存，改名框还没输入就消失了。
   section: SectionKey;
   value: string;
 }
 
-type SectionKey = "pinned" | "all" | "projects";
+type SectionKey = "pinned" | "scratch" | "projects";
 
 type DragItem = {
   kind: "project";
@@ -116,6 +117,7 @@ export default function Sidebar({
   onSelectConversation,
   onNewProject,
   onNewConversation,
+  onNewScratchConversation,
   onRefreshProject,
   onOpenProject,
   onDeleteConversation,
@@ -629,14 +631,16 @@ export default function Sidebar({
     );
   };
 
-  const pinnedProjects = projects.filter((project) => project.pinned);
-  const unpinnedProjects = projects.filter((project) => !project.pinned);
+  // 临时对话是内建分组，既不出现在「项目」段，也不参与项目置顶。
+  const scratchProject = projects.find((project) => project.kind === "scratch") ?? null;
+  const folderProjects = projects.filter((project) => project.kind !== "scratch");
+  const pinnedProjects = folderProjects.filter((project) => project.pinned);
+  const unpinnedProjects = folderProjects.filter((project) => !project.pinned);
   // 置顶区里的对话只从「未置顶项目」里捞：置顶项目已经整个搬进来了，它的对话跟着走。
-  const pinnedConversations = unpinnedProjects.flatMap((project) =>
+  const pinnedConversations = [...unpinnedProjects, ...(scratchProject ? [scratchProject] : [])].flatMap((project) =>
     project.conversations.filter((conversation) => conversation.pinned).map((conversation) => ({ conversation, projectId: project.id })));
-  const allConversations = projects
-    .flatMap((project) => project.conversations.map((conversation) => ({ conversation, projectId: project.id })))
-    .sort((a, b) => b.conversation.updatedAt - a.conversation.updatedAt);
+  // 已置顶的临时对话只留在置顶段，不在这里重复渲染。
+  const scratchConversations = scratchProject?.conversations.filter((conversation) => !conversation.pinned) ?? [];
   const pinnedEmpty = pinnedProjects.length === 0 && pinnedConversations.length === 0;
   const sectionLabel = (section: SectionKey, text: string, count: number, pinTarget: boolean) => (
     <button
@@ -680,17 +684,18 @@ export default function Sidebar({
             </nav>
           ) : null}
         </div>
-        <div className="sidebar-section" data-section-group="all">
-          {sectionLabel("all", "全部对话", allConversations.length, false)}
-          {!closedSections.has("all") ? (
-            <nav className="project-list" data-section="all" aria-label="全部对话">
-              {allConversations.length === 0 ? <div className="task-list-empty">还没有对话</div> : null}
-              {allConversations.length > 0 ? (
+        <div className="sidebar-section" data-section-group="scratch">
+          {sectionLabel("scratch", "临时对话", scratchConversations.length, false)}
+          {!closedSections.has("scratch") ? (
+            <nav className="project-list" data-section="scratch" aria-label="临时对话">
+              {scratchConversations.length === 0 ? <div className="task-list-empty">不用选文件夹，直接开一次对话</div> : null}
+              {scratchConversations.length > 0 && scratchProject ? (
                 <div className="conversation-rows loose-conversations">
-                  {allConversations.map(({ conversation, projectId }, index) =>
-                    renderConversationRow(conversation, projectId, "all", index === allConversations.length - 1, false))}
+                  {scratchConversations.map((conversation, index) =>
+                    renderConversationRow(conversation, scratchProject.id, "scratch", index === scratchConversations.length - 1, true))}
                 </div>
               ) : null}
+              <button className="empty-conversation" onClick={onNewScratchConversation}>新建临时对话</button>
             </nav>
           ) : null}
         </div>

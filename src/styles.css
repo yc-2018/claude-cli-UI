@@ -592,6 +592,7 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .context-status { display: flex; min-width: 0; align-items: center; gap: 7px; color: #777770; font-size: 11px; }
 .context-status-text { overflow: hidden; max-width: 180px; text-overflow: ellipsis; white-space: nowrap; }
 .context-status small { color: #999991; font-family: "Cascadia Code", Consolas, monospace; font-size: 10px; }
+.context-window-badge { flex: 0 0 auto; padding: 0 4px; border: 1px solid #cfd8e8; border-radius: 3px; background: #eef3fb; color: #4a6da8; font-size: 9.5px; font-style: normal; font-weight: 650; }
 .context-compact-button { display: flex; height: 27px; align-items: center; gap: 5px; padding: 0 8px; border: 1px solid #d8d8d1; border-radius: 5px; background: #fff; color: #5d5d57; font-size: 10.5px; cursor: pointer; }
 .context-compact-button:hover:not(:disabled) { border-color: #c1c1ba; background: #f2f2ee; color: #33332f; }
 .context-compact-button:disabled { opacity: .45; cursor: default; }
@@ -681,6 +682,9 @@ button, select, textarea { -webkit-app-region: no-drag; }
 }
 
 .primary-button:hover { background: #22221f; }
+/* 次要入口：和「新建项目」同一行高，但不抢主按钮的视觉重量。 */
+.ghost-button { display: flex; align-items: center; gap: 7px; height: 32px; margin-top: 10px; padding: 0 12px; border: 1px solid #dcdcd6; border-radius: 6px; background: transparent; color: #5d5d57; font-size: 12px; font-weight: 540; cursor: pointer; }
+.ghost-button:hover { border-color: #c9c9c1; background: #f3f3f0; }
 .conversation-intro { padding-bottom: 170px; }
 .intro-mark { width: 42px; height: 42px; margin-bottom: 15px; }
 .conversation-intro h1 { font-size: 18px; }
@@ -701,6 +705,8 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .context-compaction-copy { display: grid; min-width: 0; gap: 2px; }
 .context-compaction-copy strong { font-size: 11.5px; font-weight: 650; }
 .context-compaction-copy small { color: #888880; font-size: 10.5px; }
+.context-compaction-hint { color: #9a9a90; font-style: italic; overflow-wrap: anywhere; }
+.context-compaction-icon .spinner { width: 12px; height: 12px; border-width: 2px; border-color: #dcdcd2; border-top-color: #8a8a80; }
 .context-compaction details { grid-column: 2; min-width: 0; }
 .context-compaction summary { color: #77776f; font-size: 10.5px; cursor: pointer; }
 .context-compaction-summary { max-height: 300px; margin-top: 8px; padding: 9px 11px; overflow: auto; border-left: 2px solid #d2d2ca; background: #fff; color: #55554f; font-size: 11.5px; line-height: 1.55; }
@@ -1194,6 +1200,10 @@ button.activity-row:hover, button.activity-row:focus-visible { background: #f1f1
 .composer-select-option strong { overflow: hidden; font-size: 11.5px; font-weight: 590; text-overflow: ellipsis; white-space: nowrap; }
 .composer-select-option small { overflow: hidden; color: #8b8b84; font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
 .composer-select-option > svg { flex: 0 0 auto; color: var(--accent); }
+/* 1M 容量标记：跟在角色名后面的小徽标，不占 detail 的省略空间。 */
+.composer-select-badge { flex: 0 0 auto; margin-left: 5px; padding: 0 4px; border: 1px solid #cfd8e8; border-radius: 3px; background: #eef3fb; color: #4a6da8; font-size: 9.5px; font-style: normal; font-weight: 650; letter-spacing: .02em; }
+.composer-select-option strong .composer-select-badge { vertical-align: 1px; }
+.composer-select-refreshing { display: flex; align-items: center; gap: 6px; padding: 5px 9px; border-bottom: 1px solid #ebebe4; color: #8b8b84; font-size: 10.5px; }
 
 .command-menu {
   position: absolute;

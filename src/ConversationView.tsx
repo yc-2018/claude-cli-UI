@@ -5,22 +5,25 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import type { Activity, ActivityDetail, ActivityDiffLine, ApiRetryState, Attachment, ChatMessage, ContextCompaction, ResponseTimelineItem } from "./types";
+import type { Activity, ActivityDetail, ActivityDiffLine, ApiRetryState, Attachment, ChatMessage, CompactionPhase, ContextCompaction, ResponseTimelineItem } from "./types";
 
 /** CLI 正在重试这一轮的 API 请求。不显示的话界面只会一直停在「正在准备回答」。 */
 function RetryNotice({ retry }: { retry: ApiRetryState }) {
   const attempt = retry.maxRetries ? `第 ${retry.attempt}/${retry.maxRetries} 次` : `第 ${retry.attempt} 次`;
-  const delay = retry.delayMs !== undefined && retry.delayMs > 0
-    ? ` · 约 ${retry.delayMs >= 1000 ? `${Math.round(retry.delayMs / 100) / 10}s` : `${retry.delayMs}ms`} 后重试`
-    : "";
+  const delay = retry.delayMs ? ` · 约 ${formatDuration(retry.delayMs)} 后重试` : "";
+  // 子代理卡住时主对话看不出任何动静，不点名是哪个子代理就会以为整个界面死了。
+  const scope = retry.agentType ? `子代理 ${retry.agentType} 的 API 请求失败` : "API 请求失败";
+  const reason = [retry.message, retry.waitedMs ? `已等待 ${formatDuration(retry.waitedMs)} 仍未收到响应` : undefined]
+    .filter(Boolean)
+    .join(" · ");
   return (
     <div className="retry-notice">
       <span className="spinner" />
       <span>
-        API 请求失败，正在重试（{attempt}）{delay}
+        {scope}，正在重试（{attempt}）{delay}
         {retry.status !== undefined ? ` · HTTP ${retry.status}` : ""}
       </span>
-      {retry.message ? <small className="retry-reason">{retry.message}</small> : null}
+      {reason ? <small className="retry-reason">{reason}</small> : null}
     </div>
   );
 }
@@ -483,17 +486,47 @@ function UserMessage({ message, canEdit, onEditResend }: UserMessageProps) {
   );
 }
 
+const COMPACTION_PHASE_LABELS: Record<CompactionPhase, string> = {
+  pre_hooks: "正在执行压缩前钩子",
+  compacting: "正在总结较早的对话",
+  post_hooks: "正在执行压缩后钩子",
+  session_start: "正在重新载入会话上下文",
+};
+
+function formatDuration(ms: number) {
+  return ms >= 1000 ? `${Math.round(ms / 100) / 10}s` : `${Math.round(ms)}ms`;
+}
+
+/** post_tokens 在 wire 上是可选的，只有一半读数时也要把它说出来，不能整段退回一句没有信息量的提示。 */
+function compactionDetail(compaction: ContextCompaction) {
+  if (compaction.status === "error") return compaction.error ?? "上下文压缩失败";
+  if (compaction.status === "running") {
+    return compaction.phase ? COMPACTION_PHASE_LABELS[compaction.phase] : "Claude 正在整理较早的对话内容";
+  }
+  const parts: string[] = [];
+  if (compaction.trigger !== "unknown") parts.push(compaction.trigger === "auto" ? "自动" : "手动");
+  if (compaction.preTokens !== undefined && compaction.postTokens !== undefined) {
+    parts.push(`${compaction.preTokens.toLocaleString()} → ${compaction.postTokens.toLocaleString()} tokens`);
+  } else if (compaction.preTokens !== undefined) {
+    parts.push(`压缩前 ${compaction.preTokens.toLocaleString()} tokens`);
+  } else if (compaction.postTokens !== undefined) {
+    parts.push(`压缩后 ${compaction.postTokens.toLocaleString()} tokens`);
+  }
+  if (compaction.droppedTokens) parts.push(`累计压掉 ${compaction.droppedTokens.toLocaleString()}`);
+  if (compaction.durationMs) parts.push(`耗时 ${formatDuration(compaction.durationMs)}`);
+  return parts.length > 0 ? parts.join(" · ") : "Claude 已整理较早的对话内容";
+}
+
 function CompactionCard({ compaction }: { compaction: ContextCompaction }) {
   return (
-    <div className={`context-compaction ${compaction.status}`} data-compaction-id={compaction.id}>
-      <span className="context-compaction-icon"><BrainCircuit size={14} /></span>
+    <div className={`context-compaction ${compaction.status}`} data-compaction-id={compaction.id} data-compaction-phase={compaction.phase ?? ""}>
+      <span className="context-compaction-icon">
+        {compaction.status === "running" ? <span className="spinner" /> : <BrainCircuit size={14} />}
+      </span>
       <span className="context-compaction-copy">
         <strong>{compaction.status === "running" ? "正在压缩上下文" : compaction.status === "error" ? "上下文压缩失败" : "上下文已压缩"}</strong>
-        <small>
-          {compaction.status === "done" && compaction.preTokens !== undefined && compaction.postTokens !== undefined
-            ? `${compaction.trigger === "auto" ? "自动" : "手动"} · ${compaction.preTokens.toLocaleString()} → ${compaction.postTokens.toLocaleString()} tokens`
-            : compaction.error ?? "Claude 正在整理较早的对话内容"}
-        </small>
+        <small>{compactionDetail(compaction)}</small>
+        {compaction.hint ? <small className="context-compaction-hint">{compaction.hint}</small> : null}
       </span>
       {compaction.summary ? <details><summary>查看摘要</summary><div className="context-compaction-summary"><MarkdownMessage content={compaction.summary} /></div></details> : null}
     </div>

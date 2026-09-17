@@ -5,6 +5,8 @@ export interface ComposerSelectOption {
   value: string;
   label: string;
   detail?: string;
+  /** 短标记，例如 1M 上下文容量：跟在标签后面，避免挤进已经很长的 detail 里。 */
+  badge?: string;
 }
 
 export interface ComposerSelectHandle {
@@ -19,6 +21,9 @@ interface ComposerSelectProps {
   options: ComposerSelectOption[];
   title: string;
   value: string;
+  /** 每次展开都会调用：模型列表可能因为换了路由而变化，展开即刷新，不用用户记得去点按钮。 */
+  onOpen?(): void;
+  refreshing?: boolean;
   onChange(value: string): void;
 }
 
@@ -30,6 +35,8 @@ const ComposerSelect = forwardRef<ComposerSelectHandle, ComposerSelectProps>(fun
   options,
   title,
   value,
+  onOpen,
+  refreshing = false,
   onChange,
 }, forwardedRef) {
   const listboxId = useId();
@@ -44,6 +51,7 @@ const ComposerSelect = forwardRef<ComposerSelectHandle, ComposerSelectProps>(fun
     if (disabled || options.length === 0) return;
     setActiveIndex(selectedIndex);
     setOpen(true);
+    onOpen?.();
   };
 
   const closeMenu = (restoreFocus: boolean) => {
@@ -134,12 +142,16 @@ const ComposerSelect = forwardRef<ComposerSelectHandle, ComposerSelectProps>(fun
         {icon}
         <span className="composer-select-value">
           {selected ? selected.label : "暂无选项"}
+          {selected?.badge ? <em className="composer-select-badge">{selected.badge}</em> : null}
           {selected?.detail ? <small>· {selected.detail}</small> : null}
         </span>
         <ChevronDown className="composer-select-chevron" size={13} />
       </button>
       {open ? (
         <div className="composer-select-menu" id={listboxId} role="listbox" aria-label={ariaLabel}>
+          {refreshing ? (
+            <div className="composer-select-refreshing"><span className="mini-spinner" />正在刷新</div>
+          ) : null}
           {options.map((option, index) => (
             <button
               aria-selected={option.value === value}
@@ -152,7 +164,10 @@ const ComposerSelect = forwardRef<ComposerSelectHandle, ComposerSelectProps>(fun
               type="button"
             >
               <span>
-                <strong>{option.label}</strong>
+                <strong>
+                  {option.label}
+                  {option.badge ? <em className="composer-select-badge">{option.badge}</em> : null}
+                </strong>
                 {option.detail ? <small>{option.detail}</small> : null}
               </span>
               {option.value === value ? <Check size={14} /> : null}

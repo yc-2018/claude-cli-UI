@@ -76,7 +76,11 @@ await page.evaluate((workspace) => {
       permissionMode: "acceptEdits",
       slashCommands: ["/story", "/compact"],
       contextUsage: { usedTokens: 42000, contextWindow: 200000, usedPercentage: 21, remainingPercentage: 79 },
-      contextCompactions: [{ id: "visual-compact", trigger: "auto", status: "done", preTokens: 180000, postTokens: 42000, summary: "保留了项目目标和关键决策。", anchorMessageId: "a1" }],
+      contextCompactions: [
+        { id: "visual-compact", trigger: "auto", status: "done", preTokens: 180000, postTokens: 42000, droppedTokens: 138000, durationMs: 4200, summary: "保留了项目目标和关键决策。", anchorMessageId: "a1" },
+        // 进行中的压缩卡片：转圈图标 + 阶段文案 + 较长的 hint，紧凑窗口下这三行不能互相压住。
+        { id: "visual-compact-running", trigger: "unknown", status: "running", phase: "compacting", hint: "上下文接近上限，正在自动压缩较早的对话内容以腾出空间", anchorMessageId: "a1" },
+      ],
       messages: [
         { id: "u1", role: "user", content: "检查登录流程，找出刷新后会退出的问题并修复。", createdAt: now - 2000 },
         {
@@ -154,13 +158,17 @@ await page.evaluate((workspace) => {
 await page.waitForSelector(".composer");
 if (!(await page.locator(".context-status").textContent())?.includes("上下文")) throw new Error("context usage status was not visible in the desktop viewport");
 if (await page.locator('[aria-label="压缩上下文"]').count() !== 1) throw new Error("context compact button was not visible in the desktop viewport");
-if (await page.locator(".context-compaction").count() !== 1) throw new Error("compact history card was not visible in the desktop viewport");
+if (await page.locator(".context-compaction").count() !== 2) throw new Error("compact history cards were not visible in the desktop viewport");
+if (await page.locator(".context-compaction.running .spinner").count() !== 1) throw new Error("running compaction card had no progress spinner");
+if (!(await page.locator(".context-compaction.running").textContent())?.includes("正在总结较早的对话")) {
+  throw new Error("running compaction card did not show which phase the CLI is in");
+}
 // 压缩卡片必须跟在触发它的那条消息后面，长对话里才能看出上下文是在哪一步被压缩的。
-if (!(await page.locator(".context-compaction").evaluate((card) => card.previousElementSibling?.classList.contains("message") ?? false))) {
+if (!(await page.locator(".context-compaction.done").evaluate((card) => card.previousElementSibling?.classList.contains("message") ?? false))) {
   throw new Error("compact history card was not anchored after the message that triggered it");
 }
 if (!(await page.locator(".sidebar-version").textContent())?.startsWith("claude-cli-UI v")) throw new Error("UI version was not shown in the sidebar footer");
-// 置顶的项目整个搬进「置顶」段，它的置顶会话跟着走；同一个会话在「全部对话」里还会再出现一次。
+// 置顶的项目整个搬进「置顶」段，它的置顶会话跟着走，不会在「项目」段里重复出现。
 if (await page.locator('[data-section="pinned"] [aria-label="已置顶项目"]').count() !== 1 ||
   await page.locator('[data-section="pinned"] [aria-label="已置顶会话"]').count() !== 1) {
   throw new Error("pinned project/conversation indicators were not rendered in the pinned section");
@@ -168,12 +176,16 @@ if (await page.locator('[data-section="pinned"] [aria-label="已置顶项目"]')
 const sidebarSections = await page.locator(".sidebar-section-label").evaluateAll((elements) => (
   elements.map((element) => element.getAttribute("data-section-label")).join(",")
 ));
-if (sidebarSections !== "pinned,all,projects") throw new Error(`sidebar sections were not laid out top-to-bottom: ${sidebarSections}`);
-const allConversationIds = await page.locator('[data-section="all"] .task-row').evaluateAll((elements) =>
-  elements.map((el) => el.getAttribute("data-conversation-id"))
-);
-if (!allConversationIds.includes("visual-conversation") || !allConversationIds.includes("visual-conversation-2")) {
-  throw new Error(`all-conversations section did not include the seeded test conversations (found: ${allConversationIds.join(",")})`);
+if (sidebarSections !== "pinned,scratch,projects") throw new Error(`sidebar sections were not laid out top-to-bottom: ${sidebarSections}`);
+// 「临时对话」段取代了「全部对话」：没有临时对话时只留空状态和新建入口，不再把项目里的会话重复列一遍。
+if (await page.locator('[data-section="all"]').count()) {
+  throw new Error("the removed all-conversations section is still rendered");
+}
+if (await page.locator('[data-section="scratch"] .task-row').count()) {
+  throw new Error("scratch section listed conversations that belong to real projects");
+}
+if (!(await page.locator('[data-section="scratch"] .task-list-empty').count())) {
+  throw new Error("scratch section did not show its empty hint before any temporary conversation existed");
 }
 if (await page.locator('[data-section="projects"] .project-group').count() !== 0) {
   throw new Error("pinned project was still duplicated in the projects section");
@@ -183,10 +195,10 @@ const treeBranches = await page.locator('[data-section="pinned"] .project-group[
   elements.map((element) => element.textContent).join(",")
 ));
 if (treeBranches !== "├─,└─") throw new Error(`conversation rows did not render tree connectors: ${treeBranches}`);
-await page.locator('[data-section-label="all"]').click();
-await page.waitForFunction(() => document.querySelectorAll('[data-section="all"]').length === 0);
-await page.locator('[data-section-label="all"]').click();
-await page.waitForFunction(() => document.querySelectorAll('[data-section="all"] .task-row').length === 2);
+await page.locator('[data-section-label="scratch"]').click();
+await page.waitForFunction(() => document.querySelectorAll('[data-section="scratch"]').length === 0);
+await page.locator('[data-section-label="scratch"]').click();
+await page.waitForFunction(() => document.querySelectorAll('[data-section="scratch"] .task-list-empty').length === 1);
 await page.screenshot({ path: resolve(artifacts, "conversation.png") });
 if (!(await page.locator(".response-duration").textContent())?.includes("本次回答耗时 · 8 秒")) throw new Error("completed response duration was not rendered");
 // 只存了开始时刻和耗时的旧数据也要补出完成时刻，长任务才知道是几点结束的。
@@ -411,6 +423,24 @@ const layout = await page.evaluate(() => ({
 
 await page.setViewportSize({ width: 900, height: 640 });
 if (await page.locator('[aria-label="压缩上下文"]').count() !== 1) throw new Error("context compact button was not visible in the compact viewport");
+// 进行中的压缩卡片有三行文字（标题、阶段、hint），窄窗口下它们必须依次向下排开而不是互相压住。
+const compactCompactionLayout = await page.locator(".context-compaction.running").evaluate((card) => ({
+  card: card.getBoundingClientRect().toJSON(),
+  lines: [...card.querySelectorAll(".context-compaction-copy strong, .context-compaction-copy small")]
+    .map((line) => line.getBoundingClientRect().toJSON()),
+}));
+if (compactCompactionLayout.lines.length !== 3) {
+  throw new Error(`running compaction card did not render title, phase and hint: ${JSON.stringify(compactCompactionLayout)}`);
+}
+for (let index = 0; index < compactCompactionLayout.lines.length; index += 1) {
+  const line = compactCompactionLayout.lines[index];
+  if (line.right > compactCompactionLayout.card.right || line.left < compactCompactionLayout.card.left) {
+    throw new Error(`running compaction text escaped its card: ${JSON.stringify(compactCompactionLayout)}`);
+  }
+  if (index > 0 && line.top < compactCompactionLayout.lines[index - 1].bottom) {
+    throw new Error(`running compaction text lines overlap: ${JSON.stringify(compactCompactionLayout)}`);
+  }
+}
 await page.waitForTimeout(100);
 await page.locator('.attachment-open[aria-label="预览 界面截图.png"]').click();
 const compactAttachmentPreviewLayout = await page.locator(".attachment-preview-dialog").evaluate((element) => element.getBoundingClientRect().toJSON());

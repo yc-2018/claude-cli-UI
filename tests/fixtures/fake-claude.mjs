@@ -53,7 +53,11 @@ const processPrompt = (input) => {
   const modelIndex = args.indexOf("--model");
   const modelRole = modelIndex >= 0 ? args[modelIndex + 1] : "sonnet";
   const roleName = modelRole.charAt(0).toUpperCase() + modelRole.slice(1).toLowerCase();
-  const testModels = JSON.parse(process.env.CLAUDE_DESK_TEST_MODELS ?? "{}");
+  // 测试里模型映射必须来自和主进程同一个可变来源：展开模型菜单会重新读一遍配置，
+  // 夹具也读同一个文件，换路由之后这一轮拿到的实际模型才会跟着变。
+  const testModels = process.env.CLAUDE_DESK_TEST_MODELS_FILE
+    ? JSON.parse(readFileSync(process.env.CLAUDE_DESK_TEST_MODELS_FILE, "utf8"))
+    : JSON.parse(process.env.CLAUDE_DESK_TEST_MODELS ?? "{}");
   const model = testModels[roleName] ?? modelRole;
   const effortIndex = args.indexOf("--effort");
   const effort = effortIndex >= 0 ? args[effortIndex + 1] : undefined;
@@ -136,9 +140,19 @@ const processPrompt = (input) => {
   if (prompt.trim() === "/compact") {
     send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"], slash_command_descriptions: slashCommandDescriptions });
     send({ type: "system", subtype: "context_usage", context_window: { used_tokens: 120000, context_window: 200000, used_percentage: 60, remaining_percentage: 40 }, session_id: sessionId });
-    send({ type: "system", subtype: "compact_boundary", session_id: sessionId, compactMetadata: { trigger: "manual", preTokens: 120000, postTokens: 14000, durationMs: 25 } });
-    send({ type: "user", isCompactSummary: true, message: { role: "user", content: [{ type: "text", text: "已保留项目目标、关键决策和未完成事项。" }] }, session_id: sessionId });
-    send({ type: "result", subtype: "success", is_error: false, result: "上下文压缩完成。", session_id: sessionId });
+    // 压缩生命周期：真实 CLI 在 stdout 上发 compact_progress（顶层 type，没有 subtype/status），
+    // 只认 compact_boundary 的话整段过程都是空白的，界面只会在结束后蹦出一张卡。
+    send({ type: "compact_progress", event: { type: "hooks_start", hook_type: "pre_compact" }, uuid: "compact-progress-1", session_id: sessionId });
+    setTimeout(() => {
+      send({ type: "compact_progress", event: { type: "compact_start", hint_text: "上下文接近上限，正在自动压缩" }, uuid: "compact-progress-2", session_id: sessionId });
+      setTimeout(() => {
+        // 真实 wire 用 snake_case：compact_metadata.pre_tokens。磁盘 JSONL 才是 compactMetadata.preTokens。
+        send({ type: "system", subtype: "compact_boundary", session_id: sessionId, uuid: "compact-boundary-1", compact_metadata: { trigger: "manual", pre_tokens: 120000, post_tokens: 14000, cumulative_dropped_tokens: 106000 } });
+        send({ type: "compact_progress", event: { type: "compact_end" }, uuid: "compact-progress-3", session_id: sessionId });
+        send({ type: "user", isCompactSummary: true, message: { role: "user", content: [{ type: "text", text: "已保留项目目标、关键决策和未完成事项。" }] }, session_id: sessionId });
+        send({ type: "result", subtype: "success", is_error: false, result: "上下文压缩完成。", session_id: sessionId });
+      }, 700);
+    }, 700);
     return;
   }
   if (prompt.includes("空响应")) {
@@ -247,21 +261,66 @@ const processPrompt = (input) => {
 
   if (prompt.includes("API重试测试")) {
     send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
-    // CLI 真实会发的重试事件：渲染层丢掉它，界面就只会一直停在「正在准备回答」。
+    // CLI 真实会发的重试事件：error 是字符串（overloaded / rate_limit），529 走 error_status。
+    // 渲染层若把它当对象读 message、或字段名对不上就会丢掉整条事件，界面只会一直停在「正在准备回答」。
     send({
       type: "system",
       subtype: "api_retry",
       attempt: 1,
       max_retries: 10,
       retry_delay_ms: 2000,
-      error_status: 429,
-      error: { message: "Overloaded" },
+      error_status: 529,
+      error: "overloaded",
       session_id: sessionId,
     });
     setTimeout(() => {
+      // 连响应头都没回的那种重试：没有状态码，只有 no_response.waited_ms 能说明它在等什么。
+      send({
+        type: "system",
+        subtype: "api_retry",
+        attempt: 2,
+        max_retries: 10,
+        retry_delay_ms: 4000,
+        error_status: null,
+        error: "server_error",
+        no_response: { waited_ms: 30000, retry_wait_ms: 4000 },
+        session_id: sessionId,
+      });
+    }, 700);
+    setTimeout(() => {
       send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "重试之后回答成功。" }] }, session_id: sessionId });
       send({ type: "result", subtype: "success", is_error: false, result: "重试之后回答成功。", session_id: sessionId });
-    }, 900);
+    }, 2200);
+    return;
+  }
+
+  if (prompt.includes("子代理重试测试")) {
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    // 子代理的重试不走 system/api_retry，而是 tool_progress 上挂 subagent_retry；
+    // 恢复之后 CLI 只是少发这个字段，没有别的信号，渲染层必须靠它把提示撤掉。
+    send({
+      type: "tool_progress",
+      tool_use_id: "tool-agent-1",
+      tool_name: "Task",
+      elapsed_time_seconds: 0,
+      subagent_type: "Explore",
+      subagent_retry: { agent_id: "agent-1", attempt: 2, max_retries: 10, retry_delay_ms: 3000 },
+      session_id: sessionId,
+      uuid: "subagent-retry-1",
+    });
+    setTimeout(() => {
+      send({
+        type: "tool_progress",
+        tool_use_id: "tool-agent-1",
+        tool_name: "Task",
+        elapsed_time_seconds: 3,
+        subagent_type: "Explore",
+        session_id: sessionId,
+        uuid: "subagent-retry-2",
+      });
+      send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "子代理恢复后回答成功。" }] }, session_id: sessionId });
+      send({ type: "result", subtype: "success", is_error: false, result: "子代理恢复后回答成功。", session_id: sessionId });
+    }, 2000);
     return;
   }
 

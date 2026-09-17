@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 
 contextBridge.exposeInMainWorld("claudeDesk", {
   selectWorkspace: () => ipcRenderer.invoke("workspace:select"),
+  getScratchWorkspace: () => ipcRenderer.invoke("workspace:scratch"),
   openWorkspace: (workspace: string) => ipcRenderer.invoke("workspace:open", workspace),
   getClaudeInfo: () => ipcRenderer.invoke("claude:info"),
   getModels: (workspace: string) => ipcRenderer.invoke("claude:models", workspace),

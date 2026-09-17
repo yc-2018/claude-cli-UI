@@ -238,6 +238,9 @@ function normalizeContextCompactions(value: unknown): ContextCompaction[] {
       preTokens: typeof item.preTokens === "number" ? item.preTokens : undefined,
       postTokens: typeof item.postTokens === "number" ? item.postTokens : undefined,
       durationMs: typeof item.durationMs === "number" ? item.durationMs : undefined,
+      droppedTokens: typeof item.droppedTokens === "number" ? item.droppedTokens : undefined,
+      phase: item.phase === "pre_hooks" || item.phase === "compacting" || item.phase === "post_hooks" || item.phase === "session_start" ? item.phase : undefined,
+      hint: typeof item.hint === "string" ? item.hint.slice(0, 4_000) : undefined,
       summary: typeof item.summary === "string" ? item.summary.slice(0, 200_000) : undefined,
       error: typeof item.error === "string" ? item.error.slice(0, 4_000) : undefined,
       anchorMessageId: typeof item.anchorMessageId === "string" ? item.anchorMessageId : undefined,
@@ -259,11 +262,13 @@ function normalizeProject(value: unknown): Project | null {
     customName: typeof project.customName === "string" && project.customName.trim()
       ? project.customName.trim()
       : undefined,
-    pinned: project.pinned === true ? true : undefined,
+    // 临时对话分组不能被置顶：它已经是一个固定段，置顶会让同一批会话在两处重复出现。
+    pinned: project.pinned === true && project.kind !== "scratch" ? true : undefined,
     workspace: project.workspace,
     createdAt: typeof project.createdAt === "number" ? project.createdAt : Date.now(),
     updatedAt: typeof project.updatedAt === "number" ? project.updatedAt : Date.now(),
     conversations: pinnedFirst(conversations),
+    kind: project.kind === "scratch" ? "scratch" : undefined,
   };
 }
 

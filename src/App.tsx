@@ -12,6 +12,7 @@ import type {
   Activity,
   ActivityDetail,
   ActivityDiffLine,
+  ApiRetryState,
   AppSelection,
   AppSettings,
   AppUpdateState,
@@ -20,6 +21,7 @@ import type {
   ClaudeEvent,
   ClaudeSessionHistory,
   ClaudeSessionSummary,
+  CompactionPhase,
   ComposerDraft,
   Conversation,
   ContextCompaction,
@@ -510,20 +512,25 @@ function mergeContextUsage(previous: ContextUsage | undefined, incoming: Partial
   return validateContextUsage(merged, model);
 }
 
+/**
+ * compact_boundary 有两套字段名：stdout 上的 wire 消息用 snake_case（compact_metadata.pre_tokens），
+ * 磁盘上的 session JSONL 用 camelCase（compactMetadata.preTokens）。只认其中一套，另一条路上的 token
+ * 数就全是 undefined，卡片会退化成一句没有信息量的提示。
+ */
 function getCompactBoundary(data: Record<string, unknown>): ContextCompaction | undefined {
   if (data.type !== "system" || data.subtype !== "compact_boundary") return undefined;
-  const metadata = data.compactMetadata && typeof data.compactMetadata === "object"
-    ? data.compactMetadata as Record<string, unknown>
-    : {};
+  const raw = data.compact_metadata ?? data.compactMetadata;
+  const metadata = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
   const trigger = metadata.trigger === "auto" || metadata.trigger === "manual" ? metadata.trigger : "unknown";
   return {
     id: typeof data.uuid === "string" ? data.uuid : makeId(),
     trigger,
     status: "done",
     completedAt: Date.now(),
-    preTokens: numberValue(metadata.preTokens),
-    postTokens: numberValue(metadata.postTokens),
-    durationMs: numberValue(metadata.durationMs),
+    preTokens: firstNumberValue(metadata, ["pre_tokens", "preTokens"]),
+    postTokens: firstNumberValue(metadata, ["post_tokens", "postTokens"]),
+    durationMs: firstNumberValue(metadata, ["duration_ms", "durationMs"]),
+    droppedTokens: firstNumberValue(metadata, ["cumulative_dropped_tokens", "cumulativeDroppedTokens"]),
   };
 }
 
@@ -549,6 +556,99 @@ function getCompactionState(data: Record<string, unknown>): "running" | "done" |
     return "running";
   }
   return undefined;
+}
+
+/**
+ * CLI 压缩过程中会发 compact_progress：它是顶层 type，既没有 subtype 也没有 status，
+ * 所以上面那个只看 subtype/status 的启发式永远匹配不到它——不接这条，界面就只能在压缩
+ * 结束后看到一张 compact_boundary 卡片，中间整段过程是空白的。
+ */
+function getCompactProgress(data: Record<string, unknown>): { phase?: CompactionPhase; hint?: string; ended: boolean } | undefined {
+  if (data.type !== "compact_progress" || !data.event || typeof data.event !== "object") return undefined;
+  const event = data.event as Record<string, unknown>;
+  if (event.type === "compact_end") return { ended: true };
+  if (event.type === "compact_start") {
+    const hint = event.hint_text ?? event.hintText;
+    return { phase: "compacting", hint: typeof hint === "string" && hint.trim() ? shorten(hint.trim(), 120) : undefined, ended: false };
+  }
+  if (event.type !== "hooks_start") return undefined;
+  const hookType = event.hook_type ?? event.hookType;
+  if (hookType === "pre_compact") return { phase: "pre_hooks", ended: false };
+  if (hookType === "post_compact") return { phase: "post_hooks", ended: false };
+  if (hookType === "session_start") return { phase: "session_start", ended: false };
+  return { ended: false };
+}
+
+/** 真实 CLI 只公开了 api_retry 的部分字段名，这里对每个值都尝试多种拼写，避免因单个键名不符就丢掉整条重试事件。 */
+function firstNumberValue(data: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = numberValue(data[key]);
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+/** api_retry 的 error 字段是字符串（overloaded / rate_limit），旧结构里也可能是带 message 的对象，两种都要能读出原因。 */
+function describeRetryError(data: Record<string, unknown>) {
+  const error = data.error;
+  if (typeof error === "string" && error.trim()) {
+    const normalized = error.trim().toLowerCase();
+    if (normalized === "overloaded") return "服务过载";
+    if (normalized === "rate_limit" || normalized === "rate limit") return "触发限流";
+    if (normalized === "server_error" || normalized === "server error") return "服务端错误";
+    return shorten(error.trim(), 120);
+  }
+  if (error && typeof error === "object") {
+    const message = (error as Record<string, unknown>).message;
+    if (typeof message === "string" && message.trim()) return shorten(message.trim(), 120);
+  }
+  for (const key of ["message", "reason", "error_message"]) {
+    const value = data[key];
+    if (typeof value === "string" && value.trim()) return shorten(value.trim(), 120);
+  }
+  return undefined;
+}
+
+function getApiRetryState(data: Record<string, unknown>): ApiRetryState | undefined {
+  if (data.type !== "system") return undefined;
+  const subtype = typeof data.subtype === "string" ? data.subtype.toLowerCase() : "";
+  if (subtype !== "api_retry" && !subtype.includes("retry")) return undefined;
+  const attempt = firstNumberValue(data, ["attempt", "retry_attempt", "attempts", "retry_count"]);
+  const maxRetries = firstNumberValue(data, ["max_retries", "maxRetries", "max_retry", "retries"]);
+  const delayMs = firstNumberValue(data, ["retry_delay_ms", "delay_ms", "retry_in_ms", "delayMs", "retry_after_ms"]);
+  const status = firstNumberValue(data, ["error_status", "http_status", "status_code", "error_code"]);
+  const message = describeRetryError(data);
+  // API 连响应头都没回时 CLI 会带上 no_response，这时候没有状态码，等待时长是唯一能说明情况的读数。
+  const noResponse = data.no_response && typeof data.no_response === "object" ? data.no_response as Record<string, unknown> : undefined;
+  const waitedMs = noResponse ? firstNumberValue(noResponse, ["waited_ms", "waitedMs"]) : undefined;
+  // 什么可读信息都没有，就不该把它当成一次重试展示，否则界面会挂着一个空提示。
+  if (attempt === undefined && maxRetries === undefined && delayMs === undefined && status === undefined && message === undefined && waitedMs === undefined) {
+    return undefined;
+  }
+  return { attempt: attempt ?? 1, maxRetries, delayMs, status, message, waitedMs, at: Date.now() };
+}
+
+/**
+ * 子代理的重试不走 system/api_retry，而是 tool_progress 上挂一个 subagent_retry；重试恢复后
+ * CLI 会再发一条同样的 tool_progress 但不带 subagent_retry，用它来撤掉提示。
+ */
+function getSubagentRetry(data: Record<string, unknown>): ApiRetryState | "resolved" | undefined {
+  if (data.type !== "tool_progress" || typeof data.subagent_type !== "string") return undefined;
+  const raw = data.subagent_retry;
+  if (!raw || typeof raw !== "object") return "resolved";
+  const retry = raw as Record<string, unknown>;
+  const attempt = firstNumberValue(retry, ["attempt", "retry_attempt"]);
+  const maxRetries = firstNumberValue(retry, ["max_retries", "maxRetries"]);
+  const delayMs = firstNumberValue(retry, ["retry_delay_ms", "retry_in_ms", "delay_ms"]);
+  if (attempt === undefined && maxRetries === undefined && delayMs === undefined) return undefined;
+  return {
+    attempt: attempt ?? 1,
+    maxRetries,
+    delayMs,
+    message: describeRetryError(retry),
+    agentType: data.subagent_type,
+    at: Date.now(),
+  };
 }
 
 function getAssistantContent(data: Record<string, unknown>): Record<string, unknown>[] {
@@ -675,12 +775,14 @@ function nextBranchTitle(title: string, conversations: Conversation[]) {
   return `${Array.from(base).slice(0, 93).join("")} (${Date.now().toString().slice(-4)})`;
 }
 
-function EmptyView({ onNewProject }: { onNewProject(): void }) {
+function EmptyView({ onNewProject, onNewScratchConversation }: { onNewProject(): void; onNewScratchConversation(): void }) {
   return (
     <div className="empty-view">
       <div className="empty-icon"><TerminalSquare size={25} /></div>
       <h1>选择项目目录</h1>
       <button className="primary-button" onClick={onNewProject}><FolderOpen size={16} />新建项目</button>
+      {/* 不想为一次性的问题先挑一个目录时，直接开临时对话。 */}
+      <button className="ghost-button" onClick={onNewScratchConversation}><Plus size={15} />新建临时对话</button>
     </div>
   );
 }
@@ -703,7 +805,7 @@ function formatTokenCount(value?: number) {
   return `${Math.round(value)}`;
 }
 
-function ContextStatus({ conversation, onCompact, disabled }: { conversation: Conversation; onCompact(): void; disabled: boolean }) {
+function ContextStatus({ conversation, modelContextWindow, onCompact, disabled }: { conversation: Conversation; modelContextWindow: number; onCompact(): void; disabled: boolean }) {
   const usage = conversation.contextUsage;
   const latest = conversation.contextCompactions?.at(-1);
   const percentage = usage?.usedPercentage ?? (usage?.usedTokens !== undefined && usage.contextWindow
@@ -724,9 +826,15 @@ function ContextStatus({ conversation, onCompact, disabled }: { conversation: Co
       : latest?.summary
         ? "已完成上下文压缩"
         : undefined;
+  // 1M 变体的容量原先只藏在 tooltip 里，「上下文 21%」看不出这 21% 是相对 200k 还是 1M。
+  // 判断只能用实际模型标识：conversation.selectedModel 存的是 opus/sonnet 这种角色名，看不出容量。
+  const contextWindow = modelContextWindow;
   return (
     <div className="context-status" title={latest?.summary ?? usageDetail}>
       <span className="context-status-text">{compactText ?? usageText}</span>
+      {contextWindow >= LARGE_CONTEXT_WINDOW
+        ? <em className="context-window-badge" title={`上下文窗口 ${formatTokenCount(contextWindow)}`}>1M</em>
+        : null}
       {latest?.status === "done" && latest.preTokens !== undefined && latest.postTokens !== undefined
         ? <small>{formatTokenCount(latest.preTokens)} → {formatTokenCount(latest.postTokens)}</small>
         : null}
@@ -757,6 +865,7 @@ export default function App() {
   const [updateActionError, setUpdateActionError] = useState("");
   const [cliInfo, setCliInfo] = useState<{ available: boolean; version?: string } | null>(null);
   const [modelConfig, setModelConfig] = useState<ModelConfig>({ options: [] });
+  const [modelsRefreshing, setModelsRefreshing] = useState(false);
   const [permissionQueue, setPermissionQueue] = useState<PendingPermission[]>([]);
   const [questionQueue, setQuestionQueue] = useState<PendingUserQuestion[]>([]);
   const [questionSubmitting, setQuestionSubmitting] = useState(false);
@@ -789,9 +898,23 @@ export default function App() {
     () => activeProject?.conversations.find((item) => item.id === activeConversationId) ?? null,
     [activeProject, activeConversationId],
   );
+  const activeProjectRef = useRef(activeProject);
+  activeProjectRef.current = activeProject;
   const activeRunId = activeConversationId ? activeRuns[activeConversationId] : undefined;
   const activeResponseRunning = Boolean(activeConversation?.messages.some((message) => message.role === "assistant" && (message.status === "running" || message.status === "queued")));
   const activeProcessRunning = Boolean(activeRunId) || activeResponseRunning;
+  // 上下文状态条要显示 1M 容量，就必须拿到这个对话真正在用的实际模型标识；role 名（opus/sonnet）
+  // 看不出窗口大小。用户当前选中的角色映射到的模型才是下一次请求要用的那个，resolvedModel 只是
+  // 上一轮 CLI 报回来的实际模型，角色已经不在当前路由里时才拿它兜底。
+  const activeModelContextWindow = useMemo(() => {
+    if (!activeConversation) return DEFAULT_CONTEXT_WINDOW;
+    const { selectedModel, resolvedModel } = activeConversation;
+    const byRole = modelConfig.options.find((option) => option.value === selectedModel);
+    if (byRole) return byRole.contextWindow;
+    const byActual = modelConfig.options.find((option) => option.actualModel === resolvedModel);
+    if (byActual) return byActual.contextWindow;
+    return contextWindowForModel(resolvedModel ?? selectedModel);
+  }, [activeConversation, modelConfig]);
   const pendingPermission = permissionQueue[0];
   const pendingQuestion = questionQueue[0];
 
@@ -1070,6 +1193,19 @@ export default function App() {
     return () => { canceled = true; };
   }, [activeProject?.id, activeProject?.workspace]);
 
+  // 换路由之后同一个角色可能指向别的实际模型，所以每次展开模型菜单都重新读一遍配置：
+  // 先显示已缓存的列表再就地更新，用户不需要记得去点一个刷新按钮。刷新只改可选项，
+  // 不会动任何对话已经存下的选择，正在回复的会话也不受影响。
+  const refreshModels = useCallback(() => {
+    const workspace = activeProjectRef.current?.workspace;
+    if (!workspace) return;
+    setModelsRefreshing(true);
+    void window.claudeDesk.getModels(workspace)
+      .then((config) => { if (config.options.length > 0) setModelConfig(config); })
+      .catch(() => undefined)
+      .finally(() => setModelsRefreshing(false));
+  }, []);
+
   const updateConversation = useCallback((conversationId: string, updater: (value: Conversation) => Conversation) => {
     setProjects((current) => current.map((project) => {
       if (!project.conversations.some((item) => item.id === conversationId)) return project;
@@ -1322,19 +1458,18 @@ export default function App() {
 
     if (event.type === "message" && event.data) {
       const data = event.data;
-      if (data.type === "system" && data.subtype === "api_retry" && typeof data.attempt === "number") {
-        const error = data.error && typeof data.error === "object" ? data.error as Record<string, unknown> : undefined;
-        updateResponse(meta, (message) => ({
-          ...message,
-          retry: {
-            attempt: data.attempt as number,
-            maxRetries: typeof data.max_retries === "number" ? data.max_retries : undefined,
-            delayMs: typeof data.retry_delay_ms === "number" ? data.retry_delay_ms : undefined,
-            status: typeof data.error_status === "number" ? data.error_status : undefined,
-            message: typeof error?.message === "string" ? shorten(error.message, 120) : undefined,
-            at: Date.now(),
-          },
-        }));
+      const retryState = getApiRetryState(data);
+      if (retryState) {
+        updateResponse(meta, (message) => ({ ...message, retry: retryState }));
+        return;
+      }
+      const subagentRetry = getSubagentRetry(data);
+      if (subagentRetry) {
+        // 子代理恢复后 CLI 只是少发 subagent_retry，没有别的信号，必须靠它把提示撤掉。
+        const next = subagentRetry === "resolved" ? undefined : subagentRetry;
+        updateResponse(meta, (message) => message.retry?.agentType === undefined && next === undefined
+          ? message
+          : { ...message, retry: next });
         return;
       }
       if (data.type === "system" && typeof data.session_id === "string") {
@@ -1374,6 +1509,7 @@ export default function App() {
       }
       const compactBoundary = getCompactBoundary(data);
       const compactSummary = getCompactSummary(data);
+      const compactProgress = getCompactProgress(data);
       if (compactBoundary) {
         updateConversation(meta.conversationId, (conversation) => {
           const compactions = conversation.contextCompactions ?? [];
@@ -1389,6 +1525,8 @@ export default function App() {
             contextCompactions: [...compactions.filter((item) => item.status !== "running"), {
               ...compactBoundary,
               startedAt: compactBoundary.startedAt ?? running?.startedAt,
+              // hint 是 compact_start 才带的，boundary 里没有，收尾时要从 running 卡片上继承过来。
+              hint: compactBoundary.hint ?? running?.hint,
               anchorMessageId: running?.anchorMessageId ?? conversation.messages.at(-1)?.id,
             }].slice(-20),
           };
@@ -1401,6 +1539,35 @@ export default function App() {
           return {
             ...conversation,
             contextCompactions: compactions.map((item, itemIndex) => itemIndex === index ? { ...item, summary: compactSummary } : item),
+          };
+        });
+      } else if (compactProgress) {
+        updateConversation(meta.conversationId, (conversation) => {
+          const compactions = conversation.contextCompactions ?? [];
+          const runningIndex = compactions.findIndex((item) => item.status === "running");
+          if (runningIndex < 0) {
+            // compact_end 到达时 boundary 往往已经把卡片收成 done 了，这里不该再凭空补一张空卡。
+            if (compactProgress.ended) return conversation;
+            return {
+              ...conversation,
+              contextCompactions: [...compactions, {
+                id: makeId(),
+                trigger: "unknown" as const,
+                status: "running" as const,
+                startedAt: Date.now(),
+                phase: compactProgress.phase,
+                hint: compactProgress.hint,
+                anchorMessageId: conversation.messages.at(-1)?.id,
+              }].slice(-20),
+            };
+          }
+          return {
+            ...conversation,
+            contextCompactions: compactions.map((item, index) => index !== runningIndex
+              ? item
+              : compactProgress.ended
+                ? { ...item, status: "done" as const, completedAt: Date.now(), phase: undefined }
+                : { ...item, phase: compactProgress.phase ?? item.phase, hint: compactProgress.hint ?? item.hint }),
           };
         });
       } else {
@@ -1595,6 +1762,37 @@ export default function App() {
       ? { ...project, updatedAt: Date.now(), conversations: insertUnpinnedFirst(project.conversations, conversation) }
       : project));
     setSelectedProjectId(projectId);
+    setActiveConversationId(conversation.id);
+    setComposerFocusRequest((request) => request + 1);
+  };
+
+  // 临时对话：不让用户挑目录，统一落在 userData 下的 scratch 目录里，并挂在一个内建的 scratch 分组下，
+  // 这样会话、模型、权限这些既有机制都能原样复用。分组按需创建，用户不用时侧边栏只留一个空状态。
+  const addScratchConversation = async () => {
+    const existing = projectsRef.current.find((project) => project.kind === "scratch");
+    if (existing) {
+      addConversation(existing.id);
+      return;
+    }
+    const workspace = await window.claudeDesk.getScratchWorkspace().catch(() => "");
+    if (!workspace) {
+      // scratch 目录建不出来时不静默失败，把原因写进 renderer 错误日志，界面保持原状。
+      window.claudeDesk.reportError("failed to create the scratch workspace for a temporary conversation");
+      return;
+    }
+    const conversation = createConversation();
+    const now = Date.now();
+    const project: Project = {
+      id: makeId(),
+      name: "临时对话",
+      workspace,
+      createdAt: now,
+      updatedAt: now,
+      conversations: [conversation],
+      kind: "scratch",
+    };
+    setProjects((current) => [...current, project]);
+    setSelectedProjectId(project.id);
     setActiveConversationId(conversation.id);
     setComposerFocusRequest((request) => request + 1);
   };
@@ -2531,6 +2729,7 @@ export default function App() {
         onSelectConversation={selectConversation}
         onNewProject={addProject}
         onNewConversation={addConversation}
+        onNewScratchConversation={() => { void addScratchConversation(); }}
         onRefreshProject={refreshProject}
         onOpenProject={(workspace) => { void openProject(workspace); }}
         onDeleteConversation={deleteConversation}
@@ -2585,7 +2784,11 @@ export default function App() {
                     <TerminalSquare className="title-command-icon" size={13} />
                   </button>
                 ) : <h2>{activeConversation.title}</h2>}
-                <button className="workspace-chip" onClick={() => { void openProject(activeProject.workspace); }} title="在文件管理器中打开项目">
+                <button
+                  className="workspace-chip"
+                  onClick={() => { void openProject(activeProject.workspace); }}
+                  title={activeProject.kind === "scratch" ? "在文件管理器中打开临时对话目录" : "在文件管理器中打开项目"}
+                >
                   <Folder size={13} />
                   <strong>{activeProject.customName ?? activeProject.name}</strong>
                   {activeProject.customName ? <small>{activeProject.name}</small> : null}
@@ -2619,6 +2822,7 @@ export default function App() {
               <ContextStatus
                 conversation={activeConversation}
                 disabled={activeProcessRunning || !activeConversation.sessionId}
+                modelContextWindow={activeModelContextWindow}
                 onCompact={compactContext}
               />
             </header>
@@ -2661,6 +2865,8 @@ export default function App() {
                 });
               }}
               onModelChange={(selectedModel) => updateConversation(activeConversation.id, (conversation) => ({ ...conversation, selectedModel }))}
+              onRefreshModels={refreshModels}
+              modelsRefreshing={modelsRefreshing}
               onThinkingEffortChange={(thinkingEffort) => updateConversation(activeConversation.id, (conversation) => ({ ...conversation, thinkingEffort }))}
               onLocalCommand={runLocalCommand}
               onPermissionChange={changePermissionMode}
@@ -2668,7 +2874,7 @@ export default function App() {
           </>
         ) : activeProject
           ? <ProjectEmptyView project={activeProject} onNewConversation={() => addConversation(activeProject.id)} />
-          : <EmptyView onNewProject={addProject} />}
+          : <EmptyView onNewProject={addProject} onNewScratchConversation={() => { void addScratchConversation(); }} />}
       </main>
       {completionNotice ? (
         <button

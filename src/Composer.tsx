@@ -42,6 +42,8 @@ interface Props {
   onReorderQueuedPrompt(sourceId: string, targetId: string, position: ReorderPosition): void;
   onDraftChange(update: (current: ComposerDraft) => ComposerDraft): void;
   onModelChange(model: string): void;
+  onRefreshModels(): void;
+  modelsRefreshing?: boolean;
   onThinkingEffortChange(effort: ThinkingEffort | undefined): void;
   onLocalCommand(command: string): boolean;
   onPermissionChange(mode: PermissionMode): void;
@@ -55,6 +57,7 @@ export default function Composer({
   loadingHistory = false,
   focusRequest = 0,
   draft,
+  modelsRefreshing = false,
   onSend,
   onQueue,
   onGuideQueuedPrompt,
@@ -64,6 +67,7 @@ export default function Composer({
   onReorderQueuedPrompt,
   onDraftChange,
   onModelChange,
+  onRefreshModels,
   onThinkingEffortChange,
   onLocalCommand,
   onPermissionChange,
@@ -408,8 +412,16 @@ export default function Composer({
               disabled={loadingHistory || modelConfig.options.length === 0}
               icon={<Sparkles size={14} />}
               onChange={onModelChange}
-              options={modelConfig.options.map((option) => ({ value: option.value, label: option.role, detail: option.actualModel }))}
+              onOpen={onRefreshModels}
+              options={modelConfig.options.map((option) => ({
+                value: option.value,
+                label: option.role,
+                detail: option.actualModel,
+                // 1M 变体只能从模型标识里看出来，不打标记的话界面上完全体现不出这份容量。
+                badge: option.contextWindow >= 1_000_000 ? "1M" : undefined,
+              }))}
               ref={modelSelectRef}
+              refreshing={modelsRefreshing}
               title="选择模型"
               value={matchedModel?.value ?? ""}
             />

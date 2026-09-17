@@ -133,6 +133,7 @@ interface ImportedContextCompaction {
   preTokens?: number;
   postTokens?: number;
   durationMs?: number;
+  droppedTokens?: number;
   summary?: string;
   anchorMessageId?: string;
 }
@@ -1076,24 +1077,34 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
       contextCompactions[contextCompactions.length - 1].summary = compactSummary;
     }
     if (record.type === "system" && record.subtype === "compact_boundary") {
-      const metadata = record.compactMetadata && typeof record.compactMetadata === "object"
-        ? record.compactMetadata as Record<string, unknown>
-        : {};
+      // 磁盘上的 session JSONL 用 camelCase，stdout 上的 wire 消息用 snake_case；两套都认，
+      // 免得换一条来源读数就全变成 undefined。
+      const rawMetadata = record.compactMetadata ?? record.compact_metadata;
+      const metadata = rawMetadata && typeof rawMetadata === "object" ? rawMetadata as Record<string, unknown> : {};
+      const metadataNumber = (...keys: string[]) => {
+        for (const key of keys) {
+          const value = metadata[key];
+          if (typeof value === "number" && Number.isFinite(value)) return value;
+        }
+        return undefined;
+      };
+      const postTokens = metadataNumber("postTokens", "post_tokens");
       const trigger = metadata.trigger === "auto" || metadata.trigger === "manual" ? metadata.trigger : "unknown";
       contextCompactions.push({
         id: typeof record.uuid === "string" ? record.uuid : `${sessionId}-compact-${contextCompactions.length}`,
         trigger,
         status: "done",
         completedAt: timestamp,
-        preTokens: typeof metadata.preTokens === "number" ? metadata.preTokens : undefined,
-        postTokens: typeof metadata.postTokens === "number" ? metadata.postTokens : undefined,
-        durationMs: typeof metadata.durationMs === "number" ? metadata.durationMs : undefined,
+        preTokens: metadataNumber("preTokens", "pre_tokens"),
+        postTokens,
+        durationMs: metadataNumber("durationMs", "duration_ms"),
+        droppedTokens: metadataNumber("cumulativeDroppedTokens", "cumulative_dropped_tokens"),
         // 压缩发生在这条消息之后，卡片就渲染在它下面而不是整个对话的顶部。
         anchorMessageId: includeMessages ? messages.at(-1)?.id : undefined,
       });
       contextUsage = {
         ...contextUsage,
-        usedTokens: typeof metadata.postTokens === "number" ? metadata.postTokens : contextUsage?.usedTokens,
+        usedTokens: postTokens ?? contextUsage?.usedTokens,
         usedPercentage: undefined,
         remainingPercentage: undefined,
       };
@@ -1342,18 +1353,21 @@ async function getModelConfig(workspace: string) {
     { role: "Fable", value: "fable", envKey: "ANTHROPIC_DEFAULT_FABLE_MODEL" },
     { role: "Haiku", value: "haiku", envKey: "ANTHROPIC_DEFAULT_HAIKU_MODEL" },
   ] as const;
-  const testModels = process.env.CLAUDE_DESK_TEST_MODELS;
+  // 测试里要验证「展开模型菜单就重新读一遍配置」，所以这份来源必须能在运行期变化：
+  // 指向文件时每次调用都重新读盘，环境变量那条路仍然保留给一次性的固定映射。
+  const testModels = process.env.CLAUDE_DESK_TEST_MODELS_FILE
+    ? await readFile(process.env.CLAUDE_DESK_TEST_MODELS_FILE, "utf8").catch(() => undefined)
+    : process.env.CLAUDE_DESK_TEST_MODELS;
   if (testModels) {
     try {
       const parsed: unknown = JSON.parse(testModels);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         const values = parsed as Record<string, unknown>;
         return {
-          options: roles.map(({ role, value }) => ({
-            role,
-            value,
-            actualModel: typeof values[role] === "string" && values[role] ? values[role] as string : value,
-          })),
+          options: roles.map(({ role, value }) => {
+            const actualModel = typeof values[role] === "string" && values[role] ? values[role] as string : value;
+            return { role, value, actualModel, contextWindow: contextWindowForModel(actualModel) };
+          }),
         };
       }
     } catch {
@@ -1386,11 +1400,10 @@ async function getModelConfig(workspace: string) {
   }
 
   return {
-    options: roles.map(({ role, value }) => ({
-      role,
-      value,
-      actualModel: roleModels.get(role) ?? defaultModel ?? value,
-    })),
+    options: roles.map(({ role, value }) => {
+      const actualModel = roleModels.get(role) ?? defaultModel ?? value;
+      return { role, value, actualModel, contextWindow: contextWindowForModel(actualModel) };
+    }),
   };
 }
 
@@ -1405,6 +1418,13 @@ ipcMain.handle("workspace:select", async () => {
     properties: ["openDirectory", "createDirectory"],
   });
   return result.canceled ? null : result.filePaths[0];
+});
+
+/** 临时对话不绑定用户选的目录，统一跑在 userData 下的 scratch 目录里，避免把 CLI 放到整个用户主目录上。 */
+ipcMain.handle("workspace:scratch", async () => {
+  const scratch = join(app.getPath("userData"), "scratch");
+  await mkdir(scratch, { recursive: true });
+  return scratch;
 });
 
 ipcMain.handle("workspace:open", async (_event, workspace: unknown) => {

@@ -150,6 +150,10 @@ export interface ApiRetryState {
   status?: number;
   message?: string;
   at: number;
+  /** API 连响应头都没回时 CLI 已经等掉的时长（wire 上的 no_response.waited_ms）。 */
+  waitedMs?: number;
+  /** 子代理的重试走的是 tool_progress.subagent_retry，文案要说清楚卡住的不是主对话。 */
+  agentType?: string;
 }
 
 export interface SlashCommand {
@@ -164,6 +168,9 @@ export interface ContextUsage {
   remainingPercentage?: number;
 }
 
+/** CLI 压缩生命周期里的阶段，来自 wire 上的 compact_progress 事件。 */
+export type CompactionPhase = "pre_hooks" | "compacting" | "post_hooks" | "session_start";
+
 export interface ContextCompaction {
   id: string;
   trigger: "auto" | "manual" | "unknown";
@@ -175,6 +182,12 @@ export interface ContextCompaction {
   durationMs?: number;
   summary?: string;
   error?: string;
+  /** 压缩过程中 CLI 走到了哪一步：只有一条「已压缩」看不出它正卡在钩子还是正在总结。 */
+  phase?: CompactionPhase;
+  /** compact_start 带的 hint_text，说明这次压缩因何触发。 */
+  hint?: string;
+  /** 至今累计被压掉的 token（wire 上的 cumulative_dropped_tokens）。 */
+  droppedTokens?: number;
   /** 压缩发生时对话里的最后一条消息，用于把提示卡片渲染在正确的位置。 */
   anchorMessageId?: string;
 }
@@ -209,6 +222,8 @@ export interface Project {
   createdAt: number;
   updatedAt: number;
   conversations: Conversation[];
+  /** scratch 代表「临时对话」这个内建分组：它不是用户选的目录，不能改名、删除或置顶。 */
+  kind?: "scratch";
 }
 
 export interface ClaudeSessionSummary {
@@ -241,6 +256,8 @@ export interface ModelOption {
   role: "Sonnet" | "Opus" | "Fable" | "Haiku";
   value: "sonnet" | "opus" | "fable" | "haiku";
   actualModel: string;
+  /** 从模型标识里识别出的上下文窗口：配成 1M 变体时界面上必须看得出来。 */
+  contextWindow: number;
 }
 
 export interface ModelConfig {
