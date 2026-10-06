@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld("claudeDesk", {
   getClaudeInfo: () => ipcRenderer.invoke("claude:info"),
   getModels: (workspace: string) => ipcRenderer.invoke("claude:models", workspace),
   getClaudeSessions: (workspace: string) => ipcRenderer.invoke("claude:sessions", workspace),
+  watchClaudeWorkspace: (workspace: string) => ipcRenderer.invoke("claude:watch-workspace", workspace),
   getClaudeSession: (workspace: string, sessionId: string) => ipcRenderer.invoke("claude:session", workspace, sessionId),
   getClaudeSessionHistories: (workspace: string) => ipcRenderer.invoke("claude:session-histories", workspace),
   renameClaudeSession: (workspace: string, sessionId: string, title: string) => ipcRenderer.invoke("claude:rename-session", workspace, sessionId, title),
@@ -56,5 +57,14 @@ contextBridge.exposeInMainWorld("claudeDesk", {
     const listener = (_ipcEvent: Electron.IpcRendererEvent, state: unknown) => callback(state);
     ipcRenderer.on("app:update-state", listener);
     return () => ipcRenderer.removeListener("app:update-state", listener);
+  },
+  onClaudeWatch: (callback: (event: unknown) => void) => {
+    const listener = (_ipcEvent: Electron.IpcRendererEvent, event: unknown) => {
+      if (!event || typeof event !== "object") return;
+      const kind = (event as { kind?: unknown }).kind;
+      if (kind === "sessions" || kind === "settings") callback(event);
+    };
+    ipcRenderer.on("claude:watch", listener);
+    return () => ipcRenderer.removeListener("claude:watch", listener);
   },
 });

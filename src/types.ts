@@ -329,3 +329,10 @@ export interface ClaudeEvent {
   code?: number | null;
   stderr?: string;
 }
+
+/** 主进程发现 Claude 自己改了 session 或配置文件后推过来的信号，只说类别，内容还得自己去读。 */
+export interface ClaudeWatchEvent {
+  kind: "sessions" | "settings";
+  /** sessions 事件带 `~/.claude/projects` 下的目录名，用来对上是哪个项目。 */
+  projectKey?: string;
+}

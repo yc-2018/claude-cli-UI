@@ -447,8 +447,51 @@ try {
   }
   await page.waitForTimeout(450);
   const persistedImport = await page.evaluate(() => JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0]?.conversations?.find((conversation) => conversation.source === "claude"));
-  if (!persistedImport || persistedImport.messages.length !== 0) throw new Error("imported CLI history was duplicated into local storage");
+  if (!persistedImport || persistedImport.messages.length !== 0) {
+    const persistedShape = await page.evaluate(() => JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")
+      .map((project) => ({
+        id: project.id,
+        conversations: project.conversations?.map((conversation) => ({
+          title: conversation.title,
+          source: conversation.source ?? null,
+          sessionId: conversation.sessionId ?? null,
+          messages: conversation.messages?.length,
+        })),
+      })));
+    throw new Error(`imported CLI history was duplicated into local storage: ${JSON.stringify(persistedShape)}`);
+  }
 
+  // 文件监听：用户在终端里对同一个 session 继续问，不点刷新按钮，打开着的对话也要自己长出新轮次。
+  await appendFile(resolve(cliSessions, `${importedSessionId}.jsonl`), `${[
+    {
+      type: "user",
+      uuid: "watched-turn-user",
+      timestamp: new Date().toISOString(),
+      cwd: root,
+      sessionId: importedSessionId,
+      message: { role: "user", content: "在终端里补问的一轮" },
+    },
+    {
+      type: "assistant",
+      uuid: "watched-turn-assistant",
+      timestamp: new Date(Date.now() + 10).toISOString(),
+      cwd: root,
+      sessionId: importedSessionId,
+      message: {
+        id: "watched-turn-response",
+        role: "assistant",
+        model: "ThirdParty-B",
+        content: [{ type: "text", text: "文件监听把它自动同步过来了。" }],
+      },
+    },
+  ].map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
+  await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((item) => item.textContent === "在终端里补问的一轮"));
+  if (!(await page.locator(".markdown").last().textContent())?.includes("自动同步")) {
+    throw new Error("file watcher did not pull the new CLI turn into the open conversation");
+  }
+
+  // 文件监听：CLI 新建的 session 也要自己出现在侧边栏，不依赖重启或手动刷新。
+  // 这个会话下面紧接着就被删掉，所以不会影响后续用例里的对话计数。
   const hiddenSessionId = "55555555-5555-4555-8555-555555555555";
   const hiddenSessionPath = resolve(cliSessions, `${hiddenSessionId}.jsonl`);
   await writeFile(hiddenSessionPath, [
@@ -469,7 +512,6 @@ try {
       message: { id: "hidden-response", role: "assistant", model: "ThirdParty-A", content: [{ type: "text", text: "CLI 历史应继续保留。" }] },
     },
   ].map((entry) => JSON.stringify(entry)).join("\n"), "utf8");
-  await refreshProjectSessions(page);
   const hiddenRow = inFolder(page, ".task-row", { hasText: "准备从 UI 移除的 CLI 会话" });
   await hiddenRow.waitFor();
   await hiddenRow.hover();
@@ -538,6 +580,23 @@ try {
   }
   // 选到 1M 模型之后，上下文状态条必须能看出这份容量，而不是只剩一个百分比。
   await page.locator('.model-select .composer-select-option[data-value="opus"]').click();
+  await page.waitForFunction(() => document.querySelector(".context-window-badge")?.textContent === "1M");
+  // 文件监听：配置文件被外部改掉时，不展开模型菜单界面也要自己跟上。会话此刻用的就是 1M 的 opus，
+  // 所以把路由改成普通模型之后，1M 标记应该自己消失，不需要任何点击。
+  await writeTestModels({
+    Sonnet: "Router2-Sonnet",
+    Opus: "Router3-Opus",
+    Fable: "ThirdParty-B",
+    Haiku: "ThirdParty-B",
+  });
+  await page.waitForFunction(() => !document.querySelector(".context-window-badge"));
+  // 再改回去，让后面「展开菜单会刷新」的用例仍然从 1M 这个状态出发。
+  await writeTestModels({
+    Sonnet: "Router2-Sonnet",
+    Opus: "Router2-Opus[1m]",
+    Fable: "ThirdParty-B",
+    Haiku: "ThirdParty-B",
+  });
   await page.waitForFunction(() => document.querySelector(".context-window-badge")?.textContent === "1M");
   await page.keyboard.press("Escape");
   await writeTestModels({
@@ -746,7 +805,12 @@ try {
   const firstConversation = completed.projects[0]?.conversations?.find((conversation) => conversation.sessionId === "22222222-2222-4222-8222-222222222222");
   if (completed.bodySize < 500) throw new Error("rendered conversation is unexpectedly blank");
   if (firstConversation?.messages?.at(-1)?.status !== "done") throw new Error("completed response was not persisted");
-  if (!firstConversation?.messages?.at(-1)?.thinking?.includes("检查上下文")) throw new Error("thinking content was not persisted");
+  if (!firstConversation?.messages?.at(-1)?.thinking?.includes("检查上下文")) {
+    throw new Error(`thinking content was not persisted: ${JSON.stringify({
+      messages: firstConversation?.messages?.map((message) => `${message.role}|${message.thinking ? "T" : "-"}|${message.status ?? ""}`),
+      conversations: completed.projects[0]?.conversations?.map((conversation) => `${conversation.title}|${conversation.source ?? "ui"}|${conversation.messages?.length}`),
+    })}`);
+  }
   if (firstConversation?.selectedModel !== "fable" || firstConversation?.resolvedModel !== "ThirdParty-B") {
     throw new Error("selected model role was not mapped through CLI");
   }

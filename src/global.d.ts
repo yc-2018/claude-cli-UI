@@ -1,4 +1,4 @@
-import type { ActiveRunStatus, AppendRunRequest, AppSelection, AppSettings, AppUpdateState, Attachment, AttachmentUpload, BranchClaudeSessionResult, ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ControlResponseRequest, ModelConfig, OpenAttachmentResult, PermissionMode, PermissionNotificationRequest, Project, ProjectLinkTarget, RunRequest, StartRunResult, UpdateActionResult } from "./types";
+import type { ActiveRunStatus, AppendRunRequest, AppSelection, AppSettings, AppUpdateState, Attachment, AttachmentUpload, BranchClaudeSessionResult, ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ClaudeWatchEvent, ControlResponseRequest, ModelConfig, OpenAttachmentResult, PermissionMode, PermissionNotificationRequest, Project, ProjectLinkTarget, RunRequest, StartRunResult, UpdateActionResult } from "./types";
 
 declare module "*.css";
 
@@ -11,6 +11,7 @@ declare global {
       getClaudeInfo(): Promise<{ available: boolean; version?: string }>;
       getModels(workspace: string): Promise<ModelConfig>;
       getClaudeSessions(workspace: string): Promise<ClaudeSessionSummary[]>;
+      watchClaudeWorkspace(workspace: string): Promise<boolean>;
       getClaudeSession(workspace: string, sessionId: string): Promise<ClaudeSessionHistory | null>;
       getClaudeSessionHistories(workspace: string): Promise<ClaudeSessionHistory[]>;
       renameClaudeSession(workspace: string, sessionId: string, title: string): Promise<{ renamed: boolean; error?: string }>;
@@ -47,6 +48,7 @@ declare global {
       onEvent(callback: (event: ClaudeEvent) => void): () => void;
       onNavigateToConversation(callback: (conversationId: string) => void): () => void;
       onUpdateState(callback: (state: AppUpdateState) => void): () => void;
+      onClaudeWatch(callback: (event: ClaudeWatchEvent) => void): () => void;
     };
   }
 }

@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
+import { ClaudeWatcher } from "./session-watcher";
 import { GITHUB_ISSUES_URL, GITHUB_PROJECT_URL, UpdateManager } from "./update-manager";
 
 type PermissionMode = "default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions";
@@ -184,6 +185,10 @@ const updateManager = new UpdateManager({
   getWindow: () => mainWindow,
   hasActiveRuns: () => activeRuns.size > 0,
   prepareToQuit: () => { isQuitting = true; },
+});
+const claudeWatcher = new ClaudeWatcher({
+  getWindow: () => mainWindow,
+  getConfigDirectory: () => claudeConfigDirectory(),
 });
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ATTACHMENT_NAME_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:\.[a-z0-9]{1,12})?$/i;
@@ -1572,6 +1577,13 @@ ipcMain.handle("claude:models", async (_event, workspace: unknown) => {
   return getModelConfig(workspace);
 });
 
+// 模型配置还能写在 workspace 的 .claude 里，所以活动项目换了要让 watcher 跟着挪过去。
+ipcMain.handle("claude:watch-workspace", (_event, workspace: unknown) => {
+  if (typeof workspace !== "string" || !existsSync(workspace) || !statSync(workspace).isDirectory()) return false;
+  claudeWatcher.watchWorkspace(workspace);
+  return true;
+});
+
 ipcMain.handle("claude:sessions", async (_event, workspace: unknown) => {
   if (typeof workspace !== "string" || !existsSync(workspace) || !statSync(workspace).isDirectory()) return [];
   const sessions = await scanClaudeSessions(workspace);
@@ -2169,6 +2181,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   });
   createWindow();
   updateManager.initialize();
+  claudeWatcher.initialize();
   app.on("second-instance", () => showMainWindow());
   app.on("activate", () => {
     showMainWindow();
@@ -2182,6 +2195,7 @@ app.on("window-all-closed", () => {
 app.on("before-quit", () => {
   isQuitting = true;
   updateManager.dispose();
+  claudeWatcher.dispose();
   for (const run of activeRuns.values()) killRunTree(run);
   tray?.destroy();
   tray = null;

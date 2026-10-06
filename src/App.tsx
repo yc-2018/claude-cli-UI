@@ -121,6 +121,13 @@ const DEFAULT_SIDEBAR_WIDTH = 280;
 const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 520;
 const SIDEBAR_WIDTH_STORAGE_KEY = "claude-desk.sidebar-width.v1";
+// Claude 进程退出后文件还要再写一会儿，这段时间里 watcher 只更新会话列表，不拿磁盘内容盖正文。
+const RUN_SETTLE_MS = 3_000;
+
+/** 必须和主进程 `claudeSessionsDirectory` 的目录名规则逐字一致，否则 watcher 事件对不上项目。 */
+function sessionDirectoryKey(workspace: string) {
+  return workspace.replace(/[^A-Za-z0-9]/g, "-");
+}
 const DEFAULT_APP_SETTINGS: AppSettings = { closeBehavior: "tray", notifyOnCompletion: true };
 const DEFAULT_UPDATE_STATE: AppUpdateState = { phase: "idle", currentVersion: "", portable: false };
 const EMPTY_COMPOSER_DRAFT: ComposerDraft = { prompt: "", attachments: [] };
@@ -883,6 +890,8 @@ export default function App() {
   const runMeta = useRef(new Map<string, RunMeta>());
   const processRunIds = useRef(new Map<string, string>());
   const scannedProjects = useRef(new Set<string>());
+  const syncingProjects = useRef(new Set<string>());
+  const lastRunEndedAt = useRef(0);
   const loadingHistories = useRef(new Set<string>());
   const sidebarResize = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
   const branchingConversation = useRef(false);
@@ -1107,16 +1116,20 @@ export default function App() {
     return () => window.removeEventListener("resize", resize);
   }, []);
 
-  const syncProjectSessions = useCallback(async (projectId: string, reloadMessages: boolean) => {
+  const syncProjectSessions = useCallback(async (projectId: string, reloadMessages: boolean, automatic = false) => {
     const project = projectsRef.current.find((item) => item.id === projectId);
     if (!project) return;
 
-    const localSessionIds = project.conversations.flatMap((conversation) => (
-      conversation.source !== "claude" && conversation.sessionId ? [conversation.sessionId] : []
-    ));
-    await Promise.all(localSessionIds.map((sessionId) => (
-      window.claudeDesk.normalizeClaudeSession(project.workspace, sessionId).catch(() => false)
-    )));
+    // 规范化会写回 session 文件，而写文件又会惊动 watcher。自动同步必须跳过这一步，
+    // 否则就是「同步→写盘→再同步」的死循环，连带把项目保存的防抖永远往后推。
+    if (!automatic) {
+      const localSessionIds = project.conversations.flatMap((conversation) => (
+        conversation.source !== "claude" && conversation.sessionId ? [conversation.sessionId] : []
+      ));
+      await Promise.all(localSessionIds.map((sessionId) => (
+        window.claudeDesk.normalizeClaudeSession(project.workspace, sessionId).catch(() => false)
+      )));
+    }
 
     const sessions = await window.claudeDesk.getClaudeSessions(project.workspace);
     const sessionById = new Map(sessions.map((session) => [session.sessionId, session] as const));
@@ -1132,13 +1145,27 @@ export default function App() {
       }
     }
 
-    setProjects((current) => current.map((item) => {
+    const applyTo = (current: Project[]) => current.map((item) => {
       if (item.id !== projectId) return item;
+      // 手动刷新是用户明确要求以磁盘为准，照原样覆盖。自动同步则要在落盘这一刻再确认一次运行状态：
+      // 上面两次读盘是异步的，期间刚开始的回复不能被磁盘内容顶掉。
+      const busyConversationIds = automatic
+        ? new Set([...runMeta.current.values()].map((meta) => meta.conversationId))
+        : new Set<string>();
       const refreshed = item.conversations.map((conversation) => {
         const session = conversation.sessionId ? sessionById.get(conversation.sessionId) : undefined;
-        const history = conversation.sessionId ? histories.get(conversation.sessionId) : undefined;
+        const candidate = conversation.sessionId ? histories.get(conversation.sessionId) : undefined;
+        // 界面刚追加完提问、startRun 还没登记 runMeta 的那一瞬间，光看 runMeta 会以为这条对话是空闲的；
+        // 消息自己的状态没有这个空窗。再加上「文件里的轮次没变多就不动」，自动同步就不会把已经显示
+        // 出来的内容和 thinking 打回去——Claude 是边跑边追加 JSONL 的，读到半成品很正常。
+        const pendingStatus = conversation.messages.at(-1)?.status;
+        const stale = busyConversationIds.has(conversation.id)
+          || pendingStatus === "running"
+          || pendingStatus === "queued"
+          || (candidate ? candidate.messages.length <= conversation.messages.length : false);
+        const history = automatic && stale ? undefined : candidate;
         if (!session) return conversation;
-        return {
+        const next = {
           ...conversation,
           title: session.customTitle ?? conversation.title,
           messages: history?.messages ?? conversation.messages,
@@ -1152,22 +1179,45 @@ export default function App() {
           contextCompactions: history ? history.contextCompactions ?? conversation.contextCompactions : conversation.contextCompactions,
           historyLoaded: conversation.source === "claude" && history ? true : conversation.historyLoaded,
         };
+        // 文件事件很密，同一轮对话会反复惊动 watcher，而多数时候解析结果和界面上的一模一样。
+        // 这时必须把原对象原样还回去：换一个新引用就会白跑一次渲染，还会把项目保存的防抖往后推。
+        const unchanged = next.title === conversation.title
+          && next.messages === conversation.messages
+          && next.updatedAt === conversation.updatedAt
+          && next.gitBranch === conversation.gitBranch
+          && next.resolvedModel === conversation.resolvedModel
+          && next.permissionMode === conversation.permissionMode
+          && next.contextUsage === conversation.contextUsage
+          && next.contextCompactions === conversation.contextCompactions
+          && next.historyLoaded === conversation.historyLoaded;
+        return unchanged ? conversation : next;
       });
       const knownSessionIds = new Set(refreshed.flatMap((conversation) => conversation.sessionId ? [conversation.sessionId] : []));
       const additions = sessions
         .filter((session) => !knownSessionIds.has(session.sessionId))
         .map(importedConversation);
+      const nextUpdatedAt = sessions.length > 0
+        ? Math.max(item.updatedAt, ...sessions.map((session) => session.updatedAt))
+        : item.updatedAt;
+      if (
+        additions.length === 0
+        && nextUpdatedAt === item.updatedAt
+        && refreshed.every((conversation, index) => conversation === item.conversations[index])
+      ) return item;
       return {
         ...item,
-        updatedAt: sessions.length > 0
-          ? Math.max(item.updatedAt, ...sessions.map((session) => session.updatedAt))
-          : item.updatedAt,
+        updatedAt: nextUpdatedAt,
         conversations: insertUnpinnedFirst(
           refreshed,
           additions.sort((a, b) => b.updatedAt - a.updatedAt),
         ),
       };
-    }));
+    });
+    // 整个项目都没变就把原数组还回去，否则 projects 换引用会白跑渲染、还把保存防抖往后推。
+    setProjects((current) => {
+      const next = applyTo(current);
+      return next.some((item, index) => item !== current[index]) ? next : current;
+    });
   }, []);
 
   useEffect(() => {
@@ -1193,6 +1243,12 @@ export default function App() {
     return () => { canceled = true; };
   }, [activeProject?.id, activeProject?.workspace]);
 
+  // 模型配置也可能写在 workspace 自己的 .claude 里，让主进程的 watcher 跟着活动项目挪过去。
+  useEffect(() => {
+    if (!activeProject) return;
+    void window.claudeDesk.watchClaudeWorkspace(activeProject.workspace).catch(() => false);
+  }, [activeProject?.id, activeProject?.workspace]);
+
   // 换路由之后同一个角色可能指向别的实际模型，所以每次展开模型菜单都重新读一遍配置：
   // 先显示已缓存的列表再就地更新，用户不需要记得去点一个刷新按钮。刷新只改可选项，
   // 不会动任何对话已经存下的选择，正在回复的会话也不受影响。
@@ -1205,6 +1261,32 @@ export default function App() {
       .catch(() => undefined)
       .finally(() => setModelsRefreshing(false));
   }, []);
+
+  // 用户在终端里继续同一个 session，或者 Claude 自己写了新的 session 文件，主进程的 watcher 会把
+  // 信号推过来。活动项目重新读消息正文，让正在看的对话跟着终端往下长；其余项目只合并会话列表和
+  // 标题，免得为了后台项目反复解析整份历史。
+  const syncWatchedProject = useCallback(async (projectKey: string) => {
+    const project = projectsRef.current.find((item) => sessionDirectoryKey(item.workspace) === projectKey);
+    if (!project || syncingProjects.current.has(project.id)) return;
+    const reloadMessages = activeProjectRef.current?.id === project.id
+      && Date.now() - lastRunEndedAt.current > RUN_SETTLE_MS;
+    syncingProjects.current.add(project.id);
+    try {
+      await syncProjectSessions(project.id, reloadMessages, true);
+    } catch {
+      // 历史目录读不到就什么都不合并，手动刷新按钮仍然可用。
+    } finally {
+      syncingProjects.current.delete(project.id);
+    }
+  }, [syncProjectSessions]);
+
+  useEffect(() => window.claudeDesk.onClaudeWatch((event) => {
+    if (event.kind === "settings") {
+      refreshModels();
+      return;
+    }
+    if (event.projectKey) void syncWatchedProject(event.projectKey);
+  }), [refreshModels, syncWatchedProject]);
 
   const updateConversation = useCallback((conversationId: string, updater: (value: Conversation) => Conversation) => {
     setProjects((current) => current.map((project) => {
@@ -1394,6 +1476,9 @@ export default function App() {
   }, [updateResponse]);
 
   useEffect(() => window.claudeDesk.onEvent((event: ClaudeEvent) => {
+    // 进程退出之后文件才写完整，记一个时间点让 watcher 的自动同步先让开，
+    // 免得用磁盘上滞后的内容盖掉刚刚流式出来的回复和上下文用量。
+    if (event.type === "exit") lastRunEndedAt.current = Date.now();
     const meta = runMeta.current.get(event.runId);
     if (!meta) {
       if (event.type === "exit") {
