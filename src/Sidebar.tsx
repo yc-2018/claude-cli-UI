@@ -824,7 +824,7 @@ export default function Sidebar({
                   type="button"
                 >
                   <Star size={13} />
-                  去 star
+                  项目源码
                 </button>
                 <button
                   className="setting-link-button"

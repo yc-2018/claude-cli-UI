@@ -354,7 +354,7 @@ try {
       globalThis.__externalUrls.push(url);
     };
   });
-  await page.locator(".setting-link-button", { hasText: "去 star" }).click();
+  await page.locator(".setting-link-button", { hasText: "项目源码" }).click();
   await page.locator(".setting-link-button", { hasText: "问题反馈" }).click();
   await electronApp.evaluate(async () => {
     const deadline = Date.now() + 5_000;
