@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { appendFile, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, extname, join } from "node:path";
+import { basename, dirname, extname, isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { ClaudeWatcher } from "./session-watcher";
@@ -284,7 +284,11 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
 function createWindow() {
+  // 测试时把窗口挪到屏幕外、而且不抢焦点：Playwright 的操作和截图都走 webContents，窗口不必
+  // 摆在人眼前。否则每跑一次测试就抢一次焦点，机器根本没法用。
+  const offscreen = process.env.CLAUDE_DESK_TEST_OFFSCREEN === "1";
   const window = new BrowserWindow({
+    ...(offscreen ? { x: -4_000, y: -4_000, show: false } : {}),
     width: 1320,
     height: 860,
     minWidth: 900,
@@ -302,8 +306,11 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // 挪到屏幕外会被判定成不可见，不关掉节流的话渲染会被降频，测试跟着变慢。
+      backgroundThrottling: !offscreen,
     },
   });
+  if (offscreen) window.showInactive();
 
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
   if (devServerUrl) {
@@ -345,8 +352,13 @@ function showMainWindow(conversationId?: string) {
   const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createWindow();
   window.flashFrame(false);
   if (window.isMinimized()) window.restore();
-  window.show();
-  window.focus();
+  if (process.env.CLAUDE_DESK_TEST_OFFSCREEN === "1") {
+    // 测试里托盘和通知的用例也会走到这里，照常抢焦点就白费了屏幕外那一步。
+    window.showInactive();
+  } else {
+    window.show();
+    window.focus();
+  }
   if (conversationId) {
     if (window.webContents.isLoading()) {
       window.webContents.once("did-finish-load", () => window.webContents.send("app:navigate-conversation", conversationId));
@@ -2171,6 +2183,43 @@ ipcMain.handle("claude:stop", (_event, runId: string) => {
 
 ipcMain.handle("claude:runs", () => [...activeRuns.values()].map(describeActiveRun));
 
+function startMenuShortcutPath() {
+  const directory = process.env.CLAUDE_DESK_TEST_START_MENU_DIR
+    || join(app.getPath("appData"), "Microsoft", "Windows", "Start Menu", "Programs");
+  return join(directory, "claude-cli-UI.lnk");
+}
+
+// 便携版没有安装步骤，开始菜单里不会有入口；而且它的文件名带版本号，每升一次级路径就变一次，
+// 上一版留下的快捷方式会指向一个已经不在了的文件。每次启动对一下指向，不一致就就地改写。
+// 安装版不碰：那边的快捷方式归 NSIS 管，插手只会变成两个条目互相覆盖。
+function syncStartMenuShortcut() {
+  if (process.platform !== "win32") return;
+  const target = process.env.PORTABLE_EXECUTABLE_FILE;
+  if (!target || !isAbsolute(target) || !existsSync(target)) return;
+  const shortcut = startMenuShortcutPath();
+  try {
+    mkdirSync(dirname(shortcut), { recursive: true });
+    if (existsSync(shortcut)) {
+      try {
+        // Windows 路径不区分大小写，按原样比对会把同一个文件误判成换了位置。
+        const current = shell.readShortcutLink(shortcut);
+        if (current.target.toLowerCase() === target.toLowerCase()) return;
+      } catch {
+        // 读不出来说明这个 .lnk 已经坏了，照样往下重建。
+      }
+    }
+    // 一律用 create：它会直接覆盖，不像 replace/update 那样要求先把旧文件解析出来。
+    shell.writeShortcutLink(shortcut, "create", {
+      target,
+      cwd: dirname(target),
+      description: "claude-cli-UI",
+    });
+  } catch {
+    // 开始菜单目录被组策略锁住之类的情况，不该挡着应用启动。
+  }
+}
+
+
 if (hasSingleInstanceLock) app.whenReady().then(async () => {
   appSettings = await loadAppSettings();
   protocol.handle("claude-desk-attachment", (request) => {
@@ -2182,6 +2231,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   createWindow();
   updateManager.initialize();
   claudeWatcher.initialize();
+  syncStartMenuShortcut();
   app.on("second-instance", () => showMainWindow());
   app.on("activate", () => {
     showMainWindow();

@@ -20,6 +20,13 @@ const fakeCli = resolve(root, "tests", "fixtures", "fake-claude.mjs");
 const packagedExecutable = process.env.CLAUDE_DESK_TEST_EXECUTABLE;
 await mkdir(profile, { recursive: true });
 await mkdir(cliSessions, { recursive: true });
+// 便携版每升一级文件名就换一次，旧快捷方式会指向一个已经不在的文件。预先放一个坏掉的 .lnk，
+// 验证启动时会把它整个换成指向当前这份便携版。
+const startMenuDirectory = resolve(profile, "start-menu");
+const startMenuShortcut = resolve(startMenuDirectory, "claude-cli-UI.lnk");
+const staleShortcutMarker = "上一版留下的过期快捷方式";
+await mkdir(startMenuDirectory, { recursive: true });
+await writeFile(startMenuShortcut, staleShortcutMarker, "utf8");
 const updateVersion = "9.9.9";
 const updateExecutableName = `claude-cli-UI Portable ${updateVersion}.exe`;
 const updateAssetName = `claude-cli-UI-Portable-${updateVersion}.exe`;
@@ -176,11 +183,13 @@ const launch = () => electron.launch({
     CLAUDE_DESK_TEST_WORKSPACE: root,
     CLAUDE_DESK_FAKE_SESSIONS_DIR: cliSessions,
     CLAUDE_DESK_DISABLE_NOTIFICATIONS: "1",
+    CLAUDE_DESK_TEST_OFFSCREEN: "1",
     CLAUDE_DESK_DISABLE_AUTO_UPDATE_CHECK: "1",
     CLAUDE_DESK_TEST_UPDATE_BASE_URL: updateBaseUrl,
     CLAUDE_DESK_TEST_UPDATE_INSTALL: "1",
     CLAUDE_DESK_TEST_EXPECT_EFFORT: "high",
     PORTABLE_EXECUTABLE_FILE: currentPortablePath,
+    CLAUDE_DESK_TEST_START_MENU_DIR: startMenuDirectory,
     CLAUDE_DESK_TEST_MODELS_FILE: modelsFile,
     CLAUDE_DESK_CLAUDE_EXECUTABLE: process.execPath,
     CLAUDE_DESK_CLAUDE_PREFIX_ARGS: JSON.stringify([fakeCli]),
@@ -244,6 +253,17 @@ try {
   if (await page.title() !== "claude-cli-UI") throw new Error("window title did not use the product name");
   if ((await page.locator(".sidebar-brand").textContent())?.trim() !== "claude-cli-UI") throw new Error("sidebar did not use the product name");
   await page.waitForFunction((version) => document.querySelector(".sidebar-version")?.textContent === `claude-cli-UI v${version}`, packageVersion);
+
+  // 便携版没有安装步骤，开始菜单入口得自己维护：过期的 .lnk 必须被换成指向当前这份便携版。
+  const shortcutBytes = await readFile(startMenuShortcut);
+  if (shortcutBytes.toString("utf8").includes(staleShortcutMarker)) {
+    throw new Error("stale start menu shortcut was left untouched");
+  }
+  // .lnk 里的路径按 UTF-16LE 存，部分字段退化成单字节，两种解码都看一遍最稳。
+  const shortcutText = `${shortcutBytes.toString("utf16le")}${shortcutBytes.toString("latin1")}`;
+  if (!shortcutText.includes(`claude-cli-UI Portable ${packageVersion}.exe`)) {
+    throw new Error(`start menu shortcut does not point at the current portable build: ${shortcutBytes.length} bytes`);
+  }
 
   await page.locator(".settings-trigger").click();
   const traySetting = page.locator(".segmented-control button", { hasText: "托盘后台" });
@@ -1491,7 +1511,18 @@ try {
       (role === "assistant" && guidedTurnOrder[index].status !== "done")
     ))
   ) throw new Error(`guided turn rendered in the wrong order: ${JSON.stringify(guidedTurnOrder)}`);
-  await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((element) => element.textContent === "队列第三条"));
+  try {
+    await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((element) => element.textContent === "队列第三条"));
+  } catch {
+    const queueState = await page.evaluate(() => ({
+      queue: [...document.querySelectorAll(".prompt-queue-content strong")].map((element) => element.textContent),
+      bubbles: [...document.querySelectorAll(".user-bubble")].map((element) => element.textContent),
+      running: document.querySelectorAll('.message.assistant[data-status="running"]').length,
+      queued: document.querySelectorAll('.message.assistant[data-status="queued"]').length,
+      stopButtons: document.querySelectorAll(".send-button.stop").length,
+    }));
+    throw new Error(`queued prompts stopped draining: ${JSON.stringify(queueState)}`);
+  }
   await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((element) => element.textContent === "队列第二条已编辑"));
   await page.waitForFunction(() => document.querySelectorAll(".prompt-queue-item").length === 0);
   await page.waitForFunction(() => document.querySelectorAll('.message.assistant[data-status="running"]').length === 0);

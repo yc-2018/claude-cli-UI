@@ -21,6 +21,7 @@ const electronApp = await electron.launch({
     CLAUDE_DESK_DISABLE_PROJECT_DISCOVERY: "1",
     CLAUDE_DESK_TEST_WORKSPACE: root,
     CLAUDE_DESK_DISABLE_AUTO_UPDATE_CHECK: "1",
+    CLAUDE_DESK_TEST_OFFSCREEN: "1",
     CLAUDE_DESK_TEST_UPDATE_VERSION: "9.9.9",
     CLAUDE_DESK_TEST_UPDATE_NOTES: "<h2>更新内容</h2><ul><li>修复 &amp; 优化 Portable 更新</li></ul>",
     CLAUDE_DESK_TEST_PORTABLE: "1",
@@ -515,8 +516,11 @@ if (compactLayout.body.width !== compactLayout.viewport.width || compactLayout.b
   throw new Error(`compact layout overflow: ${JSON.stringify(compactLayout)}`);
 }
 if (compactLayout.projectActions.length !== 5) throw new Error("project actions were not all available on hover");
+// 相邻按钮的边界本来就该严丝合缝，而 getBoundingClientRect 返回的是浮点值，缩放下相邻边会差
+// 出千万分之一像素。留一点容差，只有真正叠起来才算重叠。
+const OVERLAP_TOLERANCE = 0.5;
 for (let index = 1; index < compactLayout.projectActions.length; index += 1) {
-  if (compactLayout.projectActions[index].left < compactLayout.projectActions[index - 1].right) {
+  if (compactLayout.projectActions[index].left < compactLayout.projectActions[index - 1].right - OVERLAP_TOLERANCE) {
     throw new Error(`project actions overlap: ${JSON.stringify(compactLayout.projectActions)}`);
   }
 }
