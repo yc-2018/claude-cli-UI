@@ -1,17 +1,19 @@
 # claude-cli-UI
 
-![cli提问UI打开看](https://img11.360buyimg.com/cxxjwimg/jfs/t1/487648/20/4789/180082/6a65ec6cF6c27e7b3/06d7a4d863980fae.webp)
+界面：
+![cli提问UI打开看](https://img11.360buyimg.com/cxxjwimg/jfs/t1/543563/21/1168/170016/6ac5ec01F2d6b2cc7/06d78c0530779bac.webp)
+
+
+细节： IU <——>cil 所以消息是同步的，提供一键直达cli的命令
+![](https://img11.360buyimg.com/cxxjwimg/jfs/t1/540197/36/4148/222122/6ac5eddbF75f097a0/06d78af50d24e53d.webp)
+
+其他一些细节：
+![](https://img11.360buyimg.com/cxxjwimg/jfs/t1/536278/19/8667/206150/6ac5efcaF85de86a0/06d78c0530380508.webp)
 
 
 
-![](https://img11.360buyimg.com/cxxjwimg/jfs/t1/481591/6/10281/28664/6a66038bF6d494410/06d75272f925fe88.webp)![](https://img11.360buyimg.com/cxxjwimg/jfs/t1/484221/15/7928/59216/6a660360F89c26628/06d750f2eb9cd034.webp)
-
-![](https://img11.360buyimg.com/cxxjwimg/jfs/t1/483156/28/9823/116302/6a6644f9F9c33340c/06d7a4d5f1d24254.webp)
 
 claude-cli-UI 是一个运行在本机的 Claude CLI 桌面界面，使用 Electron、React 和 TypeScript 构建。
-
-> [!IMPORTANT]
-> 本项目是第三方开源客户端，与 Anthropic 及 Claude 官方无关，也未获得其认可、授权或赞助。
 
 ## 开发
 
@@ -53,6 +55,8 @@ npm test
 
 
 
+> [!IMPORTANT]
+> 本项目是第三方开源客户端，与 Anthropic 及 Claude 官方无关，也未获得其认可、授权或赞助。
 
 
 ## 友情链接
