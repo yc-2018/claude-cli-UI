@@ -288,7 +288,7 @@ function createWindow() {
   // 摆在人眼前。否则每跑一次测试就抢一次焦点，机器根本没法用。
   const offscreen = process.env.CLAUDE_DESK_TEST_OFFSCREEN === "1";
   const window = new BrowserWindow({
-    ...(offscreen ? { x: -4_000, y: -4_000, show: false } : {}),
+    ...(offscreen ? { x: -4_000, y: -4_000, show: false, focusable: false } : {}),
     width: 1320,
     height: 860,
     minWidth: 900,

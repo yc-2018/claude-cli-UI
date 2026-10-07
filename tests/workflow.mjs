@@ -247,6 +247,9 @@ let electronApp;
 try {
   electronApp = await launch();
   let page = await electronApp.firstWindow();
+  if (await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isFocusable()))) {
+    throw new Error("后台测试窗口不应能够抢占系统焦点");
+  }
   watchErrors(page);
   await page.waitForFunction(() => document.title === "claude-cli-UI");
   await page.waitForSelector(".sidebar-brand");
@@ -380,7 +383,7 @@ try {
   await page.keyboard.press("Escape");
   await page.waitForSelector(".settings-popover", { state: "detached" });
 
-  await page.locator('[data-section-label="projects"] .sidebar-section-action').click();
+  await page.locator('[data-section-label="projects"]').getByRole("button", { name: "新建项目", exact: true }).click();
   await page.waitForSelector(".composer");
   if (await page.locator(".project-group").count() !== 1) throw new Error("new project was not created");
   await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 2);
@@ -1830,6 +1833,53 @@ try {
   const projectC = page.locator('.project-group[data-project-id="order-project-c"]');
   const pinnedSectionLabel = page.locator('[data-section-label="pinned"]');
   const projectsSectionLabel = page.locator('[data-section-label="projects"]');
+  const expandProjects = projectsSectionLabel.getByRole("button", { name: "展开项目分组的所有项目", exact: true });
+  const collapseProjects = projectsSectionLabel.getByRole("button", { name: "收起项目分组的所有项目", exact: true });
+  const expandPinned = pinnedSectionLabel.getByRole("button", { name: "展开置顶分组的所有项目", exact: true });
+  const collapsePinned = pinnedSectionLabel.getByRole("button", { name: "收起置顶分组的所有项目", exact: true });
+  if (!(await expandPinned.isDisabled()) || !(await collapsePinned.isDisabled())) {
+    throw new Error("空置顶分组的批量操作应禁用");
+  }
+  if (await page.locator('[data-section-label="scratch"] .sidebar-section-projects-action').count()) {
+    throw new Error("临时对话没有项目，不应出现批量项目操作");
+  }
+  const waitForProjectFolds = (pinned, projects) => page.waitForFunction(({ pinned, projects }) => (
+    document.querySelectorAll('[data-section="pinned"] .project-conversations').length === pinned &&
+    document.querySelectorAll('[data-section="projects"] .project-conversations').length === projects
+  ), { pinned, projects });
+
+  // 批量操作只改变项目树，不关闭活动对话、不清空输入中的草稿。
+  const foldDraft = "批量收起仍保留的草稿";
+  await page.locator(".composer textarea").fill(foldDraft);
+  const foldHeading = await page.locator(".task-heading h2").textContent();
+  await collapseProjects.click();
+  await collapseProjects.click();
+  await waitForProjectFolds(0, 0);
+  if (await page.locator(".project-group").count() !== 3 ||
+    await page.locator(".task-heading h2").textContent() !== foldHeading ||
+    await page.locator(".composer textarea").inputValue() !== foldDraft) {
+    throw new Error("批量收起隐藏了项目行、关闭了活动对话或清空了草稿");
+  }
+  // 更新活动项目的标题会触发新的 projects 引用，不能因此把刚收起的项目自动展开。
+  await projectA.locator(".project-row").hover();
+  await projectA.locator('[title="重命名项目"]').click();
+  await page.getByRole("textbox", { name: "项目名称", exact: true }).fill("批量折叠回归测试");
+  await page.getByRole("textbox", { name: "项目名称", exact: true }).press("Enter");
+  await page.waitForFunction(() => document.querySelector('[data-project-id="order-project-a"] .project-name strong')?.textContent === "批量折叠回归测试");
+  await waitForProjectFolds(0, 0);
+  await projectA.locator(".project-row").hover();
+  await projectA.locator('[title="重命名项目"]').click();
+  await page.getByRole("textbox", { name: "项目名称", exact: true }).fill("排序项目 A");
+  await page.getByRole("textbox", { name: "项目名称", exact: true }).press("Enter");
+  await expandProjects.click();
+  await expandProjects.click();
+  await waitForProjectFolds(0, 3);
+  if (await projectA.locator(".task-row.active").getAttribute("data-conversation-id") !== "order-conversation-a" ||
+    await page.locator(".composer textarea").inputValue() !== foldDraft) {
+    throw new Error("全部展开改变了活动对话或草稿");
+  }
+  await page.locator(".composer textarea").fill("");
+
   await reorderDrag(projectC, ".project-drag-handle", projectA.locator(".project-row"), { x: 24, y: 2 });
   await page.waitForFunction(() => (
     [...document.querySelectorAll('[data-section="projects"] .project-group')]
@@ -1858,6 +1908,24 @@ try {
       .map((element) => element.getAttribute("data-project-id")).join(",") === "order-project-c" &&
     document.querySelector('.project-group[data-project-id="order-project-a"]')?.getAttribute("data-pinned") === "true"
   ));
+  // 两个分组互不影响；展开隐藏分组时也应恢复分组本身，不需要额外点标题。
+  await collapsePinned.click();
+  await waitForProjectFolds(0, 1);
+  await collapseProjects.click();
+  await waitForProjectFolds(0, 0);
+  await pinnedSectionLabel.locator(".sidebar-section-toggle").click();
+  await page.locator('[data-section="pinned"]').waitFor({ state: "detached" });
+  await expandPinned.click();
+  await waitForProjectFolds(2, 0);
+  await collapsePinned.click();
+  await waitForProjectFolds(0, 0);
+  await projectsSectionLabel.locator(".sidebar-section-toggle").click();
+  await page.locator('[data-section="projects"]').waitFor({ state: "detached" });
+  await expandProjects.click();
+  await waitForProjectFolds(0, 1);
+  await expandPinned.click();
+  await waitForProjectFolds(2, 1);
+
   await reorderDrag(projectA, ".project-drag-handle", projectsSectionLabel, { x: 24, y: 2 });
   await page.waitForFunction(() => (
     [...document.querySelectorAll('[data-section="pinned"] .project-group')]

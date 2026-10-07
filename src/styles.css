@@ -182,7 +182,8 @@ button, select, textarea { -webkit-app-region: no-drag; }
   cursor: pointer;
 }
 
-.sidebar-section-action:hover { background: #dcdcd6; color: #343430; }
+.sidebar-section-action:hover:not(:disabled) { background: #dcdcd6; color: #343430; }
+.sidebar-section-action:disabled { cursor: default; opacity: .4; }
 
 .sidebar-sections { display: flex; flex: 1; flex-direction: column; min-height: 0; margin-top: 11px; overflow: auto; }
 .sidebar-section { flex: 0 0 auto; margin-bottom: 6px; }

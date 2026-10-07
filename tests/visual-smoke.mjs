@@ -37,6 +37,9 @@ const electronApp = await electron.launch({
 });
 try {
 const page = await electronApp.firstWindow();
+if (await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isFocusable()))) {
+  throw new Error("视觉测试窗口不应能够抢占系统焦点");
+}
 const errors = [];
 
 page.on("console", (message) => {
@@ -182,7 +185,7 @@ if (sidebarSections !== "pinned,projects,scratch") throw new Error(`sidebar sect
 if (await page.locator(".new-task-button").count()) {
   throw new Error("the removed top-level new-project button is still rendered");
 }
-if (await page.locator(".sidebar-section-action").count() !== 2 ||
+if (await page.locator(".sidebar-section-action:not(.sidebar-section-projects-action)").count() !== 2 ||
   await page.locator('[data-section-label="projects"] .sidebar-section-action[aria-label="新建项目"]').count() !== 1 ||
   await page.locator('[data-section-label="scratch"] .sidebar-section-action[aria-label="新建临时对话"]').count() !== 1) {
   throw new Error("section headers did not carry the new-project / new-scratch-conversation shortcuts");
@@ -190,6 +193,33 @@ if (await page.locator(".sidebar-section-action").count() !== 2 ||
 if (!(await page.locator(".sidebar-section-toggle").count())) {
   throw new Error("section headers lost their collapse toggle");
 }
+if (await page.locator(".sidebar-section-projects-action").count() !== 4 ||
+  await page.locator('[data-section-label="scratch"] .sidebar-section-projects-action').count() !== 0) {
+  throw new Error("批量展开/收起按钮必须仅出现在置顶和项目分组");
+}
+const assertSectionControlsLayout = async () => {
+  const rows = await page.locator(".sidebar-section-label").evaluateAll((headers) => headers.map((header) => ({
+    section: header.getAttribute("data-section-label"),
+    row: header.getBoundingClientRect().toJSON(),
+    buttons: [...header.querySelectorAll(":scope > button")].map((button) => ({
+      rect: button.getBoundingClientRect().toJSON(),
+      clipped: button.scrollWidth > button.clientWidth + 1,
+    })),
+  })));
+  for (const { section, row, buttons } of rows) {
+    for (let index = 0; index < buttons.length; index += 1) {
+      const { rect, clipped } = buttons[index];
+      if (clipped || rect.width <= 0 || rect.height <= 0 ||
+        rect.left < row.left - 0.5 || rect.right > row.right + 0.5 ||
+        rect.top < row.top - 0.5 || rect.bottom > row.bottom + 0.5 ||
+        (index > 0 && rect.left < buttons[index - 1].rect.right - 0.5)) {
+        throw new Error(`分组标题的文字或按钮被截断/重叠：${section} ${JSON.stringify(buttons)}`);
+      }
+    }
+  }
+};
+await assertSectionControlsLayout();
+await page.screenshot({ path: resolve(artifacts, "sidebar-fold-controls-desktop.png") });
 // 临时对话段的入口只在标题栏，段内不再重复放一个文字按钮。
 if (await page.locator('[data-section="scratch"] .empty-conversation').count()) {
   throw new Error("the scratch section duplicated its new-conversation entry inside the list");
@@ -450,6 +480,7 @@ const layout = await page.evaluate(() => ({
 }));
 
 await page.setViewportSize({ width: 900, height: 640 });
+await assertSectionControlsLayout();
 if (await page.locator('[aria-label="压缩上下文"]').count() !== 1) throw new Error("context compact button was not visible in the compact viewport");
 // 进行中的压缩卡片有三行文字（标题、阶段、hint），窄窗口下它们必须依次向下排开而不是互相压住。
 const compactCompactionLayout = await page.locator(".context-compaction.running").evaluate((card) => ({
@@ -632,6 +663,21 @@ if (
 ) throw new Error(`compact prompt queue overflow: ${JSON.stringify(compactQueueLayout)}`);
 await page.screenshot({ path: resolve(artifacts, "prompt-queue-compact.png") });
 await page.locator(".send-button.stop").click();
+
+// 最窄侧边栏仍应放得下「项目」文字、计数、新建和两个批量按钮。
+const narrowHandle = await page.locator(".sidebar-resizer").boundingBox();
+if (!narrowHandle) throw new Error("最窄侧边栏测试缺少拖拽手柄");
+await page.mouse.move(narrowHandle.x + narrowHandle.width / 2, narrowHandle.y + 100);
+await page.mouse.down();
+await page.mouse.move(180, narrowHandle.y + 100, { steps: 6 });
+await page.mouse.up();
+await page.waitForFunction(() => Math.abs(document.querySelector(".sidebar").getBoundingClientRect().width - 220) < 1);
+await assertSectionControlsLayout();
+await page.getByRole("button", { name: "收起置顶分组的所有项目", exact: true }).click();
+await page.waitForSelector(".project-conversations", { state: "detached" });
+await page.screenshot({ path: resolve(artifacts, "sidebar-fold-controls-compact.png") });
+await page.getByRole("button", { name: "展开置顶分组的所有项目", exact: true }).click();
+await page.waitForSelector(".project-conversations");
 
 console.log(JSON.stringify({ errors, modelMenuLayout, permissionMenuLayout, compactModelMenuLayout, deleteDialogLayout, compactDeleteDialogLayout, updateDialogLayout, compactUpdateDialogLayout, settingsLayout, layout, compactLayout, compactQueueLayout, longPermissionLayout, userQuestionLayout }, null, 2));
 await electronApp.close();

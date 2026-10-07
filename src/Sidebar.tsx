@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  ChevronsDownUp,
+  ChevronsUpDown,
   Folder,
   GripVertical,
   LoaderCircle,
@@ -164,16 +166,16 @@ export default function Sidebar({
     };
   }, [settingsOpen]);
 
+  // 只在切换项目时展开目标，消息或标题更新不能撤销用户刚做的收起操作。
   useEffect(() => {
-    const activeProject = projects.find((project) => project.id === activeProjectId);
-    if (!activeProject) return;
+    if (!activeProjectId) return;
     setClosedProjects((current) => {
-      if (!current.has(activeProject.id)) return current;
+      if (!current.has(activeProjectId)) return current;
       const next = new Set(current);
-      next.delete(activeProject.id);
+      next.delete(activeProjectId);
       return next;
     });
-  }, [projects, activeProjectId]);
+  }, [activeProjectId]);
 
   const toggleProject = (projectId: string) => {
     setClosedProjects((current) => {
@@ -182,6 +184,25 @@ export default function Sidebar({
       else next.add(projectId);
       return next;
     });
+  };
+
+  const setSectionProjectsExpanded = (section: SectionKey, sectionProjects: Project[], expanded: boolean) => {
+    setClosedProjects((current) => {
+      const next = new Set(current);
+      for (const project of sectionProjects) {
+        if (expanded) next.delete(project.id);
+        else next.add(project.id);
+      }
+      return next;
+    });
+    if (expanded) {
+      setClosedSections((current) => {
+        if (!current.has(section)) return current;
+        const next = new Set(current);
+        next.delete(section);
+        return next;
+      });
+    }
   };
 
   const toggleSection = (section: SectionKey) => {
@@ -573,6 +594,7 @@ export default function Sidebar({
           ) : (
             <button
               className="project-toggle"
+              aria-expanded={!closed}
               onClick={() => toggleProject(project.id)}
               title={project.workspace}
             >
@@ -647,7 +669,7 @@ export default function Sidebar({
     section: SectionKey,
     text: string,
     count: number,
-    options: { pinTarget?: boolean; action?: { label: string; onClick(): void } } = {},
+    options: { pinTarget?: boolean; action?: { label: string; onClick(): void }; projects?: Project[] } = {},
   ) => (
     <div
       className={`sidebar-section-label ${options.pinTarget && pinDropSection === section ? "pin-drop" : ""}`}
@@ -655,7 +677,7 @@ export default function Sidebar({
       onDragOver={options.pinTarget ? (event) => dragOverPinTarget(event, section) : undefined}
       onDrop={options.pinTarget ? (event) => dropOnPinTarget(event, section) : undefined}
     >
-      <button className="sidebar-section-toggle" onClick={() => toggleSection(section)} type="button">
+      <button className="sidebar-section-toggle" aria-expanded={!closedSections.has(section)} onClick={() => toggleSection(section)} type="button">
         {closedSections.has(section) ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
         <span>{text}</span>
         <span className="sidebar-section-count">{count}</span>
@@ -671,6 +693,25 @@ export default function Sidebar({
           <Plus size={13} />
         </button>
       ) : null}
+      {options.projects ? [true, false].map((expanded) => {
+        const sectionProjects = options.projects;
+        if (!sectionProjects) return null;
+        const label = `${expanded ? "展开" : "收起"}${text}分组的所有项目`;
+        const Icon = expanded ? ChevronsUpDown : ChevronsDownUp;
+        return (
+          <button
+            key={String(expanded)}
+            aria-label={label}
+            className="sidebar-section-action sidebar-section-projects-action"
+            disabled={sectionProjects.length === 0}
+            onClick={() => setSectionProjectsExpanded(section, sectionProjects, expanded)}
+            title={label}
+            type="button"
+          >
+            <Icon size={13} />
+          </button>
+        );
+      }) : null}
     </div>
   );
 
@@ -683,7 +724,7 @@ export default function Sidebar({
       </div>
       <div className="sidebar-sections">
         <div className="sidebar-section" data-section-group="pinned">
-          {sectionLabel("pinned", "置顶", pinnedProjects.length + pinnedConversations.length, { pinTarget: true })}
+          {sectionLabel("pinned", "置顶", pinnedProjects.length + pinnedConversations.length, { pinTarget: true, projects: pinnedProjects })}
           {!closedSections.has("pinned") ? (
             <nav className="project-list" data-section="pinned" aria-label="置顶">
               {pinnedEmpty ? <div className="task-list-empty">把项目或对话拖到这里置顶</div> : null}
@@ -701,6 +742,7 @@ export default function Sidebar({
           {sectionLabel("projects", "项目", unpinnedProjects.length, {
             pinTarget: true,
             action: { label: "新建项目", onClick: onNewProject },
+            projects: unpinnedProjects,
           })}
           {!closedSections.has("projects") ? (
             <nav className="project-list" data-section="projects" aria-label="项目列表">
