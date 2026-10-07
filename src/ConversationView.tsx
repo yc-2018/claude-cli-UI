@@ -1,5 +1,5 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { BrainCircuit, Check, ChevronRight, Code2, Copy, FileCode2, GitFork, List, Pencil, Search, Sparkles, TerminalSquare, Wrench } from "lucide-react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { BrainCircuit, Check, ChevronDown, ChevronRight, Code2, Copy, FileCode2, GitFork, List, Pencil, Search, Sparkles, TerminalSquare, Wrench } from "lucide-react";
 import AttachmentPreview, { attachmentUrl, openAttachmentFile } from "./AttachmentPreview";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -336,9 +336,15 @@ function AssistantResponse({ message }: { message: ChatMessage }) {
       {message.status === "running" && !message.retry && !message.content && !message.thinking && (message.activities?.length ?? 0) === 0
         ? <div className="thinking"><span className="spinner" />Claude 正在准备回答</div>
         : null}
-      {/* 排队中的轮次还没轮到自己，只提示位置，不显示计时也不显示转圈。 */}
+      {/* 等待的原因有两种，处置也不同：引导进去的提示已经交给 Claude 了，界面排队的还没启动进程。 */}
       {message.status === "queued"
-        ? <div className="queued-hint">排队中 · 等上一条回答结束后开始</div>
+        ? (
+          <div className={`queued-hint ${message.appended ? "appended" : ""}`}>
+            {message.appended
+              ? "已插入当前任务 · Claude 处理完手上这一步就接着答"
+              : "排队中 · 等上一条回答结束后开始"}
+          </div>
+        )
         : null}
       {message.error ? <div className="message-error">{message.error}</div> : null}
     </>
@@ -383,10 +389,26 @@ interface UserMessageProps {
 function UserMessage({ message, canEdit, onEditResend }: UserMessageProps) {
   const [draft, setDraft] = useState<string | null>(null);
   const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const textRef = useRef<HTMLDivElement>(null);
   const editing = draft !== null;
   const attachmentCount = message.attachments?.length ?? 0;
   const canSubmit = editing && (draft.trim().length > 0 || attachmentCount > 0);
+
+  // 粘贴整段日志或需求的提问会把回答挤出屏幕，默认只露出开头几行。行数必须按渲染结果量，
+  // 不能数换行符：一段没有换行的长文本同样会折成很多行。折叠态下测量，所以永远量得到真实溢出。
+  useLayoutEffect(() => {
+    const element = textRef.current;
+    if (!element || editing || expanded) return;
+    const measure = () => setOverflowing(element.scrollHeight - element.clientHeight > 2);
+    measure();
+    // 窗口变窄后同样的文字会占更多行，展开按钮要跟着出现。
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [editing, expanded, message.content]);
 
   useEffect(() => {
     if (!editing || !textareaRef.current) return;
@@ -465,7 +487,20 @@ function UserMessage({ message, canEdit, onEditResend }: UserMessageProps) {
       <AttachmentPreview attachment={previewAttachment} onClose={() => setPreviewAttachment(null)} />
       <div className="user-bubble">
         {attachments}
-        {message.content ? <div className="user-message-text">{message.content}</div> : null}
+        {message.content ? (
+          <div className={`user-message-text ${expanded ? "" : "collapsed"}`} ref={textRef}>{message.content}</div>
+        ) : null}
+        {overflowing ? (
+          <button
+            aria-expanded={expanded}
+            className="user-message-fold"
+            onClick={() => setExpanded((value) => !value)}
+            type="button"
+          >
+            <ChevronDown size={13} />
+            <span>{expanded ? "收起" : "展开全部"}</span>
+          </button>
+        ) : null}
       </div>
       {showActions ? (
         <div className="message-actions user">
@@ -543,6 +578,113 @@ interface ConversationViewProps {
   onEditResend?(messageId: string, content: string): void;
 }
 
+/** 提问少于这个条数时整段对话翻一下就看完了，导航线只是干扰。 */
+const MARKER_MIN_MESSAGES = 4;
+
+interface MarkerItem {
+  id: string;
+  text: string;
+  /** 这条消息在全部内容里的纵向位置，0 到 1。 */
+  ratio: number;
+}
+
+/** 消息在滚动内容里的纵向偏移。offsetTop 取决于最近的定位祖先，这里按视口差值算，不受布局影响。 */
+function contentOffsetOf(container: HTMLElement, element: HTMLElement) {
+  return element.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
+}
+
+/** 对话右缘的提问导航：平时是一列短横线，鼠标移上去摊开成提问列表，点击跳到对应消息。 */
+function ConversationMarkers({ messages, scrollRef }: { messages: ChatMessage[]; scrollRef: RefObject<HTMLDivElement | null> }) {
+  const [items, setItems] = useState<MarkerItem[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const userMessages = messages.filter((message) => message.role === "user" && message.content.trim().length > 0);
+  const signature = userMessages.map((message) => `${message.id}:${message.content.length}`).join(",");
+
+  useLayoutEffect(() => {
+    const container = scrollRef.current;
+    if (!container || userMessages.length < MARKER_MIN_MESSAGES) {
+      setItems([]);
+      return;
+    }
+    const measure = () => {
+      const total = container.scrollHeight;
+      if (total <= 0) return;
+      const next = userMessages.flatMap((message) => {
+        const element = container.querySelector<HTMLElement>(`[data-message-id="${message.id}"]`);
+        if (!element) return [];
+        const ratio = contentOffsetOf(container, element) / total;
+        return [{ id: message.id, text: message.content.replace(/\s+/g, " ").trim(), ratio: Math.min(1, Math.max(0, ratio)) }];
+      });
+      // 回答流式输出时高度每几十毫秒就变一次。位置没有实际挪动就不要换掉数组，
+      // 否则这里的重渲染会和主进程推过来的事件抢渲染线程。
+      setItems((current) => current.length === next.length && current.every((item, index) => (
+        item.id === next[index].id && item.text === next[index].text && Math.abs(item.ratio - next[index].ratio) < 0.002
+      )) ? current : next);
+    };
+    measure();
+    // 回答还在流式输出、或者长消息被展开时内容高度一直在变，位置必须跟着重算。多次变化合并成一帧。
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        measure();
+      });
+    });
+    observer.observe(container);
+    const content = container.firstElementChild;
+    if (content) observer.observe(content);
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+    // userMessages 每次渲染都是新数组，用 id 串做依赖，避免 effect 无限重跑。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scrollRef, signature]);
+
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!container || items.length === 0) return;
+    const update = () => {
+      // 探测点放在视口上方四分之一处：那里是读者正在看的位置，而不是屏幕最顶端。
+      const probe = container.scrollTop + container.clientHeight * 0.25;
+      const total = container.scrollHeight;
+      let current = items[0].id;
+      for (const item of items) {
+        if (item.ratio * total > probe) break;
+        current = item.id;
+      }
+      setActiveId(current);
+    };
+    update();
+    container.addEventListener("scroll", update, { passive: true });
+    return () => container.removeEventListener("scroll", update);
+  }, [scrollRef, items]);
+
+  if (items.length === 0) return null;
+  return (
+    <nav aria-label="提问导航" className="conversation-markers">
+      {items.map((item) => (
+        <button
+          className={`conversation-marker ${activeId === item.id ? "active" : ""}`}
+          key={item.id}
+          onClick={() => {
+            const container = scrollRef.current;
+            const element = container?.querySelector<HTMLElement>(`[data-message-id="${item.id}"]`);
+            if (!container || !element) return;
+            container.scrollTo({ top: Math.max(0, contentOffsetOf(container, element) - 20), behavior: "smooth" });
+          }}
+          style={{ top: `${item.ratio * 100}%` }}
+          title={item.text}
+          type="button"
+        >
+          <span className="conversation-marker-label">{item.text}</span>
+        </button>
+      ))}
+    </nav>
+  );
+}
+
 export default function ConversationView({ messages, contextCompactions = [], loadingHistory = false, branchDisabled = false, editDisabled = false, onBranch, onEditResend }: ConversationViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -603,62 +745,66 @@ export default function ConversationView({ messages, contextCompactions = [], lo
     else anchoredCompactions.set(anchorId, [compaction]);
   }
   return (
-    <div
-      className="conversation-scroll"
-      ref={scrollRef}
-      onScroll={(event) => {
-        const container = event.currentTarget;
-        stickToBottomRef.current = container.scrollHeight - container.clientHeight - container.scrollTop <= 48;
-      }}
-    >
-      <div className="conversation">
-        {orphanCompactions.map((compaction) => <CompactionCard compaction={compaction} key={compaction.id} />)}
-        {messages.map((message) => {
-          if (message.role === "user") userTurn += 1;
-          const messageUserTurn = userTurn;
-          const canBranch = message.role === "assistant" && messageUserTurn > 0 && (message.status === "done" || message.status === undefined);
-          const canEdit = message.role === "user" && message.id === lastUserMessageId && !editDisabled;
-          const hasActions = message.role === "user"
-            ? Boolean(message.content) || canEdit
-            : Boolean(message.content) || (canBranch && onBranch);
-          return (
-            <Fragment key={message.id}>
-              <article
-                className={`message ${message.role} ${canBranch && onBranch ? "branchable" : ""} ${hasActions ? "has-actions" : ""}`}
-                data-status={message.status}
-              >
-                {message.role === "assistant" ? <div className="assistant-avatar"><Sparkles size={14} /></div> : null}
-                <div className="message-body">
-                  {message.role === "user" ? (
-                    <UserMessage canEdit={canEdit} message={message} onEditResend={onEditResend} />
-                  ) : (
-                    <>
-                      <AssistantResponse message={message} />
-                      {hasActions ? (
-                        <div className="message-actions">
-                          {message.content ? <CopyButton text={message.content} /> : null}
-                          {canBranch && onBranch ? (
-                            <button
-                              aria-label="从这里分叉"
-                              disabled={branchDisabled}
-                              onClick={() => onBranch(messageUserTurn)}
-                              title="从这里分叉"
-                              type="button"
-                            >
-                              <GitFork size={14} />
-                            </button>
-                          ) : null}
-                        </div>
-                      ) : null}
-                    </>
-                  )}
-                </div>
-              </article>
-              {anchoredCompactions.get(message.id)?.map((compaction) => <CompactionCard compaction={compaction} key={compaction.id} />)}
-            </Fragment>
-          );
-        })}
+    <div className="conversation-area">
+      <div
+        className="conversation-scroll"
+        ref={scrollRef}
+        onScroll={(event) => {
+          const container = event.currentTarget;
+          stickToBottomRef.current = container.scrollHeight - container.clientHeight - container.scrollTop <= 48;
+        }}
+      >
+        <div className="conversation">
+          {orphanCompactions.map((compaction) => <CompactionCard compaction={compaction} key={compaction.id} />)}
+          {messages.map((message) => {
+            if (message.role === "user") userTurn += 1;
+            const messageUserTurn = userTurn;
+            const canBranch = message.role === "assistant" && messageUserTurn > 0 && (message.status === "done" || message.status === undefined);
+            const canEdit = message.role === "user" && message.id === lastUserMessageId && !editDisabled;
+            const hasActions = message.role === "user"
+              ? Boolean(message.content) || canEdit
+              : Boolean(message.content) || (canBranch && onBranch);
+            return (
+              <Fragment key={message.id}>
+                <article
+                  className={`message ${message.role} ${canBranch && onBranch ? "branchable" : ""} ${hasActions ? "has-actions" : ""}`}
+                  data-message-id={message.id}
+                  data-status={message.status}
+                >
+                  {message.role === "assistant" ? <div className="assistant-avatar"><Sparkles size={14} /></div> : null}
+                  <div className="message-body">
+                    {message.role === "user" ? (
+                      <UserMessage canEdit={canEdit} message={message} onEditResend={onEditResend} />
+                    ) : (
+                      <>
+                        <AssistantResponse message={message} />
+                        {hasActions ? (
+                          <div className="message-actions">
+                            {message.content ? <CopyButton text={message.content} /> : null}
+                            {canBranch && onBranch ? (
+                              <button
+                                aria-label="从这里分叉"
+                                disabled={branchDisabled}
+                                onClick={() => onBranch(messageUserTurn)}
+                                title="从这里分叉"
+                                type="button"
+                              >
+                                <GitFork size={14} />
+                              </button>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </>
+                    )}
+                  </div>
+                </article>
+                {anchoredCompactions.get(message.id)?.map((compaction) => <CompactionCard compaction={compaction} key={compaction.id} />)}
+              </Fragment>
+            );
+          })}
+        </div>
       </div>
+      <ConversationMarkers messages={messages} scrollRef={scrollRef} />
     </div>
   );
 }

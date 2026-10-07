@@ -1597,6 +1597,14 @@ try {
   await foldedPrompt.waitFor();
   await foldedPrompt.locator(".guide-prompt").click();
   await page.waitForFunction(() => document.querySelectorAll(".message.assistant .queued-hint").length === 1);
+  // 引导进去的提示已经交给正在跑的 Claude 了，不能再说成「等上一条回答结束后开始」——那是界面排队的说法。
+  const guidedHint = await page.locator(".message.assistant .queued-hint").textContent();
+  if (!guidedHint?.includes("已插入当前任务") || guidedHint.includes("排队中")) {
+    throw new Error(`引导后的提示没有和界面排队区分开：${guidedHint}`);
+  }
+  if (!(await page.locator(".message.assistant .queued-hint.appended").count())) {
+    throw new Error("引导后的提示没有标成已插入当前任务");
+  }
   // 追加的轮次必须被明确收尾并说明原因，而不是一直挂在“排队中”。
   await page.waitForFunction(() => (
     [...document.querySelectorAll(".message.assistant")].some((message) => (
@@ -1613,6 +1621,75 @@ try {
   if (!(await page.locator(".user-bubble", { hasText: "折叠追加的第二条" }).count())) {
     throw new Error("folded appended prompt disappeared from the conversation");
   }
+
+  // 回归：Claude 还在输出时重命名对话，过去会静默失败——界面和 session 文件都不变。现在界面立刻改名，
+  // 文件要等进程退出才补写，避免插一行把 CLI 正在写的那条记录切断。
+  const activeConversationTitle = await page.locator(".task-heading h2").textContent();
+  const openActiveRenameEditor = async () => {
+    await inFolder(page, '.task-row.active .task-rename[title="重命名对话"]').evaluate((button) => button.click());
+    await page.locator('input[aria-label="对话名称"]').waitFor();
+  };
+  await page.locator(".composer textarea").fill("运行中改名测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForSelector('.message.assistant[data-status="running"]');
+  const activeSessionId = await page.evaluate(() => JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")
+    .flatMap((project) => project.conversations)
+    .find((conversation) => conversation.title === document.querySelector(".task-heading h2")?.textContent)?.sessionId);
+  if (!activeSessionId) throw new Error("运行中的对话没有 session id，重命名回归无法验证");
+  const renameWhileRunningSession = resolve(cliSessions, `${activeSessionId}.jsonl`);
+  // 界面在进程启动的那一刻就标成运行中，假 CLI 要等收到 stdin 才落历史，先等文件真的出现。
+  const readRenameSession = async () => readFile(renameWhileRunningSession, "utf8").catch(() => "");
+  for (let attempt = 0; !(await readRenameSession()).includes("运行中改名测试"); attempt += 1) {
+    if (attempt >= 60) throw new Error("假 CLI 没有为运行中改名测试写出 session 历史");
+    await page.waitForTimeout(50);
+  }
+  await openActiveRenameEditor();
+  await page.locator('input[aria-label="对话名称"]').fill("运行中改的名字");
+  await page.locator('input[aria-label="对话名称"]').press("Enter");
+  await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "运行中改的名字");
+  if (await inFolder(page, ".task-row.active strong").textContent() !== "运行中改的名字") {
+    throw new Error("运行中的重命名没有同步到侧边栏");
+  }
+  if (await page.locator('.message.assistant[data-status="running"]').count() !== 1) {
+    throw new Error("重命名把正在运行的回答收尾了");
+  }
+  if ((await readRenameSession()).includes("运行中改的名字")) {
+    throw new Error("运行中的重命名被直接写进了 Claude 正在追加的 session 文件");
+  }
+  await page.waitForFunction(() => document.querySelectorAll(".send-button.stop").length === 0, undefined, { timeout: 25_000 });
+  for (let attempt = 0; ; attempt += 1) {
+    if ((await readRenameSession()).includes('"customTitle":"运行中改的名字"')) break;
+    if (attempt >= 60) throw new Error("进程退出后没有把运行中改的名字补写进 Claude CLI 历史");
+    await page.waitForTimeout(100);
+  }
+  // 改回原来的名字：后面的用例还按原名找这个对话。这次不在运行中，必须立刻落盘。
+  await openActiveRenameEditor();
+  await page.locator('input[aria-label="对话名称"]').fill(activeConversationTitle);
+  await page.locator('input[aria-label="对话名称"]').press("Enter");
+  await page.waitForFunction((expected) => document.querySelector(".task-heading h2")?.textContent === expected, activeConversationTitle);
+
+  // 回归：超长提问默认折叠，展开按钮把它放回全高。
+  const longPromptText = `运行中改名测试补充说明：\n${Array.from({ length: 22 }, (item, index) => `第 ${index + 1} 行需求细节。`).join("\n")}`;
+  await page.locator(".composer textarea").fill(longPromptText);
+  await page.locator(".composer textarea").press("Enter");
+  const longBubble = page.locator(".message.user", { hasText: "运行中改名测试补充说明" }).last();
+  await longBubble.locator(".user-message-fold").waitFor();
+  const collapsedLongPrompt = await longBubble.locator(".user-message-text").evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  if (collapsedLongPrompt.clientHeight >= collapsedLongPrompt.scrollHeight - 2) {
+    throw new Error(`超长提问没有被默认折叠：${JSON.stringify(collapsedLongPrompt)}`);
+  }
+  await longBubble.locator(".user-message-fold").click();
+  await page.waitForFunction(() => {
+    const text = [...document.querySelectorAll(".message.user")]
+      .reverse()
+      .find((element) => element.textContent?.includes("运行中改名测试补充说明"))
+      ?.querySelector(".user-message-text");
+    return text && !text.classList.contains("collapsed") && text.clientHeight >= text.scrollHeight - 2;
+  });
+  await page.waitForFunction(() => document.querySelectorAll(".send-button.stop").length === 0, undefined, { timeout: 25_000 });
 
   await inFolder(page, ".task-select", { hasText: "来自终端的历史对话" }).click();
   await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "来自终端的历史对话");

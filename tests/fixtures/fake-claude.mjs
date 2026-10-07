@@ -117,7 +117,8 @@ const processPrompt = (input) => {
     }
   }
   const sessionsDirectory = process.env.CLAUDE_DESK_FAKE_SESSIONS_DIR ?? process.env.CLAUDE_DESK_TEST_SESSIONS_DIR;
-  const persistTestPrompt = prompt.includes("这是首次会话名称测试内容") || prompt.includes("分支继续测试");
+  // 运行中改名的回归要往真实的 session 文件里补写标题，所以这一轮必须落一份历史。
+  const persistTestPrompt = prompt.includes("这是首次会话名称测试内容") || prompt.includes("分支继续测试") || prompt.includes("运行中改名测试");
   if (sessionsDirectory && persistTestPrompt) {
     mkdirSync(sessionsDirectory, { recursive: true });
     const records = [
@@ -192,6 +193,17 @@ const processPrompt = (input) => {
       slowTaskActive = false;
       for (const deferredInput of deferredInputs.splice(0)) processPrompt(deferredInput);
     }, 8_000);
+    return;
+  }
+
+  if (prompt.includes("运行中改名测试")) {
+    // 留出一段还在输出的时间，让界面有机会在进程活着的时候改名。
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    setTimeout(() => {
+      const response = "运行中改名测试完成。";
+      send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: response }] }, session_id: sessionId });
+      send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
+    }, 1_500);
     return;
   }
 

@@ -141,7 +141,19 @@ await page.evaluate((workspace) => {
             },
             { id: "phase-3", type: "text", content: "现在刷新页面会等待会话恢复后再判断路由。" }
           ]
-        }
+        },
+        // 右缘的提问导航线要够多的提问才出现，其中一条特别长，用来验证默认折叠。
+        { id: "u2", role: "user", content: "顺便把注册流程也过一遍。", createdAt: now - 900 },
+        { id: "a2", role: "assistant", content: "注册流程没有同样的问题，表单校验在提交前完成。", createdAt: now - 880, status: "done" },
+        {
+          id: "u3",
+          role: "user",
+          content: `这是一段很长的需求说明，默认应该折叠：\n${Array.from({ length: 24 }, (item, index) => `第 ${index + 1} 行：补充说明与接口字段记录。`).join("\n")}`,
+          createdAt: now - 800,
+        },
+        { id: "a3", role: "assistant", content: "已按需求说明拆成四个步骤执行。", createdAt: now - 780, status: "done" },
+        { id: "u4", role: "user", content: "最后确认一下回归测试覆盖。", createdAt: now - 700 },
+        { id: "a4", role: "assistant", content: "回归测试已覆盖刷新后的会话恢复路径。", createdAt: now - 680, status: "done" }
       ]
     }, {
       id: "visual-conversation-2",
@@ -278,7 +290,7 @@ await visualCollapseButton.click();
 const editActivity = page.locator('[data-timeline-kind="activity"]', { hasText: "Edit" });
 await editActivity.locator(".activity-row").click();
 const activityDetailLayout = await editActivity.locator(".activity-detail").evaluate((element) => element.getBoundingClientRect().toJSON());
-const assistantBodyLayout = await page.locator(".message.assistant .message-body").evaluate((element) => element.getBoundingClientRect().toJSON());
+const assistantBodyLayout = await page.locator(".message.assistant .message-body").first().evaluate((element) => element.getBoundingClientRect().toJSON());
 if (activityDetailLayout.left < assistantBodyLayout.left || activityDetailLayout.right > assistantBodyLayout.right) {
   throw new Error(`expanded tool diff escaped the assistant message: ${JSON.stringify({ activityDetailLayout, assistantBodyLayout })}`);
 }
@@ -405,8 +417,8 @@ await page.screenshot({ path: resolve(artifacts, "update-dialog.png") });
 await page.locator(".update-later-button").click();
 await page.locator(".settings-trigger").click();
 
-const branchAction = page.locator('[aria-label="从这里分叉"]');
-if (await branchAction.count() !== 1) throw new Error("completed assistant message did not expose a branch action");
+const branchAction = page.locator('[aria-label="从这里分叉"]').first();
+if (await page.locator('[aria-label="从这里分叉"]').count() !== 4) throw new Error("completed assistant message did not expose a branch action");
 await page.evaluate(() => {
   if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
 });
@@ -418,7 +430,7 @@ await page.waitForFunction(() => {
 if (Number(await branchAction.evaluate((element) => getComputedStyle(element.parentElement).opacity)) >= 0.05) {
   throw new Error("message branch action was visible before hover");
 }
-await page.locator(".message.assistant").hover();
+await page.locator(".message.assistant").first().hover();
 await page.waitForFunction(() => {
   const action = document.querySelector('[aria-label="从这里分叉"]');
   return action?.parentElement && Number(getComputedStyle(action.parentElement).opacity) > 0.9;
@@ -428,15 +440,80 @@ if (Number(await branchAction.evaluate((element) => getComputedStyle(element.par
 }
 await page.screenshot({ path: resolve(artifacts, "message-branch-action.png") });
 
-const visualUserMessage = page.locator(".message.user");
+const visualUserMessage = page.locator(".message.user").last();
 await visualUserMessage.hover();
 await page.waitForFunction(() => {
-  const actions = document.querySelector(".message.user .message-actions");
+  const actions = [...document.querySelectorAll(".message.user .message-actions")].at(-1);
   return actions && Number(getComputedStyle(actions).opacity) > 0.9;
 });
 if (await visualUserMessage.locator('[aria-label="复制"]').count() !== 1) throw new Error("user message did not expose a copy action");
 if (await visualUserMessage.locator('[aria-label="编辑并重新发送"]').count() !== 1) throw new Error("last user message did not expose an edit action");
 await page.screenshot({ path: resolve(artifacts, "user-message-actions.png") });
+
+// 超长提问默认折叠：只露出头几行，展开按钮把它放回全高，收起按钮必须还在。
+const longMessage = page.locator(".message.user", { hasText: "这是一段很长的需求说明" });
+const foldToggle = longMessage.locator(".user-message-fold");
+await page.waitForFunction(() => Boolean(
+  [...document.querySelectorAll(".message.user")].find((element) => element.textContent?.includes("这是一段很长的需求说明"))?.querySelector(".user-message-fold"),
+));
+const collapsedText = await longMessage.locator(".user-message-text").evaluate((element) => ({
+  clientHeight: element.clientHeight,
+  scrollHeight: element.scrollHeight,
+  collapsed: element.classList.contains("collapsed"),
+}));
+if (!collapsedText.collapsed || collapsedText.clientHeight >= collapsedText.scrollHeight - 2 || collapsedText.clientHeight > 260) {
+  throw new Error(`超长提问没有被默认折叠：${JSON.stringify(collapsedText)}`);
+}
+if (await foldToggle.textContent() !== "展开全部") throw new Error("折叠的提问没有展开按钮");
+await page.screenshot({ path: resolve(artifacts, "user-message-collapsed.png") });
+await foldToggle.click();
+await page.waitForFunction(() => {
+  const text = [...document.querySelectorAll(".message.user")]
+    .find((element) => element.textContent?.includes("这是一段很长的需求说明"))?.querySelector(".user-message-text");
+  return text && !text.classList.contains("collapsed") && text.clientHeight >= text.scrollHeight - 2;
+});
+if (await foldToggle.textContent() !== "收起") throw new Error("展开后没有留下收起按钮");
+await page.screenshot({ path: resolve(artifacts, "user-message-expanded.png") });
+await foldToggle.click();
+await page.waitForFunction(() => Boolean(
+  [...document.querySelectorAll(".message.user")]
+    .find((element) => element.textContent?.includes("这是一段很长的需求说明"))?.querySelector(".user-message-text.collapsed"),
+));
+
+// 右缘导航线：每条提问一条，平时不盖住正文，悬停才摊开提问内容，点击跳到那条提问。
+const markers = page.locator(".conversation-marker");
+if (await markers.count() !== 4) throw new Error(`提问导航线数量不对：${await markers.count()}`);
+const markerLayout = await page.evaluate(() => ({
+  column: document.querySelector(".conversation-markers").getBoundingClientRect().toJSON(),
+  content: document.querySelector(".conversation").getBoundingClientRect().toJSON(),
+  labelWidth: document.querySelector(".conversation-marker-label").getBoundingClientRect().width,
+  ticks: [...document.querySelectorAll(".conversation-marker")].map((tick) => tick.getBoundingClientRect().top),
+}));
+if (markerLayout.column.left < markerLayout.content.right - 0.5) {
+  throw new Error(`提问导航线压住了正文：${JSON.stringify(markerLayout)}`);
+}
+if (markerLayout.labelWidth > 1) throw new Error("提问导航线没有悬停就摊开了");
+for (let index = 1; index < markerLayout.ticks.length; index += 1) {
+  if (markerLayout.ticks[index] <= markerLayout.ticks[index - 1]) {
+    throw new Error(`提问导航线没有按顺序排开：${JSON.stringify(markerLayout.ticks)}`);
+  }
+}
+await markers.first().hover();
+await page.waitForFunction(() => document.querySelector(".conversation-marker-label").getBoundingClientRect().width > 40);
+await page.screenshot({ path: resolve(artifacts, "conversation-markers.png") });
+await markers.first().click();
+await page.waitForFunction(() => document.querySelector(".conversation-scroll").scrollTop < 30);
+await markers.last().click();
+// 最后一条提问贴着内容末尾，滚动到顶会被 scrollHeight 夹住，只要求它真的滚下去并完整露出来。
+await page.waitForFunction(() => {
+  const container = document.querySelector(".conversation-scroll");
+  const target = [...document.querySelectorAll(".message.user")].at(-1);
+  if (!container || !target) return false;
+  const containerRect = container.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  return container.scrollTop > 30 && targetRect.top >= containerRect.top - 8 && targetRect.bottom <= containerRect.bottom + 8;
+});
+if (await page.locator(".conversation-marker.active").count() !== 1) throw new Error("导航线没有标出当前位置");
 
 const initialSidebarWidth = await page.locator(".sidebar").evaluate((element) => element.getBoundingClientRect().width);
 const resizeHandle = page.locator(".sidebar-resizer");

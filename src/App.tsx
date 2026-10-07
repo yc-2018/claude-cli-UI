@@ -901,6 +901,8 @@ export default function App() {
   const processRunIds = useRef(new Map<string, string>());
   const scannedProjects = useRef(new Set<string>());
   const syncingProjects = useRef(new Set<string>());
+  /** 运行中改的名字：等这一轮的进程退出后再补写进 session 文件。 */
+  const pendingSessionRenames = useRef(new Map<string, string>());
   const loadingHistories = useRef(new Set<string>());
   const sidebarResize = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
   const branchingConversation = useRef(false);
@@ -1500,6 +1502,18 @@ export default function App() {
     });
   }, [updateResponse]);
 
+  // 运行中改的名字只能等进程退出才落盘：Claude 已经不再写这个 session 文件了。
+  // result 事件会先把 runMeta 删掉，所以 exit 可能走到认不出 run 的那条分支，两边都要补写。
+  const flushPendingRename = useCallback((conversationId: string) => {
+    const pendingTitle = pendingSessionRenames.current.get(conversationId);
+    if (pendingTitle === undefined) return;
+    pendingSessionRenames.current.delete(conversationId);
+    const project = projectsRef.current.find((item) => item.conversations.some((item2) => item2.id === conversationId));
+    const sessionId = project?.conversations.find((item) => item.id === conversationId)?.sessionId;
+    if (!project || !sessionId) return;
+    void window.claudeDesk.renameClaudeSession(project.workspace, sessionId, pendingTitle).catch(() => undefined);
+  }, []);
+
   useEffect(() => window.claudeDesk.onEvent((event: ClaudeEvent) => {
     const meta = runMeta.current.get(event.runId);
     if (!meta) {
@@ -1507,6 +1521,7 @@ export default function App() {
         for (const [conversationId, processRunId] of processRunIds.current) {
           if (processRunId !== event.runId) continue;
           processRunIds.current.delete(conversationId);
+          flushPendingRename(conversationId);
           setActiveRuns((current) => {
             if (current[conversationId] !== processRunId) return current;
             const next = { ...current };
@@ -1853,10 +1868,11 @@ export default function App() {
         return next;
       });
       if (meta.successful) notifyConversationCompleted(meta.conversationId);
+      flushPendingRename(meta.conversationId);
       runMeta.current.delete(event.runId);
       if (processRunIds.current.get(meta.conversationId) === meta.processRunId) processRunIds.current.delete(meta.conversationId);
     }
-  }), [flushPendingText, notifyConversationCompleted, updateConversation, updateResponse]);
+  }), [flushPendingRename, flushPendingText, notifyConversationCompleted, updateConversation, updateResponse]);
 
   const addConversation = (projectId: string) => {
     const conversation = createConversation();
@@ -2053,10 +2069,18 @@ export default function App() {
 
   const renameConversation = async (conversationId: string, title: string) => {
     const trimmed = title.trim();
-    if (!trimmed || trimmed.length > 100 || [...runMeta.current.values()].some((meta) => meta.conversationId === conversationId && !meta.completed)) return;
+    if (!trimmed || trimmed.length > 100) return;
     const project = projects.find((item) => item.conversations.some((conversation) => conversation.id === conversationId));
     const conversation = project?.conversations.find((item) => item.id === conversationId);
     if (!project || !conversation) return;
+    const running = [...runMeta.current.values()].some((meta) => meta.conversationId === conversationId && !meta.completed);
+    if (conversation.sessionId && running) {
+      // Claude 正在往同一个 JSONL 追加，单条记录可能几十 KB、写入不是原子的，这时候插一行
+      // 有可能把它写了一半的那条记录切断。界面先改掉，名字等进程退出后再补写进文件。
+      pendingSessionRenames.current.set(conversationId, trimmed);
+      updateConversation(conversationId, (item) => ({ ...item, title: trimmed, updatedAt: Date.now() }));
+      return;
+    }
     if (conversation.sessionId) {
       try {
         const result = await window.claudeDesk.renameClaudeSession(project.workspace, conversation.sessionId, trimmed);
@@ -2271,6 +2295,7 @@ export default function App() {
       content: "",
       createdAt: now,
       status: "queued",
+      appended: true,
       activities: [],
       timeline: [],
     };

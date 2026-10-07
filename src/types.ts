@@ -141,6 +141,11 @@ export interface ChatMessage {
   attachments?: Attachment[];
   /** CLI 正在重试这一轮的 API 请求：没有它界面只会一直停在「正在准备回答」。 */
   retry?: ApiRetryState;
+  /**
+   * 这一轮是引导进去的：提示已经写进正在运行的那个 Claude 进程，不是在界面里排队等下一次启动。
+   * 两种等待的处置完全不同（引导的可能被并进当前回答），提示文案必须分开。
+   */
+  appended?: boolean;
 }
 
 export interface ApiRetryState {

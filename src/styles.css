@@ -711,8 +711,48 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .history-loading .spinner { width: 16px; height: 16px; }
 .history-loading h1 { margin: 0; color: #777770; font-size: 13px; font-weight: 560; }
 
-.conversation-scroll { min-height: 0; flex: 1; overflow: auto; }
+.conversation-area { position: relative; display: flex; min-height: 0; flex: 1; }
+.conversation-scroll { min-width: 0; min-height: 0; flex: 1; overflow: auto; }
 .conversation { width: min(100% - 48px, 820px); margin: 0 auto; padding: 38px 0 28px; }
+
+/* 对话右缘的提问导航：让开 9px 宽的滚动条，平时只占一条窄列。 */
+.conversation-markers { position: absolute; z-index: 2; top: 0; right: 11px; bottom: 0; width: 15px; }
+.conversation-markers:hover { width: 232px; }
+.conversation-marker {
+  position: absolute;
+  right: 0;
+  display: flex;
+  height: 15px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+.conversation-marker::after { width: 11px; height: 1.5px; flex: 0 0 auto; border-radius: 1px; background: #c6c6bd; content: ""; transition: width .12s, background .12s; }
+.conversation-marker:hover::after { background: #85857c; }
+.conversation-marker.active::after { width: 15px; background: var(--accent); }
+.conversation-marker-label {
+  max-width: 0;
+  overflow: hidden;
+  color: #787870;
+  font-size: 11px;
+  line-height: 1.3;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0;
+  transition: max-width .14s, opacity .14s;
+}
+/* 只在鼠标进入整列时摊开，避免逐条悬停把文字推来推去。 */
+.conversation-markers:hover .conversation-marker { padding: 0 2px 0 8px; background: #fbfbf8; box-shadow: 0 0 0 1px #ebebe4; }
+.conversation-markers:hover .conversation-marker-label { max-width: 200px; opacity: 1; }
+.conversation-marker:hover .conversation-marker-label { color: #3f3f3a; }
+.conversation-marker.active .conversation-marker-label { color: var(--accent); }
 
 .message { display: flex; width: 100%; margin-bottom: 28px; }
 .context-compaction { display: grid; max-width: 760px; grid-template-columns: 26px minmax(0, 1fr); align-items: start; gap: 7px; margin: 0 auto 24px; padding: 10px 12px; border: 1px solid #dfdfd8; border-radius: 7px; background: #f7f7f3; color: #5d5d57; }
@@ -768,6 +808,23 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .sent-file:hover { border-color: #c5c5be; background: #f4f4f0; color: #454540; }
 .sent-file span { min-width: 0; overflow: hidden; font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
 .user-message-text { white-space: pre-wrap; }
+/* 折叠态只露出 10 行；行高跟着 .user-bubble 的 1.55，改一处要同步。 */
+.user-message-text.collapsed { max-height: calc(1.55em * 10); overflow: hidden; }
+.user-message-fold {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #76766e;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.user-message-fold:hover { color: var(--accent); }
+.user-message-fold svg { transition: transform .12s; }
+.user-message-fold[aria-expanded="true"] svg { transform: rotate(180deg); }
 .user-bubble.editing { width: min(650px, 76vw); }
 .user-bubble.editing textarea {
   display: block;
@@ -827,6 +884,9 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .thinking { display: flex; align-items: center; gap: 8px; height: 28px; color: #85857e; font-size: 12.5px; }
 .queued-hint { display: flex; align-items: center; gap: 8px; height: 28px; color: #98988f; font-size: 12.5px; }
 .queued-hint::before { display: inline-block; width: 7px; height: 7px; border: 1.5px solid #c9c9c1; border-radius: 50%; content: ""; }
+/* 引导进去的提示已经交给 Claude 了，用转圈和重一点的颜色和「还没启动」的排队区分开。 */
+.queued-hint.appended { color: #7b7b73; }
+.queued-hint.appended::before { width: 11px; height: 11px; border-width: 2px; border-color: #d1d1cb; border-top-color: var(--accent); animation: spin .85s linear infinite; }
 .retry-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 28px; padding: 5px 9px; border: 1px solid #edd9b4; border-radius: 6px; background: #fdf6e7; color: #8a6414; font-size: 12.5px; }
 .retry-notice .spinner { border-color: #eddcba; border-top-color: #c98a16; }
 .retry-reason { flex-basis: 100%; padding-left: 21px; color: #9c7b38; font-size: 11.5px; }
