@@ -1508,6 +1508,7 @@ export default function App() {
           if (processRunId !== event.runId) continue;
           processRunIds.current.delete(conversationId);
           setActiveRuns((current) => {
+            if (current[conversationId] !== processRunId) return current;
             const next = { ...current };
             delete next[conversationId];
             return next;
@@ -1813,14 +1814,8 @@ export default function App() {
         }
         runMeta.current.delete(event.runId);
         const hasPendingTurn = [...runMeta.current.values()].some((item) => item.conversationId === meta.conversationId && !item.completed);
-        if (!hasPendingTurn) {
-          if (processRunIds.current.get(meta.conversationId) === meta.processRunId) processRunIds.current.delete(meta.conversationId);
-          setActiveRuns((current) => {
-            const next = { ...current };
-            if (next[meta.conversationId] === meta.processRunId) delete next[meta.conversationId];
-            return next;
-          });
-        }
+        // result 只收尾回复气泡，进程仍可能在写历史或关闭管道。
+        // 保留运行标志到真正的 exit，队列才能在旧进程退出后安全启动下一条。
         if (meta.successful && !hasPendingTurn) notifyConversationCompleted(meta.conversationId);
       }
     }

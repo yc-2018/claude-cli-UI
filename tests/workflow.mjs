@@ -17,6 +17,7 @@ const profile = resolve(artifacts, `workflow-profile-${Date.now()}`);
 const claudeConfig = resolve(profile, "claude-config");
 const cliSessions = resolve(claudeConfig, "projects", root.replace(/[^A-Za-z0-9]/g, "-"));
 const fakeCli = resolve(root, "tests", "fixtures", "fake-claude.mjs");
+const processExitGate = resolve(profile, "release-process-exit");
 const packagedExecutable = process.env.CLAUDE_DESK_TEST_EXECUTABLE;
 await mkdir(profile, { recursive: true });
 await mkdir(cliSessions, { recursive: true });
@@ -182,6 +183,7 @@ const launch = () => electron.launch({
     CLAUDE_DESK_USER_DATA_DIR: profile,
     CLAUDE_DESK_TEST_WORKSPACE: root,
     CLAUDE_DESK_FAKE_SESSIONS_DIR: cliSessions,
+    CLAUDE_DESK_TEST_EXIT_GATE: processExitGate,
     CLAUDE_DESK_DISABLE_NOTIFICATIONS: "1",
     CLAUDE_DESK_TEST_OFFSCREEN: "1",
     CLAUDE_DESK_DISABLE_AUTO_UPDATE_CHECK: "1",
@@ -256,6 +258,45 @@ try {
   if (await page.title() !== "claude-cli-UI") throw new Error("window title did not use the product name");
   if ((await page.locator(".sidebar-brand").textContent())?.trim() !== "claude-cli-UI") throw new Error("sidebar did not use the product name");
   await page.waitForFunction((version) => document.querySelector(".sidebar-version")?.textContent === `claude-cli-UI v${version}`, packageVersion);
+
+  // result 只代表轮次完成；即使所有轮次已结束，进程真正关闭时仍必须发出 exit。
+  const lifecycleRunId = "process-exit-regression";
+  const lifecycleRequest = {
+    runId: lifecycleRunId,
+    conversationId: "process-exit-regression-conversation",
+    cwd: profile,
+    prompt: "进程退出通知回归测试",
+    permissionMode: "acceptEdits",
+  };
+  const lifecycleStart = await page.evaluate((request) => {
+    window.__lifecycleEvents = [];
+    window.__removeLifecycleListener = window.claudeDesk.onEvent((event) => {
+      if (event.runId === request.runId && (event.type === "exit" || event.data?.type === "result")) {
+        window.__lifecycleEvents.push({ type: event.type, dataType: event.data?.type });
+      }
+    });
+    return window.claudeDesk.startRun(request);
+  }, lifecycleRequest);
+  if (!lifecycleStart.started) throw new Error("进程退出回归测试未能启动假 CLI");
+  await page.waitForFunction(() => window.__lifecycleEvents.some((event) => event.dataType === "result"));
+  const blockedStart = await page.evaluate((request) => window.claudeDesk.startRun({ ...request, runId: "blocked-next-run" }), lifecycleRequest);
+  if (blockedStart.started || !blockedStart.busy || blockedStart.runId !== lifecycleRunId) {
+    throw new Error(`旧进程退出前不应允许新进程并发启动：${JSON.stringify(blockedStart)}`);
+  }
+  await writeFile(processExitGate, "release", "utf8");
+  await page.waitForFunction(async (runId) => !(await window.claudeDesk.getActiveRuns()).some((run) => run.runId === runId), lifecycleRunId);
+  try {
+    await page.waitForFunction(() => window.__lifecycleEvents.some((event) => event.type === "exit"), undefined, { timeout: 5_000 });
+  } catch {
+    throw new Error("假 CLI 已退出但没有进程 exit 通知，busy 状态和提示队列无法恢复");
+  }
+  const lifecycleEvents = await page.evaluate(() => {
+    window.__removeLifecycleListener();
+    return window.__lifecycleEvents;
+  });
+  if (lifecycleEvents.length !== 2 || lifecycleEvents[0].dataType !== "result" || lifecycleEvents[1].type !== "exit") {
+    throw new Error(`进程退出事件应仅在 result 后出现一次：${JSON.stringify(lifecycleEvents)}`);
+  }
 
   // 便携版没有安装步骤，开始菜单入口得自己维护：过期的 .lnk 必须被换成指向当前这份便携版。
   const shortcutBytes = await readFile(startMenuShortcut);
@@ -1400,6 +1441,7 @@ try {
     throw new Error("Claude CLI run was interrupted while the window was hidden to the tray");
   }
 
+  await rm(processExitGate);
   await page.locator(".composer textarea").fill("慢任务");
   await page.locator(".composer textarea").press("Enter");
   await page.waitForSelector('.message.assistant[data-status="running"]');
@@ -1514,6 +1556,13 @@ try {
       (role === "assistant" && guidedTurnOrder[index].status !== "done")
     ))
   ) throw new Error(`guided turn rendered in the wrong order: ${JSON.stringify(guidedTurnOrder)}`);
+  // 三条追加回答已经完成，但进程仍停在退出屏障；队列必须等真实退出才能继续。
+  await page.waitForFunction(async () => (await window.claudeDesk.getActiveRuns()).some((run) => run.turnRunIds.length === 0));
+  if (await page.locator(".send-button.stop").count() !== 1 ||
+    (await page.locator(".prompt-queue-content strong").allTextContents()).join(",") !== "队列第三条,队列第二条已编辑") {
+    throw new Error("进程真正退出之前必须保留忙碌状态和待发送队列");
+  }
+  await writeFile(processExitGate, "release", "utf8");
   try {
     await page.waitForFunction(() => [...document.querySelectorAll(".user-bubble")].some((element) => element.textContent === "队列第三条"));
   } catch {

@@ -2073,7 +2073,9 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
         await appendFile(join(app.getPath("userData"), "renderer-errors.log"), `${new Date().toISOString()} session normalization failed: ${detail}\n`, "utf8").catch(() => undefined);
       }
     }
-    for (const turnRunId of activeRun.unfinishedTurnRunIds) {
+    // result 会移除已完成轮次，但进程退出仍必须通知 renderer，否则忙碌状态和提示队列无法释放。
+    // 未完成的追加轮次也各自收到退出事件；Set 避免首轮尚未完成时重复发送。
+    for (const turnRunId of new Set([request.runId, ...activeRun.unfinishedTurnRunIds])) {
       emit(owner, { runId: turnRunId, type: "exit", code, stderr: stderr.trim() });
     }
   });

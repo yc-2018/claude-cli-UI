@@ -10,6 +10,7 @@ if (args.includes("--version")) {
 
 process.stdin.setEncoding("utf8");
 let slowTaskActive = false;
+let processExitGate;
 // 真实 CLI 在工具调用循环中被追加提示时，会把它并进当前这一轮，不再单独回答。
 // 这个开关用来复刻那种“折叠”行为：注入的提示直接被吞掉，一个 result 都不会多发。
 let foldAppendedActive = false;
@@ -35,6 +36,9 @@ const processPrompt = (input) => {
       process.exitCode = 2;
       return;
     }
+  }
+  if (prompt === "进程退出通知回归测试" || prompt === "慢任务") {
+    processExitGate = process.env.CLAUDE_DESK_TEST_EXIT_GATE;
   }
   if (foldAppendedActive) return;
   if (slowTaskActive) {
@@ -677,4 +681,10 @@ process.stdin.on("data", (chunk) => {
 });
 process.stdin.on("end", () => {
   if (lineBuffer.trim()) processPrompt(lineBuffer);
+  // 把 result 与进程退出分开，由测试释放屏障，稳定复现 CI 上的收尾竞态。
+  if (processExitGate) {
+    const timer = setInterval(() => {
+      if (existsSync(processExitGate)) clearInterval(timer);
+    }, 25);
+  }
 });
