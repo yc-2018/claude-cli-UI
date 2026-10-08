@@ -288,11 +288,17 @@ if (!/本次回答耗时 · 8 秒 · 完成于 \d{2}:\d{2}:\d{2}$/.test(duration
   throw new Error(`completed response did not show when it finished: ${durationText}`);
 }
 if (!(await page.locator(".response-duration").getAttribute("data-completed-at"))) throw new Error("response completion timestamp was not recorded");
+const visualCollapseButton = page.locator(".tool-collapse-toggle").first();
+if (await visualCollapseButton.count() !== 1) throw new Error("visual fixture did not render the tool collapse control");
+// 回归：重新打开会话时历史回答默认收起，只露出最后那段结论——几十轮工具调用铺开要翻很久才看得到答案。
+if (await page.locator('[data-timeline-kind="activity"]').count() !== 0
+  || !(await page.locator(".message.assistant").first().textContent())?.includes("现在刷新页面会等待会话恢复后再判断路由。")) {
+  throw new Error("历史回答没有默认收起，或者收起后没有保留最后那段结论");
+}
+await visualCollapseButton.click();
 if ((await page.locator("[data-timeline-kind]").evaluateAll((items) => items.map((item) => item.getAttribute("data-timeline-kind")).join(","))) !== "text,activity,activity,text,activity,text") {
   throw new Error("visual fixture did not render assistant text and tools as one ordered timeline");
 }
-const visualCollapseButton = page.locator(".tool-collapse-toggle").first();
-if (await visualCollapseButton.count() !== 1) throw new Error("visual fixture did not render the tool collapse control");
 await visualCollapseButton.click();
 if (await page.locator('[data-timeline-kind="activity"]').count() !== 0 || !(await page.locator(".message.assistant").first().textContent())?.includes("现在刷新页面会等待会话恢复后再判断路由。")) {
   throw new Error("collapsed visual response did not retain its final text");
@@ -318,9 +324,22 @@ const commandPopoverLayout = await page.locator(".cli-command-popover").evaluate
 if (commandPopoverLayout.left < 0 || commandPopoverLayout.top < 0 || commandPopoverLayout.right > 1320 || commandPopoverLayout.bottom > 860) {
   throw new Error(`CMD command popover escaped the desktop viewport: ${JSON.stringify(commandPopoverLayout)}`);
 }
-if (!(await page.locator(".cli-command-popover code").textContent())?.includes('claude --resume "11111111-1111-4111-8111-111111111111"')) {
+if (!(await page.locator(".cli-command-row").first().locator("code").textContent())?.includes('claude --resume "11111111-1111-4111-8111-111111111111"')) {
   throw new Error("CMD command popover did not include the complete session resume command");
 }
+// 第二行必须是带 --dangerously-skip-permissions 的那条，两行各自配齐复制 / CMD / PowerShell 三个按钮。
+if (!(await page.locator(".cli-command-row").nth(1).locator("code").textContent())?.endsWith("--dangerously-skip-permissions")) {
+  throw new Error("CMD command popover did not include the --dangerously-skip-permissions variant");
+}
+const commandRowButtons = await page.locator(".cli-command-row").evaluateAll((rows) => rows.map((row) => row.querySelectorAll("button").length));
+if (JSON.stringify(commandRowButtons) !== JSON.stringify([3, 3])) {
+  throw new Error(`每行命令没有配齐复制 / CMD / PowerShell 三个按钮：${JSON.stringify(commandRowButtons)}`);
+}
+const commandRowOverlap = await page.locator(".cli-command-row").first().evaluate((row) => {
+  const boxes = [...row.children].map((child) => child.getBoundingClientRect());
+  return boxes.some((box, index) => index > 0 && box.left < boxes[index - 1].right - 0.5);
+});
+if (commandRowOverlap) throw new Error("命令行里的文字和按钮互相压住了");
 await page.screenshot({ path: resolve(artifacts, "cli-resume-command.png") });
 await page.locator('[aria-label="关闭 CMD 命令"]').click();
 

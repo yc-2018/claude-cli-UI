@@ -1469,6 +1469,53 @@ ipcMain.handle("workspace:open", async (_event, workspace: unknown) => {
   return error ? { opened: false, error } : { opened: true };
 });
 
+/**
+ * 拼恢复命令。渲染层只说要哪种终端、恢复哪个 session，命令一律在主进程里组装，
+ * 两种终端的语法必须各写一套：PowerShell 不认 cmd 的 `cd /d`，5.1 也不支持 `&&`。
+ */
+function buildResumeCommand(kind: "cmd" | "powershell", workspace: string, sessionId: string, skipPermissions: boolean) {
+  const flag = skipPermissions ? " --dangerously-skip-permissions" : "";
+  // Windows 路径不允许出现双引号，所以 cmd 这边直接引起来就安全；单引号是合法字符，PowerShell 要翻倍转义。
+  return kind === "powershell"
+    ? `Set-Location -LiteralPath '${workspace.replace(/'/g, "''")}'; claude --resume '${sessionId}'${flag}`
+    : `cd /d "${workspace}" && claude --resume "${sessionId}"${flag}`;
+}
+
+ipcMain.handle("terminal:resume-session", async (_event, value: unknown) => {
+  if (!value || typeof value !== "object") return { opened: false, error: "参数无效" };
+  const request = value as { kind?: unknown; workspace?: unknown; sessionId?: unknown; skipPermissions?: unknown };
+  const kind = request.kind === "cmd" || request.kind === "powershell" ? request.kind : undefined;
+  if (!kind) return { opened: false, error: "终端类型无效" };
+  if (typeof request.workspace !== "string" || !existsSync(request.workspace) || !statSync(request.workspace).isDirectory()) {
+    return { opened: false, error: "项目目录不存在" };
+  }
+  if (typeof request.sessionId !== "string" || !SESSION_ID_PATTERN.test(request.sessionId)) {
+    return { opened: false, error: "会话 ID 无效" };
+  }
+  if (process.platform !== "win32") return { opened: false, error: "仅支持在 Windows 上打开终端" };
+  const command = buildResumeCommand(kind, request.workspace, request.sessionId, request.skipPermissions === true);
+  // 测试里不真的弹终端窗口，把解析结果写进日志供断言。
+  const testLog = process.env.CLAUDE_DESK_TEST_TERMINAL_LOG;
+  if (testLog) {
+    await appendFile(testLog, `${JSON.stringify({ kind, workspace: request.workspace, command })}\n`, "utf8");
+    return { opened: true };
+  }
+  const options = { cwd: request.workspace, detached: true, stdio: "ignore" as const, windowsHide: false };
+  const child = kind === "cmd"
+    // /s 让 cmd 剥掉首尾引号、中间原样执行；配 windowsVerbatimArguments 才能让命令里自带的引号活到 cmd 手里。
+    ? spawn("cmd.exe", ["/s", "/k", `"${command}"`], { ...options, windowsVerbatimArguments: true })
+    // -EncodedCommand 收 UTF-16LE 的 base64，彻底绕开多层引号转义。
+    : spawn("powershell.exe", ["-NoExit", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")], options);
+  // spawn 的失败走 error 事件而不是抛异常，没人听会直接把主进程打挂。
+  const failure = await new Promise<string | undefined>((resolve) => {
+    child.once("error", (error: Error) => resolve(error.message));
+    child.once("spawn", () => resolve(undefined));
+  });
+  if (failure) return { opened: false, error: failure };
+  child.unref();
+  return { opened: true };
+});
+
 ipcMain.on("app:renderer-error", (_event, value: unknown) => {
   if (typeof value !== "string") return;
   const line = `${new Date().toISOString()} ${value.slice(0, 8_000)}\n`;

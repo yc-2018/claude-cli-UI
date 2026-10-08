@@ -286,10 +286,16 @@ function ThinkingBlock({ content, running }: { content: string; running: boolean
 }
 
 function AssistantResponse({ message }: { message: ChatMessage }) {
-  const [showActivities, setShowActivities] = useState(true);
+  // 重新打开会话时历史回答一律收起，只留最后那段结论：几十轮工具调用铺开要翻很久才能看到答案。
+  // 初始值按挂载那一刻的状态定：正在跑的回答要全程可见，跑完了也不能反过来把用户正在读的内容收掉。
+  const [showActivities, setShowActivities] = useState(() => message.status === "running" || message.status === "queued");
   const activityCount = message.timeline
     ? message.timeline.filter((item) => item.type === "activity").length
     : (message.activities?.length ?? 0);
+  // 收起时 timeline 只留最后一段正文，中间的过程文字也跟着藏起来。只要确实藏了东西就得给出展开入口，
+  // 否则一条没有工具调用、却分了好几段正文的回答会永久少显示内容。
+  const textBlockCount = message.timeline?.filter((item) => item.type === "text" && item.content).length ?? 0;
+  const hiddenCount = activityCount + Math.max(0, textBlockCount - 1);
   return (
     <>
       <ResponseDuration
@@ -308,7 +314,7 @@ function AssistantResponse({ message }: { message: ChatMessage }) {
           )}
         />
       ) : null}
-      {activityCount > 0 ? (
+      {hiddenCount > 0 ? (
         <button
           className="tool-collapse-toggle"
           type="button"
@@ -316,7 +322,9 @@ function AssistantResponse({ message }: { message: ChatMessage }) {
           onClick={() => setShowActivities((value) => !value)}
         >
           <List size={13} />
-          {showActivities ? "收起工具调用" : `展开工具调用（${activityCount}）`}
+          {showActivities
+            ? "收起回答过程"
+            : activityCount > 0 ? `展开工具调用（${activityCount}）` : "展开完整回答"}
         </button>
       ) : null}
       {message.timeline ? (
@@ -696,22 +704,44 @@ function ConversationMarkers({ messages, scrollRef }: { messages: ChatMessage[];
 
 export default function ConversationView({ messages, contextCompactions = [], loadingHistory = false, branchDisabled = false, editDisabled = false, onBranch, onEditResend }: ConversationViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  const userIntentAtRef = useRef(0);
   const previousMessageCountRef = useRef(0);
   const latest = messages.at(-1);
+
+  const pinToBottom = () => {
+    const container = scrollRef.current;
+    if (container) container.scrollTop = container.scrollHeight;
+  };
+
+  // 只有真的来自用户的输入才算“主动滚走”。内容长高、以及浏览器在内容变高后把先前被夹掉的偏移
+  // 还原回去，都会发出和用户滚动一模一样的 scroll 事件，光比位置分不出来。
+  const markUserIntent = () => { userIntentAtRef.current = performance.now(); };
+
   useLayoutEffect(() => {
     const newMessageWasAdded = messages.length > previousMessageCountRef.current;
     previousMessageCountRef.current = messages.length;
     if (newMessageWasAdded) stickToBottomRef.current = true;
     if (!stickToBottomRef.current) return;
-    const scrollToBottom = () => {
-      const container = scrollRef.current;
-      if (container) container.scrollTop = container.scrollHeight;
-    };
-    scrollToBottom();
-    const frame = requestAnimationFrame(scrollToBottom);
+    pinToBottom();
+    const frame = requestAnimationFrame(pinToBottom);
     return () => cancelAnimationFrame(frame);
   }, [messages.length, contextCompactions.length, latest?.id, latest?.content.length, latest?.thinking?.length, latest?.activities?.length, latest?.error, latest?.status]);
+
+  // 打开长对话时内容要分几拍才稳定下来：代码块排版、长提问量完溢出后补上的「展开全部」、图片占位都会再长高一截。
+  // 只在挂载那一拍滚到底的话，后面每长高一点就把底部又推远一点，于是停在半空、还得手动滚好几下才到底。
+  // 只要用户自己没滚开（stickToBottom 仍为真），就跟着内容高度变化重新贴回底部。
+  const hasConversationBody = !loadingHistory && messages.length > 0;
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!scrollRef.current || !content) return;
+    const observer = new ResizeObserver(() => {
+      if (stickToBottomRef.current) pinToBottom();
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [hasConversationBody]);
 
   if (loadingHistory) {
     return (
@@ -758,12 +788,19 @@ export default function ConversationView({ messages, contextCompactions = [], lo
       <div
         className="conversation-scroll"
         ref={scrollRef}
+        onKeyDown={markUserIntent}
+        onPointerDown={markUserIntent}
+        onTouchStart={markUserIntent}
+        onWheel={markUserIntent}
         onScroll={(event) => {
           const container = event.currentTarget;
-          stickToBottomRef.current = container.scrollHeight - container.clientHeight - container.scrollTop <= 48;
+          const atBottom = container.scrollHeight - container.clientHeight - container.scrollTop <= 48;
+          // 回到底部随时恢复跟随；离开底部只认用户刚刚自己操作过的那一下（滚轮、拖滚动条、触摸、键盘）。
+          if (atBottom) stickToBottomRef.current = true;
+          else if (performance.now() - userIntentAtRef.current < 700) stickToBottomRef.current = false;
         }}
       >
-        <div className="conversation">
+        <div className="conversation" ref={contentRef}>
           {orphanCompactions.map((compaction) => <CompactionCard compaction={compaction} key={compaction.id} />)}
           {messages.map((message) => {
             if (message.role === "user") userTurn += 1;

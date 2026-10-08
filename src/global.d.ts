@@ -1,4 +1,4 @@
-import type { ActiveRunStatus, AppendRunRequest, AppSelection, AppSettings, AppUpdateState, Attachment, AttachmentUpload, BranchClaudeSessionResult, ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ClaudeWatchEvent, ControlResponseRequest, ModelConfig, OpenAttachmentResult, PermissionMode, PermissionNotificationRequest, Project, ProjectLinkTarget, RunRequest, StartRunResult, UpdateActionResult } from "./types";
+import type { ActiveRunStatus, AppendRunRequest, AppSelection, AppSettings, AppUpdateState, Attachment, AttachmentUpload, BranchClaudeSessionResult, ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ClaudeWatchEvent, ControlResponseRequest, ModelConfig, OpenAttachmentResult, PermissionMode, PermissionNotificationRequest, Project, ProjectLinkTarget, ResumeSessionInTerminalRequest, ResumeSessionInTerminalResult, RunRequest, StartRunResult, UpdateActionResult } from "./types";
 
 declare module "*.css";
 
@@ -8,6 +8,7 @@ declare global {
       selectWorkspace(): Promise<string | null>;
       getScratchWorkspace(): Promise<string>;
       openWorkspace(workspace: string): Promise<{ opened: boolean; error?: string }>;
+      resumeSessionInTerminal(request: ResumeSessionInTerminalRequest): Promise<ResumeSessionInTerminalResult>;
       getClaudeInfo(): Promise<{ available: boolean; version?: string }>;
       getModels(workspace: string): Promise<ModelConfig>;
       getClaudeSessions(workspace: string): Promise<ClaudeSessionSummary[]>;

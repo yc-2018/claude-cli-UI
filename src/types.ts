@@ -123,6 +123,20 @@ export interface OpenAttachmentResult {
   error?: string;
 }
 
+export type TerminalKind = "cmd" | "powershell";
+
+export interface ResumeSessionInTerminalRequest {
+  kind: TerminalKind;
+  workspace: string;
+  sessionId: string;
+  skipPermissions: boolean;
+}
+
+export interface ResumeSessionInTerminalResult {
+  opened: boolean;
+  error?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";

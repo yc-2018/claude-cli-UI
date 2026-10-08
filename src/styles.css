@@ -621,10 +621,10 @@ button, select, textarea { -webkit-app-region: no-drag; }
   top: calc(100% + 6px);
   left: 26px;
   display: grid;
-  width: min(760px, calc(100% - 48px));
+  width: min(820px, calc(100% - 48px));
   min-width: 0;
-  grid-template-columns: auto minmax(0, 1fr) 28px 28px;
-  align-items: center;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  align-items: start;
   gap: 7px;
   padding: 7px 8px;
   border: 1px solid #d5d5ce;
@@ -632,6 +632,16 @@ button, select, textarea { -webkit-app-region: no-drag; }
   background: #fff;
   box-shadow: 0 6px 18px rgb(35 35 31 / 12%);
   color: #6d6d66;
+}
+
+.cli-command-rows { display: grid; min-width: 0; gap: 3px; }
+
+.cli-command-row {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr) 28px 28px 28px;
+  align-items: center;
+  gap: 7px;
 }
 
 .cli-command-popover code { overflow-x: auto; color: #454540; font-family: "Cascadia Code", Consolas, monospace; font-size: 10.5px; line-height: 22px; white-space: nowrap; }

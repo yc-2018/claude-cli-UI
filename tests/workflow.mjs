@@ -18,6 +18,7 @@ const claudeConfig = resolve(profile, "claude-config");
 const cliSessions = resolve(claudeConfig, "projects", root.replace(/[^A-Za-z0-9]/g, "-"));
 const fakeCli = resolve(root, "tests", "fixtures", "fake-claude.mjs");
 const processExitGate = resolve(profile, "release-process-exit");
+const terminalLog = resolve(profile, "terminal-launches.jsonl");
 const packagedExecutable = process.env.CLAUDE_DESK_TEST_EXECUTABLE;
 await mkdir(profile, { recursive: true });
 await mkdir(cliSessions, { recursive: true });
@@ -184,6 +185,7 @@ const launch = () => electron.launch({
     CLAUDE_DESK_TEST_WORKSPACE: root,
     CLAUDE_DESK_FAKE_SESSIONS_DIR: cliSessions,
     CLAUDE_DESK_TEST_EXIT_GATE: processExitGate,
+    CLAUDE_DESK_TEST_TERMINAL_LOG: terminalLog,
     CLAUDE_DESK_DISABLE_NOTIFICATIONS: "1",
     CLAUDE_DESK_TEST_OFFSCREEN: "1",
     CLAUDE_DESK_DISABLE_AUTO_UPDATE_CHECK: "1",
@@ -453,6 +455,11 @@ try {
   if (!importedContextStatus?.includes("上下文用量未知") || importedContextStatus.includes("5.0M")) {
     throw new Error(`billing input tokens were incorrectly shown as context usage: ${importedContextStatus}`);
   }
+  // 回归：导入的历史回答默认收起，只露出最后那段正文；要看工具调用得自己点开。
+  if (await page.locator('.message.assistant [data-timeline-kind="activity"]').count() !== 0) {
+    throw new Error("导入的历史回答没有默认收起工具调用");
+  }
+  await page.locator(".message.assistant .tool-collapse-toggle").last().click();
   if ((await page.locator(".message.assistant [data-timeline-kind]").evaluateAll((items) => items.map((item) => item.getAttribute("data-timeline-kind")).join(","))) !== "text,activity,text") {
     throw new Error("CLI session history did not preserve text and tool event order");
   }
@@ -829,8 +836,10 @@ try {
   await page.locator(".task-title-command").click();
   await page.waitForSelector(".cli-command-popover");
   const expectedCliCommand = `cd /d "${root}" && claude --resume "22222222-2222-4222-8222-222222222222"`;
-  if (await page.locator(".cli-command-popover code").textContent() !== expectedCliCommand) {
-    throw new Error("conversation title did not generate the complete CMD resume command");
+  const expectedSkipCliCommand = `${expectedCliCommand} --dangerously-skip-permissions`;
+  // 两条命令并排给出：平时用第一条，需要免确认连跑的场合用带 --dangerously-skip-permissions 的第二条。
+  if (JSON.stringify(await page.locator(".cli-command-row code").allTextContents()) !== JSON.stringify([expectedCliCommand, expectedSkipCliCommand])) {
+    throw new Error("conversation title did not list both CMD resume commands");
   }
   if (await page.evaluate(() => window.__cliCommandClipboardWrites.length) !== 0) {
     throw new Error("conversation title copied the CMD command before the copy action was clicked");
@@ -839,7 +848,34 @@ try {
   if (await page.evaluate(() => window.__cliCommandClipboardWrites.at(-1)) !== expectedCliCommand) {
     throw new Error("CMD resume command was not copied from the popover action");
   }
-  await page.locator('[aria-label="CMD 命令已复制"]').click();
+  await page.waitForSelector('[aria-label="CMD 命令已复制"]');
+  await page.locator('[aria-label="复制跳过权限的 CMD 命令"]').click();
+  if (await page.evaluate(() => window.__cliCommandClipboardWrites.at(-1)) !== expectedSkipCliCommand) {
+    throw new Error("--dangerously-skip-permissions resume command was not copied from the popover action");
+  }
+  // 两个直开终端的按钮：命令一律在主进程里按终端语法拼好，渲染层只点名要哪种终端。
+  await page.locator('[aria-label="在 CMD 中运行 CMD 命令"]').click();
+  await page.locator('[aria-label="在 PowerShell 中运行跳过权限的 CMD 命令"]').click();
+  const readTerminalLaunches = async () => (await readFile(terminalLog, "utf8").catch(() => ""))
+    .trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  const terminalDeadline = Date.now() + 5_000;
+  let terminalLaunches = await readTerminalLaunches();
+  while (terminalLaunches.length < 2 && Date.now() < terminalDeadline) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    terminalLaunches = await readTerminalLaunches();
+  }
+  if (terminalLaunches.length !== 2) {
+    throw new Error(`直开终端的两次点击没有都落到主进程：${JSON.stringify(terminalLaunches)}`);
+  }
+  if (terminalLaunches[0].kind !== "cmd" || terminalLaunches[0].command !== expectedCliCommand) {
+    throw new Error(`CMD 终端没有拿到 cmd 语法的恢复命令：${JSON.stringify(terminalLaunches[0])}`);
+  }
+  // PowerShell 不认 cmd 的 `cd /d` 和 5.1 里的 `&&`，必须换成 PowerShell 自己的写法才跑得起来。
+  const expectedPowershellCommand = `Set-Location -LiteralPath '${root}'; claude --resume '22222222-2222-4222-8222-222222222222' --dangerously-skip-permissions`;
+  if (terminalLaunches[1].kind !== "powershell" || terminalLaunches[1].command !== expectedPowershellCommand) {
+    throw new Error(`PowerShell 终端没有拿到 PowerShell 语法的恢复命令：${JSON.stringify(terminalLaunches[1])}`);
+  }
+  await page.locator('[aria-label="关闭 CMD 命令"]').click();
   await page.waitForSelector(".cli-command-popover", { state: "detached" });
   await inFolder(page, '.task-row.active .task-rename[title="重命名对话"]').evaluate((button) => button.click());
   await page.locator('input[aria-label="对话名称"]').fill("UI 同步会话名");
@@ -1029,6 +1065,8 @@ try {
   await page.waitForSelector('.message.assistant[data-status="running"] .thinking-content');
   await page.waitForFunction(() => (document.querySelector('.message.assistant[data-status="running"] .thinking-content')?.textContent?.length ?? 0) > 120);
   await page.locator(".conversation-scroll").evaluate((container) => {
+    // 滚走必须带上真实的用户意图：内容长高、以及浏览器还原先前被夹掉的偏移，都会发出同样的 scroll 事件。
+    container.dispatchEvent(new WheelEvent("wheel", { deltaY: -240, bubbles: true }));
     container.scrollTop = 0;
     container.dispatchEvent(new Event("scroll"));
   });
@@ -1060,6 +1098,41 @@ try {
   }
   const resumedBottomDistance = await page.locator(".conversation-scroll").evaluate((container) => container.scrollHeight - container.clientHeight - container.scrollTop);
   if (resumedBottomDistance > 2) throw new Error(`bottom-follow did not resume: ${resumedBottomDistance}px`);
+
+  // 回归：打开长对话时内容要分几拍才稳定下来（代码块排版、长提问量完溢出后补上的「展开全部」、图片占位），
+  // 这些后到的高度变化必须跟着贴回底部，否则会停在半空、还得手动滚好几下才到底。
+  await page.locator(".conversation-scroll").evaluate((container) => {
+    container.scrollTop = container.scrollHeight;
+    container.dispatchEvent(new Event("scroll"));
+  });
+  await page.evaluate(() => {
+    const filler = document.createElement("div");
+    filler.id = "settle-filler";
+    filler.style.height = "1200px";
+    document.querySelector(".conversation")?.append(filler);
+  });
+  await page.waitForFunction(() => {
+    const container = document.querySelector(".conversation-scroll");
+    return container && container.scrollHeight - container.clientHeight - container.scrollTop <= 2;
+  }, undefined, { timeout: 5_000 });
+  // 反过来，用户自己滚上去之后，后到的高度变化不能再把视图拽回底部。
+  await page.locator(".conversation-scroll").evaluate((container) => {
+    container.dispatchEvent(new WheelEvent("wheel", { deltaY: -240, bubbles: true }));
+    container.scrollTop = 0;
+    container.dispatchEvent(new Event("scroll"));
+  });
+  await page.evaluate(() => {
+    const filler = document.querySelector("#settle-filler");
+    if (filler) filler.style.height = "2400px";
+  });
+  await page.waitForTimeout(200);
+  const settledScrollTop = await page.locator(".conversation-scroll").evaluate((container) => container.scrollTop);
+  if (settledScrollTop > 2) throw new Error(`内容继续长高时把用户滚上去的位置拽回了底部：${settledScrollTop}px`);
+  await page.evaluate(() => { document.querySelector("#settle-filler")?.remove(); });
+  await page.locator(".conversation-scroll").evaluate((container) => {
+    container.scrollTop = container.scrollHeight;
+    container.dispatchEvent(new Event("scroll"));
+  });
 
   await page.evaluate(() => {
     window.__clipboardWrites = [];
@@ -1998,6 +2071,18 @@ try {
   page = await electronApp.firstWindow();
   watchErrors(page);
   await page.waitForFunction(() => document.querySelectorAll(".project-group").length === 3);
+
+  // 回归：启动时只展开当前对话所在的项目。项目和对话一多，全展开的侧栏要滚很久才能找到东西，
+  // 所以除了活动项目（order-project-a）以外都应该是收起状态。
+  const startupFolds = await page.evaluate(() => [...document.querySelectorAll(".project-group")].map((group) => ({
+    id: group.getAttribute("data-project-id"),
+    expanded: Boolean(group.querySelector(".project-conversations")),
+  })));
+  if (JSON.stringify(startupFolds) !== JSON.stringify([
+    { id: "order-project-a", expanded: true },
+    { id: "order-project-b", expanded: false },
+    { id: "order-project-c", expanded: false },
+  ])) throw new Error(`启动时的项目展开状态不对，应只展开活动对话所在的项目：${JSON.stringify(startupFolds)}`);
 
   // 「临时对话」段取代了原来的「全部对话」：没有临时对话时只显示空状态和新建入口，
   // 不再把每个会话在侧边栏里重复渲染一遍。

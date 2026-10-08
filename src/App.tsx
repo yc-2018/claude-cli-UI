@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
-import { Check, CheckCircle2, Copy, Folder, FolderOpen, Minimize2, Plus, TerminalSquare, X } from "lucide-react";
+import { Check, CheckCircle2, Copy, Folder, FolderOpen, Minimize2, Plus, SquareTerminal, Terminal, TerminalSquare, X } from "lucide-react";
 import Composer from "./Composer";
 import ConversationView from "./ConversationView";
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
@@ -34,6 +34,7 @@ import type {
   ReorderPosition,
   RunRequest,
   StartRunResult,
+  TerminalKind,
   ThinkingEffort,
   ToolPermissionRequest,
   UserQuestion,
@@ -83,10 +84,17 @@ interface PendingUserQuestion {
   questions: UserQuestion[];
 }
 
+interface CliCommandEntry {
+  command: string;
+  skipPermissions: boolean;
+}
+
 interface CliCommandNotice {
   conversationId: string;
-  command: string;
-  copied: boolean;
+  workspace: string;
+  sessionId: string;
+  commands: CliCommandEntry[];
+  copiedCommand?: string;
 }
 
 function finishResponse(message: ChatMessage, now = Date.now()): Pick<ChatMessage, "responseDurationMs" | "responseCompletedAt" | "retry"> {
@@ -101,8 +109,16 @@ function appendResponseContent(current: string | undefined, addition: string) {
   return `${current}\n\n${addition}`;
 }
 
-function createCliResumeCommand(workspace: string, sessionId: string) {
-  return `cd /d "${workspace}" && claude --resume "${sessionId}"`;
+/**
+ * 恢复命令给两条：平时用第一条，需要免确认连跑的场合用带 --dangerously-skip-permissions 的第二条。
+ * cmd 的写法同时承担「复制给用户看」的职责，所以保持和 CLI 文档一致的 `cd /d` 形式。
+ */
+function createCliResumeCommands(workspace: string, sessionId: string): CliCommandEntry[] {
+  const base = `cd /d "${workspace}" && claude --resume "${sessionId}"`;
+  return [
+    { command: base, skipPermissions: false },
+    { command: `${base} --dangerously-skip-permissions`, skipPermissions: true },
+  ];
 }
 
 type PendingDeletion = {
@@ -2833,7 +2849,13 @@ export default function App() {
     document.body.classList.remove("resizing-sidebar");
   };
 
-  const copyCliResumeCommand = async (command: string, conversationId: string) => {
+  // 弹出后 8 秒自动收起；每次交互都重新计时，正在挑命令的时候不该从手底下消失。
+  const keepCliCommandNoticeAlive = () => {
+    window.clearTimeout(cliCommandNoticeTimer.current);
+    cliCommandNoticeTimer.current = window.setTimeout(() => setCliCommandNotice(null), 8_000);
+  };
+
+  const copyCliResumeCommand = async (command: string) => {
     let copied = false;
     try {
       await navigator.clipboard.writeText(command);
@@ -2841,17 +2863,31 @@ export default function App() {
     } catch {
       // Keep the command visible so it can still be selected manually.
     }
-    setCliCommandNotice({ conversationId, command, copied });
-    window.clearTimeout(cliCommandNoticeTimer.current);
-    cliCommandNoticeTimer.current = window.setTimeout(() => setCliCommandNotice(null), 8_000);
+    setCliCommandNotice((current) => current ? { ...current, copiedCommand: copied ? command : undefined } : current);
+    keepCliCommandNoticeAlive();
+  };
+
+  const resumeSessionInTerminal = async (kind: TerminalKind, skipPermissions: boolean) => {
+    if (!cliCommandNotice) return;
+    const { workspace, sessionId } = cliCommandNotice;
+    keepCliCommandNoticeAlive();
+    try {
+      const result = await window.claudeDesk.resumeSessionInTerminal({ kind, workspace, sessionId, skipPermissions });
+      if (!result.opened) window.alert(result.error ?? "无法打开终端");
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "无法打开终端");
+    }
   };
 
   const showCliResumeCommand = () => {
     if (!activeConversation?.sessionId || !activeProject) return;
-    const command = createCliResumeCommand(activeProject.workspace, activeConversation.sessionId);
-    setCliCommandNotice({ conversationId: activeConversation.id, command, copied: false });
-    window.clearTimeout(cliCommandNoticeTimer.current);
-    cliCommandNoticeTimer.current = window.setTimeout(() => setCliCommandNotice(null), 8_000);
+    setCliCommandNotice({
+      conversationId: activeConversation.id,
+      workspace: activeProject.workspace,
+      sessionId: activeConversation.sessionId,
+      commands: createCliResumeCommands(activeProject.workspace, activeConversation.sessionId),
+    });
+    keepCliCommandNoticeAlive();
   };
 
   if (!storageReady) {
@@ -2950,21 +2986,48 @@ export default function App() {
               </div>
               {cliCommandNotice?.conversationId === activeConversation.id ? (
                 <div className="cli-command-popover" role="status">
-                  <TerminalSquare size={14} />
-                  <code>{cliCommandNotice.command}</code>
-                  <button
-                    aria-label={cliCommandNotice.copied ? "CMD 命令已复制" : "复制 CMD 命令"}
-                    onClick={() => {
-                      if (cliCommandNotice.copied) setCliCommandNotice(null);
-                      else void copyCliResumeCommand(cliCommandNotice.command, activeConversation.id);
-                    }}
-                    title={cliCommandNotice.copied ? "已复制" : "复制"}
-                    type="button"
-                  >
-                    {cliCommandNotice.copied ? <Check size={14} /> : <Copy size={14} />}
-                  </button>
+                  <div className="cli-command-rows">
+                    {cliCommandNotice.commands.map((entry) => {
+                      // 两行命令的按钮必须各带各的无障碍名，否则读屏和测试都分不出点的是哪一条。
+                      const labels = entry.skipPermissions
+                        ? { copy: "复制跳过权限的 CMD 命令", copied: "跳过权限的 CMD 命令已复制", cmd: "在 CMD 中运行跳过权限的 CMD 命令", powershell: "在 PowerShell 中运行跳过权限的 CMD 命令" }
+                        : { copy: "复制 CMD 命令", copied: "CMD 命令已复制", cmd: "在 CMD 中运行 CMD 命令", powershell: "在 PowerShell 中运行 CMD 命令" };
+                      const copied = cliCommandNotice.copiedCommand === entry.command;
+                      return (
+                        <div className="cli-command-row" key={entry.skipPermissions ? "skip" : "plain"}>
+                          <TerminalSquare size={14} />
+                          <code>{entry.command}</code>
+                          <button
+                            aria-label={copied ? labels.copied : labels.copy}
+                            onClick={() => { void copyCliResumeCommand(entry.command); }}
+                            title={copied ? "已复制" : "复制"}
+                            type="button"
+                          >
+                            {copied ? <Check size={14} /> : <Copy size={14} />}
+                          </button>
+                          <button
+                            aria-label={labels.cmd}
+                            onClick={() => { void resumeSessionInTerminal("cmd", entry.skipPermissions); }}
+                            title="打开 CMD 并执行"
+                            type="button"
+                          >
+                            <SquareTerminal size={14} />
+                          </button>
+                          <button
+                            aria-label={labels.powershell}
+                            onClick={() => { void resumeSessionInTerminal("powershell", entry.skipPermissions); }}
+                            title="打开 PowerShell 并执行（语法自动换成 PowerShell 的写法）"
+                            type="button"
+                          >
+                            <Terminal size={14} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
                   <button
                     aria-label="关闭 CMD 命令"
+                    className="cli-command-close"
                     onClick={() => setCliCommandNotice(null)}
                     title="关闭"
                     type="button"

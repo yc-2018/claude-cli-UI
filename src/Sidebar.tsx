@@ -134,7 +134,11 @@ export default function Sidebar({
   onCheckForUpdates,
   onToggle,
 }: Props) {
-  const [closedProjects, setClosedProjects] = useState<Set<string>>(() => new Set());
+  // 启动时只展开当前对话所在的项目：项目和对话一多，全展开的侧栏要滚很久才能找到东西。
+  // 惰性初始化读的是挂载那一刻的 props，App 在 storageReady 之前不渲染侧栏，所以项目和选中项已经就位。
+  const [closedProjects, setClosedProjects] = useState<Set<string>>(() => new Set(
+    projects.filter((project) => project.id !== activeProjectId).map((project) => project.id),
+  ));
   const [closedSections, setClosedSections] = useState<Set<SectionKey>>(() => new Set());
   const [editingName, setEditingName] = useState<EditingName | null>(null);
   const [refreshingProjects, setRefreshingProjects] = useState<Set<string>>(() => new Set());
