@@ -584,8 +584,8 @@ const MARKER_MIN_MESSAGES = 4;
 interface MarkerItem {
   id: string;
   text: string;
-  /** 这条消息在全部内容里的纵向位置，0 到 1。 */
-  ratio: number;
+  /** 这条消息在滚动内容里的纵向偏移，单位 px。导航线等距排列，这个值只用来判断读到了哪一条。 */
+  offset: number;
 }
 
 /** 消息在滚动内容里的纵向偏移。offsetTop 取决于最近的定位祖先，这里按视口差值算，不受布局影响。 */
@@ -593,8 +593,9 @@ function contentOffsetOf(container: HTMLElement, element: HTMLElement) {
   return element.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
 }
 
-/** 对话右缘的提问导航：平时是一列短横线，鼠标移上去摊开成提问列表，点击跳到对应消息。 */
+/** 对话右缘的提问导航：等距的一列短横线，鼠标移上去摊开成提问列表，点击跳到对应消息。 */
 function ConversationMarkers({ messages, scrollRef }: { messages: ChatMessage[]; scrollRef: RefObject<HTMLDivElement | null> }) {
+  const railRef = useRef<HTMLElement>(null);
   const [items, setItems] = useState<MarkerItem[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const userMessages = messages.filter((message) => message.role === "user" && message.content.trim().length > 0);
@@ -607,18 +608,15 @@ function ConversationMarkers({ messages, scrollRef }: { messages: ChatMessage[];
       return;
     }
     const measure = () => {
-      const total = container.scrollHeight;
-      if (total <= 0) return;
       const next = userMessages.flatMap((message) => {
         const element = container.querySelector<HTMLElement>(`[data-message-id="${message.id}"]`);
         if (!element) return [];
-        const ratio = contentOffsetOf(container, element) / total;
-        return [{ id: message.id, text: message.content.replace(/\s+/g, " ").trim(), ratio: Math.min(1, Math.max(0, ratio)) }];
+        return [{ id: message.id, text: message.content.replace(/\s+/g, " ").trim(), offset: contentOffsetOf(container, element) }];
       });
       // 回答流式输出时高度每几十毫秒就变一次。位置没有实际挪动就不要换掉数组，
       // 否则这里的重渲染会和主进程推过来的事件抢渲染线程。
       setItems((current) => current.length === next.length && current.every((item, index) => (
-        item.id === next[index].id && item.text === next[index].text && Math.abs(item.ratio - next[index].ratio) < 0.002
+        item.id === next[index].id && item.text === next[index].text && Math.abs(item.offset - next[index].offset) < 1
       )) ? current : next);
     };
     measure();
@@ -648,10 +646,9 @@ function ConversationMarkers({ messages, scrollRef }: { messages: ChatMessage[];
     const update = () => {
       // 探测点放在视口上方四分之一处：那里是读者正在看的位置，而不是屏幕最顶端。
       const probe = container.scrollTop + container.clientHeight * 0.25;
-      const total = container.scrollHeight;
       let current = items[0].id;
       for (const item of items) {
-        if (item.ratio * total > probe) break;
+        if (item.offset > probe) break;
         current = item.id;
       }
       setActiveId(current);
@@ -661,9 +658,22 @@ function ConversationMarkers({ messages, scrollRef }: { messages: ChatMessage[];
     return () => container.removeEventListener("scroll", update);
   }, [scrollRef, items]);
 
+  // 提问多到一屏放不下时这一列自己会滚动，当前位置被滚出去就跟着带回视野。
+  // 鼠标正放在列上时不动，免得抢走用户自己的滚动。
+  useEffect(() => {
+    const rail = railRef.current;
+    if (!rail || rail.scrollHeight <= rail.clientHeight || rail.matches(":hover")) return;
+    const active = rail.querySelector<HTMLElement>(".conversation-marker.active");
+    if (!active) return;
+    if (active.offsetTop < rail.scrollTop) rail.scrollTop = active.offsetTop - 4;
+    else if (active.offsetTop + active.offsetHeight > rail.scrollTop + rail.clientHeight) {
+      rail.scrollTop = active.offsetTop + active.offsetHeight - rail.clientHeight + 4;
+    }
+  }, [activeId, items]);
+
   if (items.length === 0) return null;
   return (
-    <nav aria-label="提问导航" className="conversation-markers">
+    <nav aria-label="提问导航" className="conversation-markers" ref={railRef}>
       {items.map((item) => (
         <button
           className={`conversation-marker ${activeId === item.id ? "active" : ""}`}
@@ -674,7 +684,6 @@ function ConversationMarkers({ messages, scrollRef }: { messages: ChatMessage[];
             if (!container || !element) return;
             container.scrollTo({ top: Math.max(0, contentOffsetOf(container, element) - 20), behavior: "smooth" });
           }}
-          style={{ top: `${item.ratio * 100}%` }}
           title={item.text}
           type="button"
         >

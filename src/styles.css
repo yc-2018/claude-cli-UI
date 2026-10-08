@@ -715,14 +715,40 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .conversation-scroll { min-width: 0; min-height: 0; flex: 1; overflow: auto; }
 .conversation { width: min(100% - 48px, 820px); margin: 0 auto; padding: 38px 0 28px; }
 
-/* 对话右缘的提问导航：让开 9px 宽的滚动条，平时只占一条窄列。 */
-.conversation-markers { position: absolute; z-index: 2; top: 0; right: 11px; bottom: 0; width: 15px; }
-.conversation-markers:hover { width: 232px; }
-.conversation-marker {
+/* 对话右缘的提问导航：靠右缘居中、最多占三分之一高度的一列等距横线，让开 9px 宽的滚动条。 */
+.conversation-markers {
   position: absolute;
-  right: 0;
+  z-index: 2;
+  top: 50%;
+  right: 11px;
   display: flex;
-  height: 15px;
+  width: 17px;
+  max-height: 34%;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 7px;
+  padding: 3px 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  transform: translateY(-50%);
+  overscroll-behavior: contain;
+}
+/* 平时不露滚动条，免得这条窄列看起来像个控件；摊开成列表后再给一条细的。 */
+.conversation-markers::-webkit-scrollbar { width: 0; }
+.conversation-markers:hover {
+  width: 240px;
+  padding: 4px 5px;
+  border-color: #ebebe4;
+  background: #fbfbf8;
+  box-shadow: 0 6px 18px rgb(32 32 24 / 8%);
+}
+.conversation-markers:hover::-webkit-scrollbar { width: 7px; }
+.conversation-marker {
+  display: flex;
+  height: 13px;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: flex-end;
   gap: 7px;
@@ -731,7 +757,6 @@ button, select, textarea { -webkit-app-region: no-drag; }
   border-radius: 4px;
   background: transparent;
   cursor: pointer;
-  transform: translateY(-50%);
 }
 .conversation-marker::after { width: 11px; height: 1.5px; flex: 0 0 auto; border-radius: 1px; background: #c6c6bd; content: ""; transition: width .12s, background .12s; }
 .conversation-marker:hover::after { background: #85857c; }
@@ -749,7 +774,8 @@ button, select, textarea { -webkit-app-region: no-drag; }
   transition: max-width .14s, opacity .14s;
 }
 /* 只在鼠标进入整列时摊开，避免逐条悬停把文字推来推去。 */
-.conversation-markers:hover .conversation-marker { padding: 0 2px 0 8px; background: #fbfbf8; box-shadow: 0 0 0 1px #ebebe4; }
+.conversation-markers:hover .conversation-marker { padding: 0 2px 0 6px; }
+.conversation-markers:hover .conversation-marker:hover { background: #f1f1ec; }
 .conversation-markers:hover .conversation-marker-label { max-width: 200px; opacity: 1; }
 .conversation-marker:hover .conversation-marker-label { color: #3f3f3a; }
 .conversation-marker.active .conversation-marker-label { color: var(--accent); }
@@ -889,7 +915,7 @@ button, select, textarea { -webkit-app-region: no-drag; }
 .queued-hint.appended::before { width: 11px; height: 11px; border-width: 2px; border-color: #d1d1cb; border-top-color: var(--accent); animation: spin .85s linear infinite; }
 .retry-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 28px; padding: 5px 9px; border: 1px solid #edd9b4; border-radius: 6px; background: #fdf6e7; color: #8a6414; font-size: 12.5px; }
 .retry-notice .spinner { border-color: #eddcba; border-top-color: #c98a16; }
-.retry-reason { flex-basis: 100%; padding-left: 21px; color: #9c7b38; font-size: 11.5px; }
+.retry-reason { flex-basis: 100%; padding-left: 21px; color: #9c7b38; font-size: 11.5px; overflow-wrap: anywhere; }
 .spinner, .mini-spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid #d1d1cb; border-top-color: var(--accent); border-radius: 50%; animation: spin .85s linear infinite; }
 .mini-spinner { width: 12px; height: 12px; border-width: 1.5px; }
 @keyframes spin { to { transform: rotate(360deg); } }

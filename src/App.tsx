@@ -605,25 +605,52 @@ function firstNumberValue(data: Record<string, unknown>, keys: string[]) {
   return undefined;
 }
 
-/** api_retry 的 error 字段是字符串（overloaded / rate_limit），旧结构里也可能是带 message 的对象，两种都要能读出原因。 */
-function describeRetryError(data: Record<string, unknown>) {
-  const error = data.error;
-  if (typeof error === "string" && error.trim()) {
-    const normalized = error.trim().toLowerCase();
-    if (normalized === "overloaded") return "服务过载";
-    if (normalized === "rate_limit" || normalized === "rate limit") return "触发限流";
-    if (normalized === "server_error" || normalized === "server error") return "服务端错误";
-    return shorten(error.trim(), 120);
+/** api_retry 的 error 常常只是个分类词，这里把它翻成中文；服务端真正那句话另外读。 */
+const RETRY_ERROR_LABELS: Record<string, string> = {
+  overloaded: "服务过载",
+  overloaded_error: "服务过载",
+  rate_limit: "触发限流",
+  "rate limit": "触发限流",
+  rate_limit_error: "触发限流",
+  server_error: "服务端错误",
+  "server error": "服务端错误",
+  api_error: "服务端错误",
+};
+
+/**
+ * 服务端随这次重试一起回的那句具体错误。它可能挂在 error 对象上、再套一层 error.error 里（API 的
+ * 错误信封就是这个形状），也可能是 api_retry 事件上的兄弟字段。
+ */
+function retryErrorDetail(data: Record<string, unknown>): string | undefined {
+  const sources: Record<string, unknown>[] = [data];
+  let nested = data.error;
+  for (let depth = 0; depth < 2 && nested && typeof nested === "object"; depth += 1) {
+    const level = nested as Record<string, unknown>;
+    sources.unshift(level);
+    nested = level.error;
   }
-  if (error && typeof error === "object") {
-    const message = (error as Record<string, unknown>).message;
-    if (typeof message === "string" && message.trim()) return shorten(message.trim(), 120);
-  }
-  for (const key of ["message", "reason", "error_message"]) {
-    const value = data[key];
-    if (typeof value === "string" && value.trim()) return shorten(value.trim(), 120);
+  for (const source of sources) {
+    for (const key of ["message", "error_message", "detail", "details", "reason"]) {
+      const value = source[key];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
   }
   return undefined;
+}
+
+/**
+ * api_retry 的 error 字段是字符串（overloaded / rate_limit），旧结构里也可能是带 message 的对象，
+ * 两种都要能读出原因。分类词本身说不出到底哪里错了，所以服务端回的原话要接在后面一起显示。
+ */
+function describeRetryError(data: Record<string, unknown>) {
+  const error = data.error;
+  const detail = retryErrorDetail(data);
+  const raw = typeof error === "string" && error.trim() ? error.trim() : undefined;
+  const label = raw ? RETRY_ERROR_LABELS[raw.toLowerCase()] ?? raw : undefined;
+  if (label === undefined) return detail ? shorten(detail, 200) : undefined;
+  // 原话和分类词是同一句时不要重复拼一遍。
+  if (!detail || label.includes(detail) || detail.includes(label)) return shorten(label, 200);
+  return shorten(`${label}：${detail}`, 200);
 }
 
 function getApiRetryState(data: Record<string, unknown>): ApiRetryState | undefined {

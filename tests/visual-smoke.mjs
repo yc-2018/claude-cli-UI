@@ -153,7 +153,18 @@ await page.evaluate((workspace) => {
         },
         { id: "a3", role: "assistant", content: "已按需求说明拆成四个步骤执行。", createdAt: now - 780, status: "done" },
         { id: "u4", role: "user", content: "最后确认一下回归测试覆盖。", createdAt: now - 700 },
-        { id: "a4", role: "assistant", content: "回归测试已覆盖刷新后的会话恢复路径。", createdAt: now - 680, status: "done" }
+        { id: "a4", role: "assistant", content: "回归测试已覆盖刷新后的会话恢复路径。", createdAt: now - 680, status: "done" },
+        // 再追加一串提问，让右缘导航线超出三分之一高度的上限，验证它会自己滚动而不是挤在一起。
+        ...Array.from({ length: 8 }, (item, index) => [
+          { id: `u${index + 5}`, role: "user", content: `第 ${index + 5} 个追问：再确认一处边界情况。`, createdAt: now - 660 + index * 40 },
+          {
+            id: `a${index + 5}`,
+            role: "assistant",
+            content: `第 ${index + 5} 个追问已确认，行为符合预期。`,
+            createdAt: now - 640 + index * 40,
+            status: "done",
+          },
+        ]).flat()
       ]
     }, {
       id: "visual-conversation-2",
@@ -418,7 +429,7 @@ await page.locator(".update-later-button").click();
 await page.locator(".settings-trigger").click();
 
 const branchAction = page.locator('[aria-label="从这里分叉"]').first();
-if (await page.locator('[aria-label="从这里分叉"]').count() !== 4) throw new Error("completed assistant message did not expose a branch action");
+if (await page.locator('[aria-label="从这里分叉"]').count() !== 12) throw new Error("completed assistant message did not expose a branch action");
 await page.evaluate(() => {
   if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
 });
@@ -480,26 +491,59 @@ await page.waitForFunction(() => Boolean(
     .find((element) => element.textContent?.includes("这是一段很长的需求说明"))?.querySelector(".user-message-text.collapsed"),
 ));
 
-// 右缘导航线：每条提问一条，平时不盖住正文，悬停才摊开提问内容，点击跳到那条提问。
+// 右缘导航线：每条提问一条，等距排在右缘中间约三分之一高度里，平时不盖住正文，
+// 悬停才摊开成带边框的提问列表，点击跳到那条提问。
 const markers = page.locator(".conversation-marker");
-if (await markers.count() !== 4) throw new Error(`提问导航线数量不对：${await markers.count()}`);
-const markerLayout = await page.evaluate(() => ({
-  column: document.querySelector(".conversation-markers").getBoundingClientRect().toJSON(),
-  content: document.querySelector(".conversation").getBoundingClientRect().toJSON(),
-  labelWidth: document.querySelector(".conversation-marker-label").getBoundingClientRect().width,
-  ticks: [...document.querySelectorAll(".conversation-marker")].map((tick) => tick.getBoundingClientRect().top),
-}));
+if (await markers.count() !== 12) throw new Error(`提问导航线数量不对：${await markers.count()}`);
+const markerLayout = await page.evaluate(() => {
+  const rail = document.querySelector(".conversation-markers");
+  return {
+    column: rail.getBoundingClientRect().toJSON(),
+    area: document.querySelector(".conversation-area").getBoundingClientRect().toJSON(),
+    content: document.querySelector(".conversation").getBoundingClientRect().toJSON(),
+    labelWidth: document.querySelector(".conversation-marker-label").getBoundingClientRect().width,
+    scrollHeight: rail.scrollHeight,
+    clientHeight: rail.clientHeight,
+    ticks: [...document.querySelectorAll(".conversation-marker")].map((tick) => tick.getBoundingClientRect().top),
+  };
+});
 if (markerLayout.column.left < markerLayout.content.right - 0.5) {
   throw new Error(`提问导航线压住了正文：${JSON.stringify(markerLayout)}`);
 }
 if (markerLayout.labelWidth > 1) throw new Error("提问导航线没有悬停就摊开了");
-for (let index = 1; index < markerLayout.ticks.length; index += 1) {
-  if (markerLayout.ticks[index] <= markerLayout.ticks[index - 1]) {
-    throw new Error(`提问导航线没有按顺序排开：${JSON.stringify(markerLayout.ticks)}`);
-  }
+// 只占右缘中间约三分之一的高度，不再从头顶拉到底。
+if (markerLayout.column.height > markerLayout.area.height * 0.35 + 1) {
+  throw new Error(`提问导航线超出了三分之一高度：${JSON.stringify(markerLayout)}`);
+}
+const columnCenter = markerLayout.column.top + markerLayout.column.height / 2;
+const areaCenter = markerLayout.area.top + markerLayout.area.height / 2;
+if (Math.abs(columnCenter - areaCenter) > 1.5) {
+  throw new Error(`提问导航线没有在右缘居中：${JSON.stringify(markerLayout)}`);
+}
+// 提问之间的间距必须一致：按消息长度分布时长回答会把横线挤成一堆甚至重叠。
+const markerGaps = markerLayout.ticks.slice(1).map((top, index) => top - markerLayout.ticks[index]);
+for (const gap of markerGaps) {
+  if (gap <= 0) throw new Error(`提问导航线重叠或没有按顺序排开：${JSON.stringify(markerLayout.ticks)}`);
+  if (Math.abs(gap - markerGaps[0]) > 0.5) throw new Error(`提问导航线间距不均匀：${JSON.stringify(markerGaps)}`);
+}
+// 提问多到放不下时这一列自己滚动，而不是把横线压扁或溢出到正文上。
+if (markerLayout.scrollHeight <= markerLayout.clientHeight + 1) {
+  throw new Error(`提问导航线没有在超出高度时滚动：${JSON.stringify(markerLayout)}`);
 }
 await markers.first().hover();
 await page.waitForFunction(() => document.querySelector(".conversation-marker-label").getBoundingClientRect().width > 40);
+// 摊开后是一块带边框的面板，而不是一条条悬空的文字。（窗口有缩放，1px 的边框量出来会略小于 1。）
+const expandedRail = await page.locator(".conversation-markers").evaluate((rail) => ({
+  borderWidth: getComputedStyle(rail).borderTopWidth,
+  borderColor: getComputedStyle(rail).borderTopColor,
+  width: rail.getBoundingClientRect().width,
+}));
+if (parseFloat(expandedRail.borderWidth) < 0.5 || expandedRail.borderColor === "rgba(0, 0, 0, 0)") {
+  throw new Error(`摊开的提问列表没有边框：${JSON.stringify(expandedRail)}`);
+}
+const expandedLabelRight = await page.locator(".conversation-marker-label").first().evaluate((label) => label.getBoundingClientRect().right);
+const expandedRailRight = await page.locator(".conversation-markers").evaluate((rail) => rail.getBoundingClientRect().right);
+if (expandedLabelRight > expandedRailRight) throw new Error("摊开的提问文字溢出了列表边框");
 await page.screenshot({ path: resolve(artifacts, "conversation-markers.png") });
 await markers.first().click();
 await page.waitForFunction(() => document.querySelector(".conversation-scroll").scrollTop < 30);

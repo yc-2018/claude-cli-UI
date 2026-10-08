@@ -291,6 +291,7 @@ const processPrompt = (input) => {
     });
     setTimeout(() => {
       // 连响应头都没回的那种重试：没有状态码，只有 no_response.waited_ms 能说明它在等什么。
+      // error 只是个分类词，服务端真正那句话在 message 里，两个都得显示出来。
       send({
         type: "system",
         subtype: "api_retry",
@@ -299,6 +300,7 @@ const processPrompt = (input) => {
         retry_delay_ms: 4000,
         error_status: null,
         error: "server_error",
+        message: "upstream connect error or disconnect/reset before headers",
         no_response: { waited_ms: 30000, retry_wait_ms: 4000 },
         session_id: sessionId,
       });
@@ -314,13 +316,20 @@ const processPrompt = (input) => {
     send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
     // 子代理的重试不走 system/api_retry，而是 tool_progress 上挂 subagent_retry；
     // 恢复之后 CLI 只是少发这个字段，没有别的信号，渲染层必须靠它把提示撤掉。
+    // 这里的 error 是 API 的错误信封（error.error.message），比分类字符串多套了一层。
     send({
       type: "tool_progress",
       tool_use_id: "tool-agent-1",
       tool_name: "Task",
       elapsed_time_seconds: 0,
       subagent_type: "Explore",
-      subagent_retry: { agent_id: "agent-1", attempt: 2, max_retries: 10, retry_delay_ms: 3000 },
+      subagent_retry: {
+        agent_id: "agent-1",
+        attempt: 2,
+        max_retries: 10,
+        retry_delay_ms: 3000,
+        error: { type: "error", error: { type: "overloaded_error", message: "Overloaded by upstream provider" } },
+      },
       session_id: sessionId,
       uuid: "subagent-retry-1",
     });

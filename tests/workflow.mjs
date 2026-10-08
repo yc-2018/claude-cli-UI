@@ -1264,6 +1264,10 @@ try {
   if (!noResponseRetry.includes("已等待 30s")) {
     throw new Error(`retry notice did not surface the no-response wait: ${noResponseRetry}`);
   }
+  // error 只是分类词时必须把服务端回的原话一起显示，光写「服务端错误」看不出到底哪里错了。
+  if (!noResponseRetry.includes("服务端错误：upstream connect error or disconnect/reset before headers")) {
+    throw new Error(`retry notice dropped the server error detail: ${noResponseRetry}`);
+  }
 
   // #1b 子代理重试：走的是 tool_progress.subagent_retry，不认这条的话主对话同样只停在「正在准备回答」
   await watchRetryNotices();
@@ -1278,6 +1282,10 @@ try {
   const subagentRetry = subagentRetries.find((text) => text.includes("第 2/10 次"));
   if (!subagentRetry) throw new Error(`subagent retry notice was not rendered: ${JSON.stringify(subagentRetries)}`);
   if (!subagentRetry.includes("Explore")) throw new Error(`subagent retry notice did not name the agent: ${subagentRetry}`);
+  // 子代理的 error 是 API 的错误信封，原话套在 error.error.message 里，也得读出来。
+  if (!subagentRetry.includes("Overloaded by upstream provider")) {
+    throw new Error(`subagent retry notice dropped the server error detail: ${subagentRetry}`);
+  }
 
   // #4 直连权限：「本对话始终允许」必须发整工具 session 规则，不得原样回显按命令的 localSettings 建议
   await page.locator(".composer textarea").fill("直连权限测试");
