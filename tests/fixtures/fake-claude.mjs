@@ -14,6 +14,8 @@ let processExitGate;
 // 真实 CLI 在工具调用循环中被追加提示时，会把它并进当前这一轮，不再单独回答。
 // 这个开关用来复刻那种“折叠”行为：注入的提示直接被吞掉，一个 result 都不会多发。
 let foldAppendedActive = false;
+// 折叠期间收到追加提示时的回调：让场景能在“提示真的注入了”之后再继续发输出，而不是靠定时器赌时间。
+let onAppendedWhileFolding;
 const deferredInputs = [];
 const pendingControlResponses = new Map();
 const processPrompt = (input) => {
@@ -40,7 +42,12 @@ const processPrompt = (input) => {
   if (prompt === "进程退出通知回归测试" || prompt === "慢任务") {
     processExitGate = process.env.CLAUDE_DESK_TEST_EXIT_GATE;
   }
-  if (foldAppendedActive) return;
+  if (foldAppendedActive) {
+    const notify = onAppendedWhileFolding;
+    onAppendedWhileFolding = undefined;
+    if (notify) notify();
+    return;
+  }
   if (slowTaskActive) {
     deferredInputs.push(input);
     return;
@@ -218,6 +225,40 @@ const processPrompt = (input) => {
       send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
       foldAppendedActive = false;
     }, 3_000);
+    return;
+  }
+
+  if (prompt.includes("工具中引导测试")) {
+    // 复刻实测到的真实 CLI 行为（2.1.293）：这一轮正在跑工具调用时被追加提示，CLI 既不回显这条
+    // user 消息，也不给上一轮单独发 result；它先把手上的工具跑完，之后的输出才是在回答追加的提示，
+    // 最后整个过程只有一个 result。注入的提示在这里同样被吞掉，不会单独走一遍 processPrompt。
+    foldAppendedActive = true;
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    send({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "tool_use", id: "tool-handoff", name: "Edit", input: { file_path: "src/before.ts", old_string: "a", new_string: "b" } }] },
+      session_id: sessionId,
+    });
+    // 等这条引导的提示真的注入进来，再把手上的工具调用收掉——真实 CLI 就是这个顺序。
+    onAppendedWhileFolding = () => {
+      setTimeout(() => {
+        // 手上这次工具调用的结果仍属于第一轮，它是交接的分界点。
+        send({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-handoff", content: "已改完 src/before.ts" }] }, session_id: sessionId });
+        setTimeout(() => {
+          // 分界点之后的工具调用和正文都是在处理引导进来的那条提示，必须算到它的气泡上。
+          send({
+            type: "assistant",
+            message: { role: "assistant", content: [{ type: "tool_use", id: "tool-handoff-2", name: "Edit", input: { file_path: "src/guided.ts", old_string: "c", new_string: "d" } }] },
+            session_id: sessionId,
+          });
+          send({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-handoff-2", content: "已改完 src/guided.ts" }] }, session_id: sessionId });
+          const response = "引导的提示已经处理完：src/guided.ts 改好了。";
+          send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: response }] }, session_id: sessionId });
+          send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
+          foldAppendedActive = false;
+        }, 700);
+      }, 400);
+    };
     return;
   }
 

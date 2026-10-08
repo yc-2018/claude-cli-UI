@@ -1630,6 +1630,59 @@ try {
     throw new Error("folded appended prompt disappeared from the conversation");
   }
 
+  // 回归：工具调用进行中引导一条提示。实测真实 CLI 不回显这条 user 消息、也不给上一轮单独发
+  // result，只在最后发一个；过去这会让引导的气泡一直停在「已插入当前任务」，而它自己的工具调用
+  // 全算进上一条回答。现在注入后的第一个 tool_result 就把归属交接过去。
+  await page.locator(".composer textarea").fill("工具中引导测试");
+  await page.locator(".composer textarea").press("Enter");
+  // 第一轮的工具调用已经在跑了，这时候才引导，复刻“插进正在跑的那一轮”。
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll('.message.assistant[data-status="running"]')]
+      .some((message) => (message.textContent ?? "").includes("src/before.ts"))
+  ), undefined, { timeout: 25_000 });
+  await page.locator(".composer textarea").fill("顺手把 guided 那个文件也改一下");
+  await page.locator(".composer textarea").press("Enter");
+  const handoffPrompt = page.locator(".prompt-queue-item", { hasText: "顺手把 guided" });
+  await handoffPrompt.waitFor();
+  await handoffPrompt.locator(".guide-prompt").click();
+  await page.waitForFunction(() => !document.querySelector(".prompt-queue-item"));
+  // 交接之后：上一轮正常收尾，引导的那一轮接手剩下的输出并自己结束。
+  await page.waitForFunction(() => {
+    const assistants = [...document.querySelectorAll(".message.assistant")];
+    const guided = assistants.at(-1);
+    return guided?.getAttribute("data-status") === "done" && (guided.textContent ?? "").includes("引导的提示已经处理完");
+  }, undefined, { timeout: 30_000 });
+  const handoffBubbles = await page.locator(".conversation .message").evaluateAll((messages) => messages.map((message) => ({
+    role: message.classList.contains("user") ? "user" : "assistant",
+    status: message.getAttribute("data-status"),
+    text: message.textContent ?? "",
+  })));
+  const guidedIndex = handoffBubbles.findIndex((bubble) => bubble.role === "user" && bubble.text.includes("顺手把 guided"));
+  if (guidedIndex < 0) throw new Error("引导的提问没有留在对话里");
+  const guidedBubble = handoffBubbles[guidedIndex + 1];
+  const previousBubble = [...handoffBubbles.slice(0, guidedIndex)].reverse().find((bubble) => bubble.role === "assistant");
+  if (!guidedBubble || guidedBubble.role !== "assistant") throw new Error("引导的提问后面没有属于它的回答气泡");
+  if (!previousBubble) throw new Error("找不到被引导打断的那条回答");
+  // 手上那次没跑完的工具调用仍属于上一条回答，分界点之后的工具调用必须算到引导的气泡上。
+  if (!previousBubble.text.includes("src/before.ts") || previousBubble.text.includes("src/guided.ts")) {
+    throw new Error(`交接前的工具调用归属不对：${JSON.stringify(previousBubble)}`);
+  }
+  if (!guidedBubble.text.includes("src/guided.ts")) {
+    throw new Error(`引导之后的工具调用没有算到引导的气泡上：${JSON.stringify(guidedBubble)}`);
+  }
+  if (previousBubble.status !== "done") {
+    throw new Error(`被引导打断的那条回答没有正常收尾：${JSON.stringify(previousBubble)}`);
+  }
+  // 交接过的轮次是被真的回答了，不能再报成“并进上一条回答”。
+  if (guidedBubble.text.includes("并进上一条回答")) {
+    throw new Error(`交接过的引导轮次被误判成折叠：${JSON.stringify(guidedBubble)}`);
+  }
+  if (await page.locator(".message.assistant .queued-hint").count() !== 0) {
+    throw new Error("交接之后引导的气泡还挂着「已插入当前任务」");
+  }
+  await page.screenshot({ path: resolve(artifacts, "workflow-guided-handoff.png") });
+  await page.waitForFunction(() => document.querySelectorAll(".send-button.stop").length === 0, undefined, { timeout: 25_000 });
+
   // 回归：Claude 还在输出时重命名对话，过去会静默失败——界面和 session 文件都不变。现在界面立刻改名，
   // 文件要等进程退出才补写，避免插一行把 CLI 正在写的那条记录切断。
   const activeConversationTitle = await page.locator(".task-heading h2").textContent();

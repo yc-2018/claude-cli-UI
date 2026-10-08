@@ -168,6 +168,13 @@ interface ActiveRun {
   /** 切到追加轮次后等它第一条输出的兜底计时器，超时说明这条提示被并进了上一轮。 */
   unansweredTurnFallback?: ReturnType<typeof setTimeout>;
   currentTurnHasOutput: boolean;
+  /**
+   * 追加的提示已经写进 stdin，但 CLI 可能把它并进还在跑的这一轮。实测 2.1.293：注入之后 CLI
+   * 不回显这条 user 消息、也不给上一轮发 result，只在整轮结束时发一个；但它一定先把手上这次
+   * 工具调用跑完，之后的 assistant 输出都是带着这条提示重新请求来的。所以用注入后的第一个
+   * tool_result 当分界点，把后面的输出改算到追加的那一轮上。
+   */
+  handoffAfterToolResult: boolean;
   /** 上一轮被 end_turn 兜底收尾后，只在这个时间点之前允许吞掉一条迟到的 result。 */
   staleResultDeadline: number;
   stopping: boolean;
@@ -234,6 +241,15 @@ function isSidechainRecord(record: Record<string, unknown>) {
   if (typeof record.parent_tool_use_id === "string" && record.parent_tool_use_id.length > 0) return true;
   if (typeof record.parentToolUseId === "string" && record.parentToolUseId.length > 0) return true;
   return record.isSidechain === true;
+}
+
+/** 这条 user 记录是一次工具调用的结果，而不是真正的提问。 */
+function hasToolResultBlock(record: Record<string, unknown>) {
+  const message = record.message;
+  if (!message || typeof message !== "object") return false;
+  const content = (message as Record<string, unknown>).content;
+  if (!Array.isArray(content)) return false;
+  return content.some((block) => Boolean(block) && typeof block === "object" && (block as Record<string, unknown>).type === "tool_result");
 }
 
 /** 等待正在停止的进程真的退出，避免新旧两个 Claude 进程同时改同一批文件。 */
@@ -1904,6 +1920,7 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     unfinishedTurnRunIds: new Set([request.runId]),
     pendingControlRequestIds: new Set(),
     currentTurnHasOutput: false,
+    handoffAfterToolResult: false,
     staleResultDeadline: 0,
     stopping: false,
   };
@@ -1920,11 +1937,12 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     if (activeRun.unansweredTurnFallback) clearTimeout(activeRun.unansweredTurnFallback);
     activeRun.unansweredTurnFallback = undefined;
   };
-  const completeCurrentTurn = (data: Record<string, unknown>, completedFromEndTurn: boolean) => {
+  const completeCurrentTurn = (data: Record<string, unknown>, completedFromEndTurn: boolean, handedOff = false) => {
     clearEndTurnFallback();
     clearUnansweredTurnFallback();
     const completedTurnRunId = activeRun.currentTurnRunId;
     if (!activeRun.unfinishedTurnRunIds.has(completedTurnRunId)) return;
+    activeRun.handoffAfterToolResult = false;
     emit(owner, { runId: completedTurnRunId, type: "message", data });
     activeRun.unfinishedTurnRunIds.delete(completedTurnRunId);
     const nextTurnRunId = activeRun.pendingTurnRunIds.shift();
@@ -1932,7 +1950,9 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
       activeRun.currentTurnRunId = nextTurnRunId;
       activeRun.currentTurnHasOutput = false;
       activeRun.staleResultDeadline = completedFromEndTurn ? Date.now() + STALE_RESULT_CREDIT_MS : 0;
-      scheduleUnansweredTurnFallback();
+      // 交接过来的那一轮已经确定被 CLI 接手了（提示在工具调用之后才进模型），不需要再等它的第一条
+      // 输出来判断是否被折叠；而且第三方模型下这一等可能长达几十秒，兜底会把它误判成没人答。
+      if (!handedOff) scheduleUnansweredTurnFallback();
     } else {
       activeRun.staleResultDeadline = 0;
       activeRun.child.stdin.end();
@@ -1940,6 +1960,24 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     if (observedSessionId) {
       void normalizeClaudeDeskSession(request.cwd, observedSessionId, existingSessionPrefix).catch(() => undefined);
     }
+  };
+  /**
+   * CLI 把追加的提示并进了还在跑的这一轮：整个过程只有最后一个 result，上一轮永远等不到自己的
+   * 收尾，界面上那条引导提示就一直挂在「已插入当前任务」，而它的工具调用全算在了上一条回答里。
+   * 注入后的第一个 tool_result 是可靠的分界点：之后的每条 assistant 消息都是带着这条提示重新
+   * 请求来的，所以在这里给上一轮补一个成功收尾，把后面的输出都交给追加的那一轮。
+   */
+  const handOffToAppendedTurn = () => {
+    activeRun.handoffAfterToolResult = false;
+    if (activeRun.pendingTurnRunIds.length === 0) return;
+    completeCurrentTurn({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "",
+      session_id: observedSessionId,
+      completion_source: "handed_off_to_appended_turn",
+    }, false, true);
   };
   const scheduleUnansweredTurnFallback = () => {
     clearUnansweredTurnFallback();
@@ -2033,6 +2071,10 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
       clearUnansweredTurnFallback();
     }
     emit(owner, { runId: activeRun.currentTurnRunId, type: "message", data: record });
+    // 这次工具调用的结果仍属于上一轮，发出去之后才交接：再往后的输出模型已经看到追加的提示了。
+    if (activeRun.handoffAfterToolResult && record.type === "user" && !sidechain && hasToolResultBlock(record)) {
+      handOffToAppendedTurn();
+    }
     if (record.type === "assistant" && !sidechain) {
       const message = record.message;
       if (message && typeof message === "object" && (message as Record<string, unknown>).stop_reason === "end_turn") {
@@ -2134,6 +2176,11 @@ ipcMain.handle("claude:append", async (_event, value: unknown) => {
     activeRun.unfinishedTurnRunIds.delete(request.turnRunId);
     return { appended: false };
   }
+  // CLI 可能把这条提示并进还在跑的那一轮，不会给上一轮单独发 result。等注入后的第一个 tool_result
+  // 就把归属交给这一轮，否则它会一直挂在「已插入当前任务」，工具调用也全算在上一条回答里。
+  // 只有插进「正在跑的那一轮」的提示才需要这样交接：前面还排着别的追加轮次时，这条是进了 CLI
+  // 自己的队列，CLI 会按轮次逐个发 result，走原来的收尾路径。
+  if (activeRun.pendingTurnRunIds.length === 1) activeRun.handoffAfterToolResult = true;
   return { appended: true };
 });
 
