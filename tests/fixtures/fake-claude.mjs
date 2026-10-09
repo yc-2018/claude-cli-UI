@@ -69,7 +69,12 @@ const processPrompt = (input) => {
   const testModels = process.env.CLAUDE_DESK_TEST_MODELS_FILE
     ? JSON.parse(readFileSync(process.env.CLAUDE_DESK_TEST_MODELS_FILE, "utf8"))
     : JSON.parse(process.env.CLAUDE_DESK_TEST_MODELS ?? "{}");
-  const model = testModels[roleName] ?? modelRole;
+  // 夹具可以写成 { model, name }：CLI 真正上报给界面的是模型 id（1M 标记就写在 id 里），
+  // name 只影响主进程菜单里的展示名，所以这里始终取 model。
+  const mapping = testModels[roleName];
+  const model = typeof mapping === "string" ? mapping
+    : typeof mapping?.model === "string" ? mapping.model
+    : modelRole;
   const effortIndex = args.indexOf("--effort");
   const effort = effortIndex >= 0 ? args[effortIndex + 1] : undefined;
   if (prompt.includes("计划交互问题测试") && process.env.CLAUDE_DESK_TEST_EXPECT_EFFORT === "high" && effort !== "high") {

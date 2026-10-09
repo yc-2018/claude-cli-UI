@@ -29,7 +29,8 @@ const electronApp = await electron.launch({
     CLAUDE_DESK_CLAUDE_PREFIX_ARGS: JSON.stringify([fakeCli]),
     CLAUDE_DESK_TEST_MODELS: JSON.stringify({
       Sonnet: "LongCat-2.0",
-      Opus: "LongCat-2.0",
+      // 真实配置里 _MODEL 带 [1M]、_NAME 只是展示名：菜单里的 1M 徽标必须靠 id 上的标记亮起来。
+      Opus: { model: "LongCat-2.0[1M]", name: "LongCat-2.0" },
       Fable: "LongCat-2.0",
       Haiku: "LongCat-2.0",
     }),
@@ -348,6 +349,9 @@ const modelMenuLayout = await page.locator(".model-select .composer-select-menu"
 if (modelMenuLayout.left < 0 || modelMenuLayout.top < 0 || modelMenuLayout.right > 1320 || modelMenuLayout.bottom > 860) {
   throw new Error(`model menu escaped the viewport: ${JSON.stringify(modelMenuLayout)}`);
 }
+// 配置了展示名也不能让 1M 容量消失：菜单里必须看得到徽标。
+const modelLargeContextBadge = await page.locator('.model-select .composer-select-option[data-value="opus"] .composer-select-badge').textContent();
+if (modelLargeContextBadge !== "1M") throw new Error("model menu lost the 1M badge once a display name was configured");
 await page.screenshot({ path: resolve(artifacts, "model-picker.png") });
 await page.keyboard.press("Escape");
 
@@ -707,6 +711,12 @@ const compactModelMenuLayout = await page.locator(".model-select .composer-selec
 if (compactModelMenuLayout.left < 0 || compactModelMenuLayout.top < 0 || compactModelMenuLayout.right > 900 || compactModelMenuLayout.bottom > 640) {
   throw new Error(`compact model menu escaped the viewport: ${JSON.stringify(compactModelMenuLayout)}`);
 }
+// 紧凑窗口下徽标不能把选项行撑出可视边界。
+const compactModelLargeContextBadge = await page.locator('.model-select .composer-select-option[data-value="opus"] .composer-select-badge').textContent();
+if (compactModelLargeContextBadge !== "1M") throw new Error("compact model menu lost the 1M badge");
+const compactModelOptionOverflow = await page.locator('.model-select .composer-select-option[data-value="opus"]')
+  .evaluate((row) => row.scrollWidth > row.clientWidth + 0.5);
+if (compactModelOptionOverflow) throw new Error("compact model option overflowed once the 1M badge was added");
 await page.screenshot({ path: resolve(artifacts, "model-picker-compact.png") });
 await page.keyboard.press("Escape");
 

@@ -649,6 +649,26 @@ try {
   if (refreshedModelOptions.some((option) => option.actual === "ThirdParty-A")) {
     throw new Error(`stale router mapping survived the refresh: ${JSON.stringify(refreshedModelOptions)}`);
   }
+  // 真实配置里很常见 _MODEL 带 [1M]、_NAME 只是展示名：容量必须仍然看得出 1M，否则用户在选模型
+  // 时完全看不到自己配的 1M 路由（菜单里显示的是那个不带标记的展示名）。
+  await writeTestModels({
+    Sonnet: "Router2-Sonnet",
+    Opus: { model: "Router2-Opus[1m]", name: "Router2-Opus" },
+    Fable: "ThirdParty-B",
+    Haiku: "ThirdParty-B",
+  });
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll(".model-select .composer-select-option small")].some((node) => node.textContent === "Router2-Opus")
+  ));
+  const namedModelOptions = await page.locator(".model-select .composer-select-option").evaluateAll((options) => options.map((option) => ({
+    role: option.querySelector("strong")?.textContent ?? "",
+    actual: option.querySelector("small")?.textContent ?? "",
+    badge: option.querySelector(".composer-select-badge")?.textContent ?? "",
+  })));
+  const namedLargeContextOption = namedModelOptions.find((option) => option.actual === "Router2-Opus");
+  if (namedLargeContextOption?.badge !== "1M") {
+    throw new Error(`the 1M mapping lost its marker once a display name was configured: ${JSON.stringify(namedModelOptions)}`);
+  }
   // 选到 1M 模型之后，上下文状态条必须能看出这份容量，而不是只剩一个百分比。
   await page.locator('.model-select .composer-select-option[data-value="opus"]').click();
   await page.waitForFunction(() => document.querySelector(".context-window-badge")?.textContent === "1M");

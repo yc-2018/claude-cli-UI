@@ -928,6 +928,32 @@ function contextWindowForModel(model: string | undefined) {
   return model && /\[1m\]|-1m$/i.test(model) ? LARGE_CONTEXT_WINDOW : DEFAULT_CONTEXT_WINDOW;
 }
 
+function settingsText(value: unknown) {
+  return typeof value === "string" && value ? value : undefined;
+}
+
+/**
+ * 角色映射的两个来源分工不同：ANTHROPIC_DEFAULT_*_MODEL 是真正路由到的模型 id，1M 变体的 [1M]
+ * 就写在它里面；ANTHROPIC_DEFAULT_*_NAME 只是界面上的展示名，通常不带标记。展示沿用 _NAME，
+ * 但容量必须两边都看，否则配了 _NAME 的 1M 路由会被当成 200k，选模型时完全看不出这份容量。
+ */
+function roleModelOption(
+  role: "Sonnet" | "Opus" | "Fable" | "Haiku",
+  value: "sonnet" | "opus" | "fable" | "haiku",
+  modelValue: string | undefined,
+  namedValue: string | undefined,
+  fallback: string,
+) {
+  const large = [modelValue, namedValue]
+    .some((candidate) => contextWindowForModel(candidate) === LARGE_CONTEXT_WINDOW);
+  return {
+    role,
+    value,
+    actualModel: namedValue ?? modelValue ?? fallback,
+    contextWindow: large ? LARGE_CONTEXT_WINDOW : DEFAULT_CONTEXT_WINDOW,
+  };
+}
+
 /**
  * 一次请求真正占用的上下文 = input + cache_creation + cache_read。
  * result.usage 是整轮所有请求的累加，modelUsage 更是整个会话的累加，都不能当成占用量。
@@ -1398,8 +1424,13 @@ async function getModelConfig(workspace: string) {
         const values = parsed as Record<string, unknown>;
         return {
           options: roles.map(({ role, value }) => {
-            const actualModel = typeof values[role] === "string" && values[role] ? values[role] as string : value;
-            return { role, value, actualModel, contextWindow: contextWindowForModel(actualModel) };
+            // 夹具允许写成 { model, name }：真实配置里 _MODEL 带 1M 标记、_NAME 只是展示名，
+            // 这种组合必须在测试里也复现得到。
+            const entry = values[role];
+            const pair = entry && typeof entry === "object" && !Array.isArray(entry)
+              ? entry as Record<string, unknown>
+              : { model: entry };
+            return roleModelOption(role, value, settingsText(pair.model), settingsText(pair.name), value);
           }),
         };
       }
@@ -1408,34 +1439,40 @@ async function getModelConfig(workspace: string) {
     }
   }
 
+  // 和 CLI 读同一份配置目录：设了 CLAUDE_CONFIG_DIR 时，界面看到的角色映射才不会跟 CLI 不一致。
+  const configDirectory = claudeConfigDirectory();
   const paths = [
-    join(homedir(), ".claude", "settings.json"),
-    join(homedir(), ".claude", "settings.local.json"),
+    join(configDirectory, "settings.json"),
+    join(configDirectory, "settings.local.json"),
     join(workspace, ".claude", "settings.json"),
     join(workspace, ".claude", "settings.local.json"),
   ];
-  const roleModels = new Map<string, string>();
+  const roleModels = new Map<string, { model?: string; name?: string }>();
   let defaultModel: string | undefined;
 
   for (const path of paths) {
     const settings = await readClaudeSettings(path);
     if (!settings) continue;
     if (!settings.env || typeof settings.env !== "object") continue;
-    if (typeof settings.env.ANTHROPIC_MODEL === "string" && settings.env.ANTHROPIC_MODEL) {
-      defaultModel = settings.env.ANTHROPIC_MODEL;
-    }
+    const defaultModelValue = settingsText(settings.env.ANTHROPIC_MODEL);
+    if (defaultModelValue) defaultModel = defaultModelValue;
     for (const { role, envKey } of roles) {
-      const namedValue = settings.env[`${envKey}_NAME`];
-      const modelValue = settings.env[envKey];
-      if (typeof namedValue === "string" && namedValue) roleModels.set(role, namedValue);
-      else if (typeof modelValue === "string" && modelValue) roleModels.set(role, modelValue);
+      const modelValue = settingsText(settings.env[envKey]);
+      const namedValue = settingsText(settings.env[`${envKey}_NAME`]);
+      if (!modelValue && !namedValue) continue;
+      // 多个 settings 文件逐层叠加，每个 key 各自以最后一层为准，而不是一个文件整体替换另一个。
+      const previous = roleModels.get(role);
+      roleModels.set(role, {
+        model: modelValue ?? previous?.model,
+        name: namedValue ?? previous?.name,
+      });
     }
   }
 
   return {
     options: roles.map(({ role, value }) => {
-      const actualModel = roleModels.get(role) ?? defaultModel ?? value;
-      return { role, value, actualModel, contextWindow: contextWindowForModel(actualModel) };
+      const mapping = roleModels.get(role);
+      return roleModelOption(role, value, mapping?.model ?? defaultModel, mapping?.name, defaultModel ?? value);
     }),
   };
 }
