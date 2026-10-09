@@ -791,7 +791,9 @@ function createConversation(): Conversation {
     updatedAt: now,
     messages: [],
     slashCommands: [],
-    permissionMode: "acceptEdits",
+    // 新对话默认完全访问权限：这是跑在用户自己机器上的本地桌面工具，每条命令都确认反而拖慢日常使用；
+    // 需要收紧时用户可以在输入框随时切回其他模式。
+    permissionMode: "bypassPermissions",
   };
 }
 

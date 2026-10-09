@@ -1379,6 +1379,10 @@ try {
   await page.locator('.project-action[title="新建对话"]').click();
   await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 4);
   if (await page.locator(".conversation-intro").count() !== 1) throw new Error("new conversation did not open independently");
+  // 回归：新建对话必须默认使用完全访问权限，用户不必先改模式就能连续执行命令。
+  if (!(await page.locator(".permission-select .composer-select-value").textContent())?.includes("完全访问权限")) {
+    throw new Error("new conversation did not default to full access permission mode");
+  }
 
   await page.locator(".composer textarea").fill("后台提醒测试 第二个对话");
   await page.locator(".composer textarea").press("Enter");
