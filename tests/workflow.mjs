@@ -1760,6 +1760,68 @@ try {
   await page.screenshot({ path: resolve(artifacts, "workflow-guided-handoff.png") });
   await page.waitForFunction(() => document.querySelectorAll(".send-button.stop").length === 0, undefined, { timeout: 25_000 });
 
+  // 回归：排队/引导进去的轮次里弹出的提问和授权框，过去点「提交回答」「取消」「允许」都会得到
+  // 「Claude CLI 没有接受…」：事件带的是轮次 run id，主进程只认进程 run id，回复永远找不到进程；
+  // 对话框还会一直挂着（CLI 活着在等答案），用户除了重启没有别的出路。这里把回答、取消、授权
+  // 三种控件都在追加轮次里走一遍。「计划交互问题测试」分支要求进程以计划模式、高思考强度启动，
+  // 先把两者设好，跑完再还原。
+  await page.locator(".permission-select .composer-select-trigger").click();
+  const permissionModeBeforeAppendedQuestion = (await page.locator('.permission-select .composer-select-option[aria-selected="true"]').getAttribute("data-value")) ?? "acceptEdits";
+  await page.locator('.permission-select .composer-select-option[data-value="plan"]').click();
+  await page.locator(".effort-select .composer-select-trigger").click();
+  const effortBeforeAppendedQuestion = (await page.locator('.effort-select .composer-select-option[aria-selected="true"]').getAttribute("data-value")) ?? "auto";
+  await page.locator('.effort-select .composer-select-option[data-value="high"]').click();
+  const guideIntoAppendedTurn = async (guidedPrompt) => {
+    await page.locator(".composer textarea").fill("计划交互引导测试");
+    await page.locator(".composer textarea").press("Enter");
+    await page.waitForSelector('.message.assistant[data-status="running"]');
+    await page.locator(".composer textarea").fill(guidedPrompt);
+    await page.locator(".composer textarea").press("Enter");
+    const queuedGuidedPrompt = page.locator(".prompt-queue-item", { hasText: guidedPrompt });
+    await queuedGuidedPrompt.waitFor();
+    await queuedGuidedPrompt.locator(".guide-prompt").click();
+    await page.waitForFunction(() => !document.querySelector(".prompt-queue-item"));
+  };
+  const finishAppendedTurn = async (expectedText, failure) => {
+    await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done", undefined, { timeout: 15_000 });
+    if (!(await page.locator(".message.assistant").last().textContent())?.includes(expectedText)) throw new Error(failure);
+    await page.waitForFunction(() => document.querySelectorAll(".send-button.stop").length === 0, undefined, { timeout: 25_000 });
+  };
+
+  // 1. 追加轮次里回答提问：答案必须真的送到 CLI（假 CLI 收到答案后才会回显「你选择了」）。
+  await guideIntoAppendedTurn("计划交互问题测试");
+  await page.waitForSelector(".user-question-dialog", { timeout: 15_000 });
+  if (!(await page.locator(".user-question-dialog").textContent())?.includes("最终交付几份文稿？")) {
+    throw new Error("appended turn did not show the interactive question dialog");
+  }
+  await page.screenshot({ path: resolve(artifacts, "workflow-appended-question.png") });
+  await page.locator(".user-question-option", { hasText: "按章节拆分" }).click();
+  await page.locator(".user-question-dialog .permission-button.primary").click();
+  await page.waitForSelector(".user-question-dialog", { state: "detached", timeout: 10_000 });
+  await finishAppendedTurn("你选择了：按章节拆分", "answer to a question raised in an appended turn did not reach Claude CLI");
+
+  // 2. 追加轮次里取消提问：取消也是一条真实的控制响应，CLI 收到后按「跳过」继续往下跑。
+  await guideIntoAppendedTurn("计划交互问题测试");
+  await page.waitForSelector(".user-question-dialog", { timeout: 15_000 });
+  await page.locator(".user-question-dialog .permission-button.secondary").click();
+  await page.waitForSelector(".user-question-dialog", { state: "detached", timeout: 10_000 });
+  await finishAppendedTurn("问题被跳过了", "cancelling a question raised in an appended turn did not reach Claude CLI");
+  // 3. 追加轮次里授权：直连权限框走同一条回复通道，同样必须按进程 run id 送达。
+  await guideIntoAppendedTurn("直连权限测试");
+  await page.waitForSelector(".permission-dialog", { timeout: 15_000 });
+  if (!(await page.locator(".permission-dialog").textContent())?.includes("PowerShell")) {
+    throw new Error("appended turn did not show the direct permission dialog");
+  }
+  await page.locator(".permission-allow-conversation").click();
+  await page.waitForSelector(".permission-dialog", { state: "detached", timeout: 10_000 });
+  await finishAppendedTurn("两条命令都执行完了", "permission granted in an appended turn did not reach Claude CLI");
+
+  // 还原模式和思考强度，后面的用例按原来的状态跑。
+  await page.locator(".permission-select .composer-select-trigger").click();
+  await page.locator(`.permission-select .composer-select-option[data-value="${permissionModeBeforeAppendedQuestion}"]`).click();
+  await page.locator(".effort-select .composer-select-trigger").click();
+  await page.locator(`.effort-select .composer-select-option[data-value="${effortBeforeAppendedQuestion}"]`).click();
+
   // 回归：Claude 还在输出时重命名对话，过去会静默失败——界面和 session 文件都不变。现在界面立刻改名，
   // 文件要等进程退出才补写，避免插一行把 CLI 正在写的那条记录切断。
   const activeConversationTitle = await page.locator(".task-heading h2").textContent();

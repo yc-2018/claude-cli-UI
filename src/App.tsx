@@ -1562,6 +1562,11 @@ export default function App() {
   useEffect(() => window.claudeDesk.onEvent((event: ClaudeEvent) => {
     const meta = runMeta.current.get(event.runId);
     if (!meta) {
+      // 没有 meta 的退出/错误也要清掉挂在这个 run 上的提问和授权框，否则它们会永远留在界面上。
+      if (event.type === "exit" || event.type === "error") {
+        setQuestionQueue((current) => current.filter((item) => item.runId !== event.runId));
+        setPermissionQueue((current) => current.filter((item) => item.runId !== event.runId));
+      }
       if (event.type === "exit") {
         for (const [conversationId, processRunId] of processRunIds.current) {
           if (processRunId !== event.runId) continue;
@@ -2487,6 +2492,10 @@ export default function App() {
         if (next[conversationId] === processRunId) delete next[conversationId];
         return next;
       });
+      // 进程没了，直接绑在它身上的提问和授权框永远等不到回答，必须收掉；不绑进程的授权框
+      // （等用户授权后另起一轮）要保留，那是进程结束后仍需要用户处理的正常状态。
+      setQuestionQueue((current) => current.filter((item) => item.conversationId !== conversationId));
+      setPermissionQueue((current) => current.filter((item) => !(item.direct && item.conversationId === conversationId)));
       for (const [turnRunId, meta] of metas) {
         runMeta.current.delete(turnRunId);
         if (meta.completed) continue;
@@ -2584,6 +2593,9 @@ export default function App() {
     await startPrompt(activeConversation.id, content, attachments);
   };
 
+  // 提问/授权事件是按轮次 run id 发出的，回复必须落到进程 run id 上，否则主进程找不到对应进程。
+  const processRunIdFor = (turnRunId: string) => runMeta.current.get(turnRunId)?.processRunId ?? turnRunId;
+
   const resolvePermission = async (decision: "deny" | "once" | "conversation") => {
     if (!pendingPermission) return;
     if (!pendingPermission.direct && [...runMeta.current.values()].some((meta) => meta.conversationId === pendingPermission.conversationId && !meta.completed)) return;
@@ -2610,9 +2622,9 @@ export default function App() {
         destination: "session",
       }));
       const response = decision === "deny"
-        ? { runId: pendingPermission.runId, requestId: pendingPermission.requestId, behavior: "deny" as const, message: `用户拒绝使用 ${names.join("、")}` }
+        ? { runId: processRunIdFor(pendingPermission.runId), requestId: pendingPermission.requestId, behavior: "deny" as const, message: `用户拒绝使用 ${names.join("、")}` }
         : {
-          runId: pendingPermission.runId,
+          runId: processRunIdFor(pendingPermission.runId),
           requestId: pendingPermission.requestId,
           behavior: "allow" as const,
           updatedInput: pendingPermission.input,
@@ -2724,7 +2736,7 @@ export default function App() {
     setQuestionSubmitting(true);
     try {
       const result = await window.claudeDesk.respondControl({
-        runId: pendingQuestion.runId,
+        runId: processRunIdFor(pendingQuestion.runId),
         requestId: pendingQuestion.requestId,
         behavior: "allow",
         updatedInput: { ...pendingQuestion.input, answers },
@@ -2743,7 +2755,7 @@ export default function App() {
     setQuestionSubmitting(true);
     try {
       const result = await window.claudeDesk.respondControl({
-        runId: pendingQuestion.runId,
+        runId: processRunIdFor(pendingQuestion.runId),
         requestId: pendingQuestion.requestId,
         behavior: "cancelled",
       });

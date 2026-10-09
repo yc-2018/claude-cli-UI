@@ -546,6 +546,21 @@ const processPrompt = (input) => {
     return;
   }
 
+  if (prompt.includes("计划交互引导测试")) {
+    // 第一轮故意拖慢：让后面引导进来的提示先排在追加轮次里，等这一轮的 result 收尾、追加轮次
+    // 接手之后再处理它。这样它弹出的提问/授权事件带的就是轮次 run id，复刻排队轮次里弹框的真实顺序。
+    slowTaskActive = true;
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    setTimeout(() => {
+      const response = "引导准备阶段完成。";
+      send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: response }] }, session_id: sessionId });
+      send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
+      slowTaskActive = false;
+      for (const deferredInput of deferredInputs.splice(0)) processPrompt(deferredInput);
+    }, 2_500);
+    return;
+  }
+
   if (prompt.includes("计划交互问题测试")) {
     const permissionModeIndex = args.indexOf("--permission-mode");
     if (permissionModeIndex < 0 || args[permissionModeIndex + 1] !== "plan") {

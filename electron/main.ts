@@ -2231,10 +2231,20 @@ ipcMain.handle("claude:append", async (_event, value: unknown) => {
   return { appended: true };
 });
 
+/** 控制响应可能带着轮次 run id 回来（提问和授权事件按轮次发出），先按进程 id 找，再按轮次归属找。 */
+function resolveRunForControl(runId: string) {
+  const direct = activeRuns.get(runId);
+  if (direct) return direct;
+  for (const run of activeRuns.values()) {
+    if (run.currentTurnRunId === runId || run.unfinishedTurnRunIds.has(runId) || run.pendingTurnRunIds.includes(runId)) return run;
+  }
+  return undefined;
+}
+
 ipcMain.handle("claude:respond-control", async (_event, value: unknown) => {
   if (!isValidControlResponseRequest(value)) throw new Error("无效的控制响应");
   const request = value;
-  const activeRun = activeRuns.get(request.runId);
+  const activeRun = resolveRunForControl(request.runId);
   if (!activeRun || !activeRun.pendingControlRequestIds.has(request.requestId)) return { responded: false };
   const response: Record<string, unknown> = { behavior: request.behavior };
   if (request.updatedInput) response.updatedInput = request.updatedInput;
