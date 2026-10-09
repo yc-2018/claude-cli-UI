@@ -59,6 +59,8 @@ interface UpdateManagerOptions {
   getWindow(): BrowserWindow | null;
   hasActiveRuns(): boolean;
   prepareToQuit(): void;
+  /** 开始菜单快捷方式指向的固定副本。回收旧版时绝不能碰它，否则入口会在启动瞬间失效。 */
+  getLauncherPath(): string | null;
 }
 
 const GITHUB_OWNER = "yc-2018";
@@ -686,7 +688,12 @@ export class UpdateManager {
       normalizePathForComparison(marker.newPath) === normalizePathForComparison(currentPath) &&
       normalizePathForComparison(marker.oldPath) !== normalizePathForComparison(currentPath)
     );
-    if (!valid) {
+    // 从固定副本启动再更新时，oldPath 就是副本本身。副本由主进程在启动时覆盖刷新，
+    // 这里要是把它移进回收站，快捷方式就会指向一个不存在的文件。
+    const launcherPath = this.options.getLauncherPath();
+    const isLauncher = valid && launcherPath !== null
+      && normalizePathForComparison(marker.oldPath) === normalizePathForComparison(launcherPath);
+    if (!valid || isLauncher) {
       await unlink(markerPath).catch(() => undefined);
       return;
     }

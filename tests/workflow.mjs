@@ -2,7 +2,7 @@ import { _electron as electron } from "playwright";
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { basename, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const packageVersion = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")).version;
@@ -22,13 +22,17 @@ const terminalLog = resolve(profile, "terminal-launches.jsonl");
 const packagedExecutable = process.env.CLAUDE_DESK_TEST_EXECUTABLE;
 await mkdir(profile, { recursive: true });
 await mkdir(cliSessions, { recursive: true });
-// 便携版每升一级文件名就换一次，旧快捷方式会指向一个已经不在的文件。预先放一个坏掉的 .lnk，
-// 验证启动时会把它整个换成指向当前这份便携版。
+// 便携版每升一级文件名就换一次，快捷方式若指向这份构建产物，产物一被清理入口就失效。
+// 预先放一个坏掉的 .lnk，再在入口该指向的固定副本位置留下上一版的旧副本，两样都该被换成当前这一版。
 const startMenuDirectory = resolve(profile, "start-menu");
 const startMenuShortcut = resolve(startMenuDirectory, "claude-cli-UI.lnk");
+const launcherExecutable = resolve(profile, "launcher", "claude-cli-UI.exe");
 const staleShortcutMarker = "上一版留下的过期快捷方式";
+const staleLauncherMarker = "上一版留下的旧副本";
 await mkdir(startMenuDirectory, { recursive: true });
 await writeFile(startMenuShortcut, staleShortcutMarker, "utf8");
+await mkdir(dirname(launcherExecutable), { recursive: true });
+await writeFile(launcherExecutable, staleLauncherMarker, "utf8");
 const updateVersion = "9.9.9";
 const updateExecutableName = `claude-cli-UI Portable ${updateVersion}.exe`;
 const updateAssetName = `claude-cli-UI-Portable-${updateVersion}.exe`;
@@ -300,15 +304,27 @@ try {
     throw new Error(`进程退出事件应仅在 result 后出现一次：${JSON.stringify(lifecycleEvents)}`);
   }
 
-  // 便携版没有安装步骤，开始菜单入口得自己维护：过期的 .lnk 必须被换成指向当前这份便携版。
+  // 便携版没有安装步骤，开始菜单入口得自己维护。入口只能指向应用自留的固定副本：改成指向
+  // 带版本号的构建产物，产物被清理或改名之后，入口就指向一个不存在的文件，而且再也修不回来。
   const shortcutBytes = await readFile(startMenuShortcut);
   if (shortcutBytes.toString("utf8").includes(staleShortcutMarker)) {
     throw new Error("stale start menu shortcut was left untouched");
   }
   // .lnk 里的路径按 UTF-16LE 存，部分字段退化成单字节，两种解码都看一遍最稳。
   const shortcutText = `${shortcutBytes.toString("utf16le")}${shortcutBytes.toString("latin1")}`;
-  if (!shortcutText.includes(`claude-cli-UI Portable ${packageVersion}.exe`)) {
-    throw new Error(`start menu shortcut does not point at the current portable build: ${shortcutBytes.length} bytes`);
+  if (!shortcutText.includes(launcherExecutable)) {
+    throw new Error(`start menu shortcut does not point at the fixed launcher copy: ${shortcutBytes.length} bytes`);
+  }
+  if (shortcutText.includes(`claude-cli-UI Portable ${packageVersion}.exe`)) {
+    throw new Error("start menu shortcut still points at the versioned portable build");
+  }
+  // 旧副本必须被覆盖成当前这一版，否则入口打开的还是上一版程序。
+  const launcherBytes = await readFile(launcherExecutable);
+  if (launcherBytes.toString("utf8").includes(staleLauncherMarker)) {
+    throw new Error("stale launcher copy was left untouched");
+  }
+  if (!launcherBytes.equals(await readFile(currentPortablePath))) {
+    throw new Error(`launcher copy does not match the current portable build: ${launcherBytes.length} bytes`);
   }
 
   await page.locator(".settings-trigger").click();
@@ -2491,6 +2507,7 @@ try {
     reorderingAndPinning: true,
     portableAssetMapping: true,
     legacyGithubAssetFallback: true,
+    startMenuLauncherCopy: true,
   }, null, 2));
   if (errors.length > 0) process.exitCode = 1;
 } finally {

@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notificati
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { appendFile, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -192,6 +192,7 @@ const updateManager = new UpdateManager({
   getWindow: () => mainWindow,
   hasActiveRuns: () => activeRuns.size > 0,
   prepareToQuit: () => { isQuitting = true; },
+  getLauncherPath: () => (process.env.PORTABLE_EXECUTABLE_FILE ? launcherExecutablePath() : null),
 });
 const claudeWatcher = new ClaudeWatcher({
   getWindow: () => mainWindow,
@@ -2332,13 +2333,74 @@ function startMenuShortcutPath() {
   return join(directory, "claude-cli-UI.lnk");
 }
 
-// 便携版没有安装步骤，开始菜单里不会有入口；而且它的文件名带版本号，每升一次级路径就变一次，
-// 上一版留下的快捷方式会指向一个已经不在了的文件。每次启动对一下指向，不一致就就地改写。
+/**
+ * 开始菜单入口指向的固定副本。便携版文件名带版本号，又常常是从构建产物目录里起起来的，
+ * 直接把它写进快捷方式，升级、清理产物、搬动目录都会让入口指向一个不存在的文件；而入口
+ * 一旦坏掉，唯一能修好它的途径正是「先把应用跑起来」——恰好是入口本身该干的事。所以入口
+ * 固定指向这份副本：位置由 userData 决定，不随版本变化，也不会被任何一条流程删除。
+ */
+function launcherExecutablePath() {
+  return join(app.getPath("userData"), "launcher", "claude-cli-UI.exe");
+}
+
+/** 便携版路径由 stub 在启动时注入，只有真的在跑便携版才有值。 */
+function portableBuildPath() {
+  const value = process.env.PORTABLE_EXECUTABLE_FILE;
+  return value && isAbsolute(value) && existsSync(value) ? value : null;
+}
+
+function sameExecutablePath(left: string, right: string) {
+  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+/** 内容一样就不必再复制 90MB；文件比源新说明已经是当前这一版。 */
+async function launcherCopyIsStale(launcher: string, source: string) {
+  const [current, incoming] = await Promise.all([stat(launcher).catch(() => null), stat(source).catch(() => null)]);
+  if (!incoming) return false;
+  return !current || current.size !== incoming.size || incoming.mtimeMs > current.mtimeMs;
+}
+
+/**
+ * 把副本对齐到当前在跑的这一版：先写临时文件再改名覆盖，中途失败只留下旧副本。
+ * 只覆盖、不删除，所以快捷方式指向的文件在任何时刻都存在。
+ */
+async function refreshLauncherCopy(source: string) {
+  const launcher = launcherExecutablePath();
+  if (sameExecutablePath(launcher, source) || !(await launcherCopyIsStale(launcher, source))) return;
+  await mkdir(dirname(launcher), { recursive: true });
+  const temporaryPath = `${launcher}.${process.pid}.tmp`;
+  try {
+    await copyFile(source, temporaryPath);
+    await rename(temporaryPath, launcher);
+  } catch (error) {
+    await unlink(temporaryPath).catch(() => undefined);
+    throw error;
+  }
+}
+
+/**
+ * 从副本启动时，更新包会下在副本旁边，跑完的那一份不会自己消失。留下正在跑的那份和最新的
+ * 一份（可能正是刚下好、还没重启安装的包），其余回收，避免每升一级积一份 90MB 的文件。
+ */
+async function recycleLauncherDirectoryBuilds(currentExecutable: string) {
+  const directory = dirname(launcherExecutablePath());
+  const names = await readdir(directory).catch(() => []);
+  const candidates: { path: string; modifiedAt: number }[] = [];
+  for (const name of names) {
+    if (!/^claude-cli-UI Portable .+\.exe$/i.test(name)) continue;
+    const path = join(directory, name);
+    if (sameExecutablePath(path, currentExecutable)) continue;
+    const info = await stat(path).catch(() => null);
+    if (info?.isFile()) candidates.push({ path, modifiedAt: info.mtimeMs });
+  }
+  candidates.sort((left, right) => right.modifiedAt - left.modifiedAt);
+  for (const candidate of candidates.slice(1)) await shell.trashItem(candidate.path).catch(() => undefined);
+}
+
 // 安装版不碰：那边的快捷方式归 NSIS 管，插手只会变成两个条目互相覆盖。
-function syncStartMenuShortcut() {
-  if (process.platform !== "win32") return;
-  const target = process.env.PORTABLE_EXECUTABLE_FILE;
-  if (!target || !isAbsolute(target) || !existsSync(target)) return;
+function writeStartMenuShortcut() {
+  const launcher = launcherExecutablePath();
+  if (!existsSync(launcher)) return;
   const shortcut = startMenuShortcutPath();
   try {
     mkdirSync(dirname(shortcut), { recursive: true });
@@ -2346,20 +2408,37 @@ function syncStartMenuShortcut() {
       try {
         // Windows 路径不区分大小写，按原样比对会把同一个文件误判成换了位置。
         const current = shell.readShortcutLink(shortcut);
-        if (current.target.toLowerCase() === target.toLowerCase()) return;
+        if (sameExecutablePath(current.target, launcher)) return;
       } catch {
         // 读不出来说明这个 .lnk 已经坏了，照样往下重建。
       }
     }
     // 一律用 create：它会直接覆盖，不像 replace/update 那样要求先把旧文件解析出来。
     shell.writeShortcutLink(shortcut, "create", {
-      target,
-      cwd: dirname(target),
+      target: launcher,
+      cwd: dirname(launcher),
       description: "claude-cli-UI",
     });
   } catch {
     // 开始菜单目录被组策略锁住之类的情况，不该挡着应用启动。
   }
+}
+
+async function syncPortableStartMenuEntry() {
+  if (process.platform !== "win32") return;
+  const source = portableBuildPath();
+  if (!source) return;
+  try {
+    await refreshLauncherCopy(source);
+  } catch {
+    // 刷新失败就继续用旧副本：入口指向的仍是一份还在的程序，只是版本旧一点。
+  }
+  try {
+    await recycleLauncherDirectoryBuilds(source);
+  } catch {
+    // 回收旧包失败只影响磁盘占用，不该挡着启动。
+  }
+  writeStartMenuShortcut();
 }
 
 
@@ -2374,7 +2453,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   createWindow();
   updateManager.initialize();
   claudeWatcher.initialize();
-  syncStartMenuShortcut();
+  void syncPortableStartMenuEntry();
   app.on("second-instance", () => showMainWindow());
   app.on("activate", () => {
     showMainWindow();
