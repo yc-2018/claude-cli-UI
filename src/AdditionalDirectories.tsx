@@ -10,6 +10,8 @@ export interface AdditionalDirectoriesHandle {
 
 interface Props {
   directories: string[];
+  /** 当前项目目录：第一次打开选择框时从这里开始，而不是系统默认的「下载」。 */
+  workspace?: string;
   disabled?: boolean;
   onChange(directories: string[]): void;
 }
@@ -25,6 +27,7 @@ const ABSOLUTE_PATH_PATTERN = /^(?:[A-Za-z]:[\\/]|\\\\|\/)/;
  */
 const AdditionalDirectories = forwardRef<AdditionalDirectoriesHandle, Props>(function AdditionalDirectories({
   directories,
+  workspace,
   disabled = false,
   onChange,
 }, forwardedRef) {
@@ -69,7 +72,7 @@ const AdditionalDirectories = forwardRef<AdditionalDirectoriesHandle, Props>(fun
     setPicking(true);
     setError("");
     try {
-      const picked = await window.claudeDesk.selectAddDirectory();
+      const picked = await window.claudeDesk.selectAddDirectory(workspace);
       if (typeof picked === "string" && picked) addDirectory(picked);
     } catch (pickError) {
       setError(pickError instanceof Error ? pickError.message : "选择目录失败");

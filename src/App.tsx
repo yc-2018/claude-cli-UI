@@ -3072,6 +3072,7 @@ export default function App() {
             <Composer
               key={`composer-${activeConversation.id}`}
               conversation={activeConversation}
+              workspace={activeProject.workspace}
               draft={composerDrafts[activeConversation.id] ?? EMPTY_COMPOSER_DRAFT}
               modelConfig={modelConfig}
               running={activeProcessRunning}

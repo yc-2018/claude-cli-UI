@@ -696,6 +696,47 @@ function saveAppSelection(value: unknown) {
   renameSync(temporaryPath, appSelectionPath());
 }
 
+/** 目录选择框上次停留的位置：不传 defaultPath 时 Windows 会落在系统默认的「下载」，每次都得重新导航。 */
+function dialogStatePath() {
+  return join(app.getPath("userData"), "dialog-state.json");
+}
+
+let lastPickedDirectory: string | undefined;
+let dialogStateLoaded: Promise<void> | undefined;
+
+function ensureDialogState() {
+  dialogStateLoaded ??= readFile(dialogStatePath(), "utf8").then((raw) => {
+    const parsed = JSON.parse(raw) as { lastPickedDirectory?: unknown } | null;
+    const directory = parsed?.lastPickedDirectory;
+    if (typeof directory === "string" && isAbsolute(directory) && existsSync(directory)) lastPickedDirectory = directory;
+  }).catch(() => undefined);
+  return dialogStateLoaded;
+}
+
+function rememberPickedDirectory(directory: string) {
+  lastPickedDirectory = directory;
+  try {
+    const target = app.getPath("userData");
+    const temporaryPath = join(target, `dialog-state-${process.pid}.tmp`);
+    mkdirSync(target, { recursive: true });
+    writeFileSync(temporaryPath, JSON.stringify({ lastPickedDirectory: directory }), "utf8");
+    renameSync(temporaryPath, dialogStatePath());
+  } catch {
+    // 记不住就下次再从默认位置开始，不影响这次选目录。
+  }
+}
+
+/** 优先回到上次选过的目录，其次是调用方给的提示（例如当前项目目录），最后才是用户主目录。 */
+async function directoryDialogDefaultPath(hint?: string) {
+  await ensureDialogState();
+  const usable = (candidate: string | undefined) => Boolean(candidate && isAbsolute(candidate) && existsSync(candidate));
+  const chosen = [lastPickedDirectory, hint].find(usable) ?? homedir();
+  if (process.env.CLAUDE_DESK_TEST_DIALOG_LOG) {
+    await appendFile(process.env.CLAUDE_DESK_TEST_DIALOG_LOG, `${JSON.stringify({ defaultPath: chosen, hint: hint ?? null })}\n`, "utf8").catch(() => undefined);
+  }
+  return chosen;
+}
+
 async function discoverClaudeWorkspaces() {
   if (process.env.CLAUDE_DESK_DISABLE_PROJECT_DISCOVERY === "1" || process.env.CLAUDE_DESK_TEST_WORKSPACE) return [];
   const root = join(claudeConfigDirectory(), "projects");
@@ -1497,22 +1538,30 @@ function emit(window: BrowserWindow, payload: Record<string, unknown>) {
 }
 
 ipcMain.handle("workspace:select", async () => {
+  const defaultPath = await directoryDialogDefaultPath();
   if (process.env.CLAUDE_DESK_TEST_WORKSPACE) return process.env.CLAUDE_DESK_TEST_WORKSPACE;
   const result = await dialog.showOpenDialog({
     title: "选择 Claude 的工作目录",
+    defaultPath,
     properties: ["openDirectory", "createDirectory"],
   });
-  return result.canceled ? null : result.filePaths[0];
+  if (result.canceled || !result.filePaths[0]) return null;
+  rememberPickedDirectory(result.filePaths[0]);
+  return result.filePaths[0];
 });
 
 /** 附加目录选择：和工作目录选择共用测试桩，自动化测试不必真的弹系统对话框。 */
-ipcMain.handle("workspace:select-add-dir", async () => {
+ipcMain.handle("workspace:select-add-dir", async (_event, hint: unknown) => {
+  const defaultPath = await directoryDialogDefaultPath(typeof hint === "string" && hint.length <= 1_000 ? hint : undefined);
   if (process.env.CLAUDE_DESK_TEST_WORKSPACE) return process.env.CLAUDE_DESK_TEST_WORKSPACE;
   const result = await dialog.showOpenDialog({
     title: "选择要加入的目录",
+    defaultPath,
     properties: ["openDirectory"],
   });
-  return result.canceled ? null : result.filePaths[0];
+  if (result.canceled || !result.filePaths[0]) return null;
+  rememberPickedDirectory(result.filePaths[0]);
+  return result.filePaths[0];
 });
 
 /** 临时对话不绑定用户选的目录，统一跑在 userData 下的 scratch 目录里，避免把 CLI 放到整个用户主目录上。 */

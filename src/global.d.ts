@@ -6,7 +6,7 @@ declare global {
   interface Window {
     claudeDesk: {
       selectWorkspace(): Promise<string | null>;
-      selectAddDirectory(): Promise<string | null>;
+      selectAddDirectory(hint?: string): Promise<string | null>;
       getScratchWorkspace(): Promise<string>;
       openWorkspace(workspace: string): Promise<{ opened: boolean; error?: string }>;
       resumeSessionInTerminal(request: ResumeSessionInTerminalRequest): Promise<ResumeSessionInTerminalResult>;

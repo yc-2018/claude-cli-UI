@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 
 contextBridge.exposeInMainWorld("claudeDesk", {
   selectWorkspace: () => ipcRenderer.invoke("workspace:select"),
-  selectAddDirectory: () => ipcRenderer.invoke("workspace:select-add-dir"),
+  selectAddDirectory: (hint?: string) => ipcRenderer.invoke("workspace:select-add-dir", hint),
   getScratchWorkspace: () => ipcRenderer.invoke("workspace:scratch"),
   openWorkspace: (workspace: string) => ipcRenderer.invoke("workspace:open", workspace),
   resumeSessionInTerminal: (request: unknown) => ipcRenderer.invoke("terminal:resume-session", request),

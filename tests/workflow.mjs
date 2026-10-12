@@ -20,6 +20,7 @@ const fakeCli = resolve(root, "tests", "fixtures", "fake-claude.mjs");
 const processExitGate = resolve(profile, "release-process-exit");
 const terminalLog = resolve(profile, "terminal-launches.jsonl");
 const addDirLog = resolve(profile, "add-dir-launches.jsonl");
+const dialogLog = resolve(profile, "directory-dialogs.jsonl");
 const packagedExecutable = process.env.CLAUDE_DESK_TEST_EXECUTABLE;
 await mkdir(profile, { recursive: true });
 await mkdir(cliSessions, { recursive: true });
@@ -192,6 +193,7 @@ const launch = () => electron.launch({
     CLAUDE_DESK_TEST_EXIT_GATE: processExitGate,
     CLAUDE_DESK_TEST_TERMINAL_LOG: terminalLog,
     CLAUDE_DESK_TEST_ADD_DIR_LOG: addDirLog,
+    CLAUDE_DESK_TEST_DIALOG_LOG: dialogLog,
     CLAUDE_DESK_DISABLE_NOTIFICATIONS: "1",
     CLAUDE_DESK_TEST_OFFSCREEN: "1",
     CLAUDE_DESK_DISABLE_AUTO_UPDATE_CHECK: "1",
@@ -1160,6 +1162,15 @@ try {
     }
   }, root);
   if (!invalidAddDir.includes("无效的运行参数")) throw new Error(`relative additional directory was not rejected: ${invalidAddDir}`);
+  // 目录选择框的起始位置：附加目录首次打开要落在当前项目目录，任何一次都不能退回系统默认的「下载」。
+  const directoryDialogs = (await readFile(dialogLog, "utf8")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  const addDirDialog = directoryDialogs.find((entry) => entry.hint === root);
+  if (!addDirDialog || addDirDialog.defaultPath !== root) {
+    throw new Error(`add-dir picker did not start from the project workspace: ${JSON.stringify(directoryDialogs)}`);
+  }
+  if (directoryDialogs.some((entry) => !/^[A-Za-z]:[\\/]/.test(entry.defaultPath) || /[\\/]Downloads$/i.test(entry.defaultPath))) {
+    throw new Error(`directory picker fell back to the system default folder: ${JSON.stringify(directoryDialogs)}`);
+  }
 
   await page.evaluate(() => {
     const container = document.querySelector(".conversation-scroll");

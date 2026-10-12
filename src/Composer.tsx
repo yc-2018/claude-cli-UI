@@ -28,6 +28,8 @@ const thinkingEffortOptions: { value: string; label: string; detail?: string }[]
 
 interface Props {
   conversation: Conversation;
+  /** 所属项目的工作目录，附加目录选择框以它作为首次打开的起点。 */
+  workspace: string;
   modelConfig: ModelConfig;
   running: boolean;
   queuedPrompts: QueuedPrompt[];
@@ -53,6 +55,7 @@ interface Props {
 
 export default function Composer({
   conversation,
+  workspace,
   modelConfig,
   running,
   queuedPrompts,
@@ -421,6 +424,7 @@ export default function Composer({
             <AdditionalDirectories
               ref={addDirectoriesRef}
               directories={conversation.additionalDirectories ?? []}
+              workspace={workspace}
               disabled={loadingHistory}
               onChange={onAdditionalDirectoriesChange}
             />
