@@ -227,6 +227,8 @@ export interface Conversation {
   contextUsage?: ContextUsage;
   contextCompactions?: ContextCompaction[];
   allowedTools?: string[];
+  /** 用户通过发送框的附加目录按钮加入的目录，每次启动 CLI 时转成 --add-dir 参数。 */
+  additionalDirectories?: string[];
   source?: "claude";
   historyLoaded?: boolean;
   permissionMode: PermissionMode;
@@ -293,6 +295,7 @@ export interface RunRequest {
   model?: string;
   thinkingEffort?: ThinkingEffort;
   allowedTools?: string[];
+  additionalDirectories?: string[];
   permissionMode: PermissionMode;
   attachments?: Attachment[];
 }

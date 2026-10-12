@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Brain, CircleStop, CornerDownRight, FileText, GripVertical, Paperclip, Pencil, Send, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
+import AdditionalDirectories, { type AdditionalDirectoriesHandle } from "./AdditionalDirectories";
 import AttachmentPreview, { attachmentUrl, openAttachmentFile } from "./AttachmentPreview";
 import ComposerSelect, { type ComposerSelectHandle } from "./ComposerSelect";
 import { LOCAL_SLASH_COMMANDS } from "./commands";
@@ -47,6 +48,7 @@ interface Props {
   onThinkingEffortChange(effort: ThinkingEffort | undefined): void;
   onLocalCommand(command: string): boolean;
   onPermissionChange(mode: PermissionMode): void;
+  onAdditionalDirectoriesChange(directories: string[]): void;
 }
 
 export default function Composer({
@@ -71,6 +73,7 @@ export default function Composer({
   onThinkingEffortChange,
   onLocalCommand,
   onPermissionChange,
+  onAdditionalDirectoriesChange,
 }: Props) {
   const [attachmentError, setAttachmentError] = useState("");
   const [stagingAttachments, setStagingAttachments] = useState(false);
@@ -81,6 +84,7 @@ export default function Composer({
   const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelSelectRef = useRef<ComposerSelectHandle>(null);
+  const addDirectoriesRef = useRef<AdditionalDirectoriesHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const prompt = draft.prompt;
   const attachments = draft.attachments;
@@ -192,6 +196,14 @@ export default function Composer({
     if (!running && attachments.length === 0 && value === "/model") {
       resetPrompt();
       openModelPicker();
+      return;
+    }
+    // /add-dir 是本地命令：打开管理弹层或直接加入路径，不把这条文本发给 Claude。
+    if (!running && attachments.length === 0 && (value === "/add-dir" || value.startsWith("/add-dir "))) {
+      resetPrompt();
+      const argument = value.slice("/add-dir".length).trim();
+      if (argument) addDirectoriesRef.current?.add(argument);
+      else addDirectoriesRef.current?.open();
       return;
     }
     if (!running && attachments.length === 0 && onLocalCommand(value)) {
@@ -405,6 +417,12 @@ export default function Composer({
               multiple
               tabIndex={-1}
               onChange={(event) => { void addFiles(Array.from(event.target.files ?? [])); }}
+            />
+            <AdditionalDirectories
+              ref={addDirectoriesRef}
+              directories={conversation.additionalDirectories ?? []}
+              disabled={loadingHistory}
+              onChange={onAdditionalDirectoriesChange}
             />
             <ComposerSelect
               ariaLabel="选择模型"

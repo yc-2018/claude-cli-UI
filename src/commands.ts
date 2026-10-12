@@ -35,6 +35,7 @@ const BUILTIN_DESCRIPTIONS: Record<string, string> = {
 
 export const LOCAL_SLASH_COMMANDS: SlashCommand[] = [
   { name: "/model", description: BUILTIN_DESCRIPTIONS["/model"] },
+  { name: "/add-dir", description: BUILTIN_DESCRIPTIONS["/add-dir"] },
   { name: "/new", description: BUILTIN_DESCRIPTIONS["/new"] },
   { name: "/project", description: BUILTIN_DESCRIPTIONS["/project"] },
   { name: "/clear", description: BUILTIN_DESCRIPTIONS["/clear"] },

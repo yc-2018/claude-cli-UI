@@ -33,6 +33,7 @@ interface RunRequest {
   model?: string;
   thinkingEffort?: "low" | "medium" | "high" | "xhigh" | "max";
   allowedTools?: string[];
+  additionalDirectories?: string[];
   permissionMode: PermissionMode;
   attachments?: Attachment[];
 }
@@ -514,6 +515,18 @@ function isValidRunRequest(value: unknown): value is RunRequest {
     request.allowedTools.length <= 100 &&
     request.allowedTools.every((tool) => typeof tool === "string" && /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(tool))
   );
+  // 附加目录会直接拼进 CLI 参数：只收绝对路径，并挡掉引号、换行等可能改写命令行的字符。
+  const hasValidAdditionalDirectories = request.additionalDirectories === undefined || (
+    Array.isArray(request.additionalDirectories) &&
+    request.additionalDirectories.length <= 20 &&
+    request.additionalDirectories.every((directory) =>
+      typeof directory === "string" &&
+      directory.length > 0 &&
+      directory.length <= 1_000 &&
+      isAbsolute(directory) &&
+      !/[\r\n"]/.test(directory)
+    )
+  );
   const hasValidAttachments = request.attachments === undefined || (
     Array.isArray(request.attachments) &&
     request.attachments.length <= 10 &&
@@ -536,6 +549,7 @@ function isValidRunRequest(value: unknown): value is RunRequest {
     hasValidModel &&
     hasValidThinkingEffort &&
     hasValidAllowedTools &&
+    hasValidAdditionalDirectories &&
     hasValidAttachments
   );
 }
@@ -1491,6 +1505,16 @@ ipcMain.handle("workspace:select", async () => {
   return result.canceled ? null : result.filePaths[0];
 });
 
+/** 附加目录选择：和工作目录选择共用测试桩，自动化测试不必真的弹系统对话框。 */
+ipcMain.handle("workspace:select-add-dir", async () => {
+  if (process.env.CLAUDE_DESK_TEST_WORKSPACE) return process.env.CLAUDE_DESK_TEST_WORKSPACE;
+  const result = await dialog.showOpenDialog({
+    title: "选择要加入的目录",
+    properties: ["openDirectory"],
+  });
+  return result.canceled ? null : result.filePaths[0];
+});
+
 /** 临时对话不绑定用户选的目录，统一跑在 userData 下的 scratch 目录里，避免把 CLI 放到整个用户主目录上。 */
 ipcMain.handle("workspace:scratch", async () => {
   const scratch = join(app.getPath("userData"), "scratch");
@@ -1977,6 +2001,14 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
   if (request.model) args.push("--model", request.model);
   if (request.thinkingEffort) args.push("--effort", request.thinkingEffort);
   if (request.allowedTools?.length) args.push("--allowedTools", [...new Set(request.allowedTools)].join(","));
+  // 附加目录可能已被删除或移动，逐个确认后再传给 CLI；一个失效的目录不该拖垮整轮对话。
+  for (const directory of request.additionalDirectories ?? []) {
+    try {
+      if (statSync(directory).isDirectory()) args.push("--add-dir", directory);
+    } catch {
+      // 目录已失效，跳过。
+    }
+  }
   await mkdir(attachmentsDirectory(), { recursive: true });
   args.push("--add-dir", attachmentsDirectory());
 

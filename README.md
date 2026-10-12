@@ -45,7 +45,7 @@ Portable 版启动时会在 `%APPDATA%\claude-cli-ui\launcher\` 下维护一份�
 
 模型下拉框动态读取全局及项目 `.claude/settings*.json` 中的模型配置，并分别显示 Sonnet、Opus、Fable 和 Haiku 角色及其实际映射名称。即使多个角色映射到同一个模型，它们也仍是独立选项。
 
-输入 `/` 会打开命令菜单。本地支持 `/model`、`/new`、`/project`、`/clear`、`/plan` 和 `/edit`；Claude CLI 初始化后返回的技能与命令也会加入补全列表。
+输入 `/` 会打开命令菜单。本地支持 `/model`、`/new`、`/project`、`/clear`、`/plan`、`/edit` 和 `/add-dir`；Claude CLI 初始化后返回的技能与命令也会加入补全列表。发送框左下角的文件夹按钮可以管理当前对话的附加目录（对应 CLI 的 `/add-dir`），列表里的目录会在每次运行 Claude 时作为 `--add-dir` 传入。
 
 ## 验证
 
@@ -53,7 +53,7 @@ Portable 版启动时会在 `%APPDATA%\claude-cli-ui\launcher\` 下维护一份�
 npm test
 ```
 
-验证包含类型检查、旧数据迁移、项目与多对话、动态第三方模型、斜杠命令、高频流输出、异常退出、主动停止、重启持久化和桌面布局截图。
+验证包含类型检查、旧数据迁移、项目与多对话、动态第三方模型、斜杠命令、附加目录、高频流输出、异常退出、主动停止、重启持久化和桌面布局截图。
 
 
 

@@ -79,6 +79,7 @@ await page.evaluate((workspace) => {
       gitBranch: "feature/auth-session-refresh",
       resolvedModel: "LongCat-2.0",
       permissionMode: "acceptEdits",
+      additionalDirectories: ["D:\\shared\\design-assets", "C:\\Users\\Public\\reference-data"],
       slashCommands: ["/story", "/compact"],
       contextUsage: { usedTokens: 42000, contextWindow: 200000, usedPercentage: 21, remainingPercentage: 79 },
       contextCompactions: [
@@ -362,6 +363,30 @@ if (permissionMenuLayout.left < 0 || permissionMenuLayout.top < 0 || permissionM
 }
 await page.screenshot({ path: resolve(artifacts, "permission-picker.png") });
 await page.keyboard.press("Escape");
+
+// 附加目录管理弹层：徽标计数、目录行、弹层整体都不能越出可视区域或被裁切。
+await page.locator(".add-dir-button").click();
+await page.waitForSelector(".add-dir-menu");
+const addDirMenuLayout = await page.locator(".add-dir-menu").evaluate((element) => element.getBoundingClientRect().toJSON());
+if (addDirMenuLayout.left < 0 || addDirMenuLayout.top < 0 || addDirMenuLayout.right > 1320 || addDirMenuLayout.bottom > 860) {
+  throw new Error(`add-dir menu escaped the viewport: ${JSON.stringify(addDirMenuLayout)}`);
+}
+if (await page.locator(".add-dir-count").textContent() !== "2") throw new Error("add-dir badge did not show the persisted directory count");
+const addDirRows = await page.locator(".add-dir-item").evaluateAll((items) => items.map((item) => ({
+  text: item.textContent ?? "",
+  clipped: item.scrollWidth > item.clientWidth + 0.5,
+})));
+if (
+  addDirRows.length !== 2 ||
+  addDirRows.some((row) => row.clipped) ||
+  !addDirRows.some((row) => row.text.includes("design-assets")) ||
+  !addDirRows.some((row) => row.text.includes("reference-data"))
+) {
+  throw new Error(`add-dir rows were clipped or missing: ${JSON.stringify(addDirRows)}`);
+}
+await page.screenshot({ path: resolve(artifacts, "add-dir-menu.png") });
+await page.keyboard.press("Escape");
+await page.waitForSelector(".add-dir-menu", { state: "detached" });
 
 const localDeleteRow = page.locator(".project-conversations .task-row", { hasText: "添加数据导出功能" });
 await localDeleteRow.hover();
@@ -720,6 +745,15 @@ if (compactModelOptionOverflow) throw new Error("compact model option overflowed
 await page.screenshot({ path: resolve(artifacts, "model-picker-compact.png") });
 await page.keyboard.press("Escape");
 
+await page.locator(".add-dir-button").click();
+const compactAddDirMenuLayout = await page.locator(".add-dir-menu").evaluate((element) => element.getBoundingClientRect().toJSON());
+if (compactAddDirMenuLayout.left < 0 || compactAddDirMenuLayout.top < 0 || compactAddDirMenuLayout.right > 900 || compactAddDirMenuLayout.bottom > 640) {
+  throw new Error(`compact add-dir menu escaped the viewport: ${JSON.stringify(compactAddDirMenuLayout)}`);
+}
+await page.screenshot({ path: resolve(artifacts, "add-dir-menu-compact.png") });
+await page.keyboard.press("Escape");
+await page.waitForSelector(".add-dir-menu", { state: "detached" });
+
 await localDeleteRow.hover();
 await localDeleteRow.locator(".task-delete").evaluate((button) => button.click());
 const compactDeleteDialogLayout = await page.locator(".delete-confirm-dialog").evaluate((element) => element.getBoundingClientRect().toJSON());
@@ -812,6 +846,26 @@ if (
   compactQueueLayout.composer.bottom > compactQueueLayout.viewport.height
 ) throw new Error(`compact prompt queue overflow: ${JSON.stringify(compactQueueLayout)}`);
 await page.screenshot({ path: resolve(artifacts, "prompt-queue-compact.png") });
+// 发送框工具栏：多了附加目录按钮之后，窄窗口下各控件只能收缩截断，绝不能溢出去压住右侧的停止 / 发送按钮。
+const compactToolbarLayout = await page.evaluate(() => ({
+  actions: document.querySelector(".composer-actions")?.getBoundingClientRect().toJSON(),
+  controls: [...document.querySelectorAll(".composer-options > *")]
+    .filter((element) => getComputedStyle(element).display !== "none")
+    .map((element) => element.getBoundingClientRect().toJSON()),
+}));
+if (!compactToolbarLayout.actions || compactToolbarLayout.controls.length !== 5) {
+  throw new Error(`compact composer toolbar did not render all five controls: ${JSON.stringify(compactToolbarLayout)}`);
+}
+for (let index = 0; index < compactToolbarLayout.controls.length; index += 1) {
+  const control = compactToolbarLayout.controls[index];
+  if (
+    control.width <= 0 ||
+    control.right > compactToolbarLayout.actions.left + 0.5 ||
+    (index > 0 && control.left < compactToolbarLayout.controls[index - 1].right - 0.5)
+  ) {
+    throw new Error(`compact composer toolbar controls overlap: ${JSON.stringify(compactToolbarLayout)}`);
+  }
+}
 await page.locator(".send-button.stop").click();
 
 // 最窄侧边栏仍应放得下「项目」文字、计数、新建和两个批量按钮。
@@ -829,7 +883,7 @@ await page.screenshot({ path: resolve(artifacts, "sidebar-fold-controls-compact.
 await page.getByRole("button", { name: "展开置顶分组的所有项目", exact: true }).click();
 await page.waitForSelector(".project-conversations");
 
-console.log(JSON.stringify({ errors, modelMenuLayout, permissionMenuLayout, compactModelMenuLayout, deleteDialogLayout, compactDeleteDialogLayout, updateDialogLayout, compactUpdateDialogLayout, settingsLayout, layout, compactLayout, compactQueueLayout, longPermissionLayout, userQuestionLayout }, null, 2));
+console.log(JSON.stringify({ errors, modelMenuLayout, permissionMenuLayout, addDirMenuLayout, compactModelMenuLayout, compactAddDirMenuLayout, deleteDialogLayout, compactDeleteDialogLayout, updateDialogLayout, compactUpdateDialogLayout, settingsLayout, layout, compactLayout, compactQueueLayout, longPermissionLayout, userQuestionLayout }, null, 2));
 await electronApp.close();
 
 if (errors.length > 0) process.exitCode = 1;

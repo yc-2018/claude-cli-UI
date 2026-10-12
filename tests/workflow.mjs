@@ -19,6 +19,7 @@ const cliSessions = resolve(claudeConfig, "projects", root.replace(/[^A-Za-z0-9]
 const fakeCli = resolve(root, "tests", "fixtures", "fake-claude.mjs");
 const processExitGate = resolve(profile, "release-process-exit");
 const terminalLog = resolve(profile, "terminal-launches.jsonl");
+const addDirLog = resolve(profile, "add-dir-launches.jsonl");
 const packagedExecutable = process.env.CLAUDE_DESK_TEST_EXECUTABLE;
 await mkdir(profile, { recursive: true });
 await mkdir(cliSessions, { recursive: true });
@@ -190,6 +191,7 @@ const launch = () => electron.launch({
     CLAUDE_DESK_FAKE_SESSIONS_DIR: cliSessions,
     CLAUDE_DESK_TEST_EXIT_GATE: processExitGate,
     CLAUDE_DESK_TEST_TERMINAL_LOG: terminalLog,
+    CLAUDE_DESK_TEST_ADD_DIR_LOG: addDirLog,
     CLAUDE_DESK_DISABLE_NOTIFICATIONS: "1",
     CLAUDE_DESK_TEST_OFFSCREEN: "1",
     CLAUDE_DESK_DISABLE_AUTO_UPDATE_CHECK: "1",
@@ -1085,6 +1087,79 @@ try {
   if (!Array.isArray(persistedAttachments) || persistedAttachments.length !== 2 || persistedAttachments.some((attachment) => attachment.dataBase64)) {
     throw new Error("attachment metadata was not persisted safely");
   }
+
+  // 附加目录（对应 CLI 的 /add-dir）：发送框按钮管理列表，运行时必须逐个传给 CLI，移除后下一轮立即生效。
+  await page.locator(".add-dir-button").click();
+  await page.waitForSelector(".add-dir-menu");
+  if (await page.locator(".add-dir-item").count() !== 0) throw new Error("additional directory list was not empty before the first add");
+  await page.locator(".add-dir-menu .add-dir-add").click();
+  await page.waitForFunction(() => document.querySelectorAll(".add-dir-item").length === 1);
+  if (!(await page.locator(".add-dir-item").textContent())?.includes(workspaceDirectoryName)) {
+    throw new Error("picked additional directory was not listed in the manager");
+  }
+  if (await page.locator(".add-dir-count").textContent() !== "1") throw new Error("add-dir badge did not reflect the directory count");
+  // /add-dir 是本地命令：只打开管理弹层，绝不把这条文本发给 Claude。
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".add-dir-menu", { state: "detached" });
+  const messageCountBeforeLocalCommand = await page.locator(".message").count();
+  await page.locator(".composer textarea").fill("/add-dir");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForSelector(".add-dir-menu");
+  if (await page.locator(".composer textarea").inputValue() !== "") throw new Error("/add-dir did not clear the composer");
+  await page.waitForTimeout(200);
+  if (await page.locator(".message").count() !== messageCountBeforeLocalCommand) throw new Error("/add-dir leaked into the conversation as a prompt");
+  await page.keyboard.press("Escape");
+  await page.locator(".composer textarea").fill("附加目录回归测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  const readAddDirRuns = async () => (await readFile(addDirLog, "utf8")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  const addDirRun = (await readAddDirRuns()).reverse().find((run) => run.prompt === "附加目录回归测试");
+  if (!addDirRun || addDirRun.addDirs.length !== 2 || addDirRun.addDirs[0] !== root || !/[\\/]attachments$/.test(addDirRun.addDirs[1] ?? "")) {
+    throw new Error(`additional directory was not passed to the CLI as --add-dir: ${JSON.stringify(addDirRun)}`);
+  }
+  // 附加目录随项目持久化：先等它落进主进程项目库，重新加载后徽标和列表才会从存储里恢复。
+  await page.waitForFunction(async (expected) => {
+    const projects = await window.claudeDesk.getProjectStore();
+    return Array.isArray(projects) && projects.some((project) => project.conversations.some((conversation) =>
+      Array.isArray(conversation.additionalDirectories) && conversation.additionalDirectories.includes(expected)));
+  }, root);
+  await page.reload();
+  // 套件前面跑过更新流程，主进程里还挂着「可安装」状态：重载后更新对话框会再弹出来盖住发送框，先收掉它。
+  await page.waitForSelector(".update-overlay", { timeout: 3_000 }).catch(() => null);
+  if (await page.locator(".update-overlay").count()) {
+    await page.locator(".update-later-button").click();
+    await page.waitForSelector(".update-overlay", { state: "detached" });
+  }
+  await page.waitForFunction(() => document.querySelector(".add-dir-count")?.textContent === "1");
+  await page.locator(".add-dir-button").click();
+  await page.waitForFunction(() => document.querySelectorAll(".add-dir-item").length === 1);
+  await page.locator('.add-dir-item [aria-label^="移除"]').click();
+  await page.waitForFunction(() => !document.querySelector(".add-dir-count"));
+  await page.keyboard.press("Escape");
+  await page.locator(".composer textarea").fill("附加目录移除测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  const removeRun = (await readAddDirRuns()).reverse().find((run) => run.prompt === "附加目录移除测试");
+  if (!removeRun || removeRun.addDirs.length !== 1) {
+    throw new Error(`removed additional directory was still passed to the CLI: ${JSON.stringify(removeRun)}`);
+  }
+  // 主进程拒绝相对路径：渲染层塞不进能改写命令行的 --add-dir 参数。
+  const invalidAddDir = await page.evaluate(async (workspace) => {
+    try {
+      await window.claudeDesk.startRun({
+        runId: "add-dir-validation-run",
+        conversationId: "add-dir-validation-conversation",
+        prompt: "非法附加目录测试",
+        cwd: workspace,
+        permissionMode: "acceptEdits",
+        additionalDirectories: ["relative\\dir"],
+      });
+      return "accepted";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }, root);
+  if (!invalidAddDir.includes("无效的运行参数")) throw new Error(`relative additional directory was not rejected: ${invalidAddDir}`);
 
   await page.evaluate(() => {
     const container = document.querySelector(".conversation-scroll");
@@ -2501,6 +2576,7 @@ try {
     projects: 1,
     conversations: 6,
     importedCliHistory: true,
+    additionalDirectories: true,
     slashCommands: true,
     legacyMigration: true,
     corruptDataRecovery: true,

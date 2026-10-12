@@ -2287,6 +2287,7 @@ export default function App() {
       model: getModelArgument(conversation, modelConfig),
       thinkingEffort: conversation.thinkingEffort,
       allowedTools: conversation.allowedTools,
+      additionalDirectories: conversation.additionalDirectories,
       permissionMode: conversation.permissionMode,
       attachments,
     };
@@ -2710,6 +2711,7 @@ export default function App() {
       model: getModelArgument(conversation, modelConfig),
       thinkingEffort: conversation.thinkingEffort,
       allowedTools,
+      additionalDirectories: conversation.additionalDirectories,
       permissionMode: conversation.permissionMode,
     };
     const failContinue = (detail: string) => {
@@ -3101,6 +3103,7 @@ export default function App() {
               onThinkingEffortChange={(thinkingEffort) => updateConversation(activeConversation.id, (conversation) => ({ ...conversation, thinkingEffort }))}
               onLocalCommand={runLocalCommand}
               onPermissionChange={changePermissionMode}
+              onAdditionalDirectoriesChange={(additionalDirectories) => updateConversation(activeConversation.id, (conversation) => ({ ...conversation, additionalDirectories }))}
             />
           </>
         ) : activeProject

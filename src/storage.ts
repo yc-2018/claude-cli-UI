@@ -195,6 +195,10 @@ function normalizeConversation(value: unknown): Conversation | null {
     allowedTools: Array.isArray(conversation.allowedTools)
       ? [...new Set(conversation.allowedTools.filter((tool): tool is string => typeof tool === "string" && /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(tool)))]
       : [],
+    additionalDirectories: Array.isArray(conversation.additionalDirectories)
+      ? [...new Set(conversation.additionalDirectories.filter((directory): directory is string =>
+        typeof directory === "string" && directory.length > 0 && directory.length <= 1_000 && !/[\r\n"]/.test(directory)))].slice(0, 20)
+      : [],
     source: conversation.source === "claude" ? "claude" : undefined,
     historyLoaded: conversation.source === "claude" ? false : undefined,
     permissionMode: modes.includes(conversation.permissionMode as PermissionMode)

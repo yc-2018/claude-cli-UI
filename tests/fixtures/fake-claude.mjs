@@ -93,6 +93,14 @@ const processPrompt = (input) => {
     return;
   }
   const send = (data) => process.stdout.write(`${JSON.stringify(data)}\n`);
+  // 把这次运行收到的 --add-dir 参数原样落到日志里：附加目录的回归用例据此断言它们真的传给了 CLI。
+  if (process.env.CLAUDE_DESK_TEST_ADD_DIR_LOG) {
+    const addDirectories = [];
+    for (let index = 0; index < args.length; index += 1) {
+      if (args[index] === "--add-dir" && typeof args[index + 1] === "string") addDirectories.push(args[index + 1]);
+    }
+    appendFileSync(process.env.CLAUDE_DESK_TEST_ADD_DIR_LOG, `${JSON.stringify({ prompt: prompt.trim().slice(0, 200), addDirs: addDirectories })}\n`, "utf8");
+  }
   const slashCommandDescriptions = {
     "/story": "运行故事写作工作流",
     "/compact": "压缩当前对话上下文，保留关键内容",
@@ -672,6 +680,14 @@ const processPrompt = (input) => {
     });
     send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: summary }] }, session_id: sessionId });
     send({ type: "result", subtype: "success", is_error: false, result: summary, session_id: sessionId });
+    return;
+  }
+
+  if (prompt.includes("附加目录")) {
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    const response = "附加目录测试完成。";
+    send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: response }] }, session_id: sessionId });
+    send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
     return;
   }
 
