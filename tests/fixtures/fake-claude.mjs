@@ -691,6 +691,24 @@ const processPrompt = (input) => {
     return;
   }
 
+  // 1M 路由上一次请求的真实占用：input 2 + cache_creation 300000 + cache_read 450000 = 750000，
+  // 也就是 1M 窗口的 75%。它超过 200k，之前会被当成累加值丢掉，状态条只剩「上下文用量未知」。
+  if (prompt.includes("上下文窗口读数测试")) {
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    const response = "上下文窗口读数测试完成。";
+    send({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: response }],
+        usage: { input_tokens: 2, cache_creation_input_tokens: 300_000, cache_read_input_tokens: 450_000, output_tokens: 40 },
+      },
+      session_id: sessionId,
+    });
+    send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
+    return;
+  }
+
   const response = `测试通过：${prompt.trim()}。` + "流式输出稳定。".repeat(180);
   const thinking = "先理解用户要求，再检查上下文，最后组织清晰的回答。";
 

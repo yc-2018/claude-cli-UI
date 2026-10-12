@@ -185,6 +185,11 @@ export interface ContextUsage {
   contextWindow?: number;
   usedPercentage?: number;
   remainingPercentage?: number;
+  /**
+   * 这个占用量是按正文长度估算出来的，不是 CLI 报的权威读数（CLI 没给任何可用用量时才会这样），
+   * 界面必须说清是估算值，否则用户会把估算当成真实占用去做压缩决策。
+   */
+  estimated?: boolean;
 }
 
 /** CLI 压缩生命周期里的阶段，来自 wire 上的 compact_progress 事件。 */

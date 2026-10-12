@@ -478,6 +478,46 @@ function contextWindowForModel(model: string | undefined) {
   return model && /\[1m\]|-1m$/i.test(model) ? LARGE_CONTEXT_WINDOW : DEFAULT_CONTEXT_WINDOW;
 }
 
+/**
+ * 这个对话真正在用的上下文容量。CLI 报回来的只是实际模型标识（claude-opus-5 这种），1M 变体的
+ * [1M] 标记只写在配置的角色映射里，所以必须先用 selectedModel / resolvedModel 去模型配置里对，
+ * 对不上才退回按标识猜。容量猜小了，超过 200k 的真实占用会被误判成累加值并丢掉。
+ */
+function contextWindowForConversation(conversation: Conversation, config: ModelConfig) {
+  const { selectedModel, resolvedModel } = conversation;
+  const byRole = config.options.find((option) => option.value === selectedModel);
+  if (byRole) return byRole.contextWindow;
+  const byActual = config.options.find((option) => option.actualModel === resolvedModel);
+  if (byActual) return byActual.contextWindow;
+  return contextWindowForModel(resolvedModel ?? selectedModel);
+}
+
+/**
+ * 会话里一条 CLI 用量都没有时的兜底估算（例如整轮都是 API 错误）。CJK 大致一字符一 token，
+ * ASCII 大致四字符一 token；估算偏小（系统提示词与工具定义不在这份正文里），界面要标成估算。
+ */
+function estimateConversationTokens(messages: ChatMessage[]) {
+  let cjk = 0;
+  let ascii = 0;
+  const add = (text: string | undefined) => {
+    if (!text) return;
+    for (const character of text) {
+      if ((character.codePointAt(0) ?? 0) > 0x2e80) cjk += 1;
+      else ascii += 1;
+    }
+  };
+  for (const message of messages) {
+    add(message.content);
+    add(message.thinking);
+    for (const activity of message.activities ?? []) {
+      add(activity.detail?.command);
+      add(activity.detail?.output);
+    }
+  }
+  const total = Math.round(cjk + ascii / 4);
+  return total > 0 ? total : undefined;
+}
+
 /** 子代理（Task）的记录属于工具内部过程，它的用量不属于主对话的上下文占用。 */
 function isSidechainRecord(data: Record<string, unknown>) {
   if (typeof data.parent_tool_use_id === "string" && data.parent_tool_use_id.length > 0) return true;
@@ -486,17 +526,19 @@ function isSidechainRecord(data: Record<string, unknown>) {
 }
 
 /**
- * 一次请求真正占用的上下文 = input + cache_creation + cache_read。
- * result.usage 是这一轮所有请求的累加，modelUsage 更是整个会话的累加，用它们会把用量显示成 5M。
+ * 一次请求真正占用的上下文。多数路由把未缓存输入和缓存读分开报，三者相加才是占用量；但也有路由
+ * 把缓存读计入 input_tokens（实测 input_tokens ≈ cache_creation + cache_read），再相加就把占用
+ * 量算成两倍，1M 路由上会冒出不可能的读数。result.usage 是这一轮所有请求的累加，modelUsage 更是
+ * 整个会话的累加，用它们会把用量显示成 5M。
  */
 function getOccupancyTokens(data: Record<string, unknown>) {
   if (data.type !== "assistant" || isSidechainRecord(data)) return undefined;
   const message = data.message && typeof data.message === "object" ? data.message as Record<string, unknown> : undefined;
   const usage = message?.usage && typeof message.usage === "object" ? message.usage as Record<string, unknown> : undefined;
   if (!usage) return undefined;
-  const total = (numberValue(usage.input_tokens) ?? 0)
-    + (numberValue(usage.cache_creation_input_tokens) ?? 0)
-    + (numberValue(usage.cache_read_input_tokens) ?? 0);
+  const input = numberValue(usage.input_tokens) ?? 0;
+  const cached = (numberValue(usage.cache_creation_input_tokens) ?? 0) + (numberValue(usage.cache_read_input_tokens) ?? 0);
+  const total = input >= cached ? input : input + cached;
   return total > 0 ? total : undefined;
 }
 
@@ -511,13 +553,19 @@ function getResultContextWindow(data: Record<string, unknown>) {
   return undefined;
 }
 
-/** 占用量超过窗口一定是把累加值当成了占用量，这种读数必须丢掉而不是显示成 5M。 */
-function validateContextUsage(usage: ContextUsage | undefined, model?: string): ContextUsage | undefined {
+/**
+ * 超出窗口的读数不能一律丢掉。只有超过现有最宽容量的读数才能确定是把累加值当成了占用量；
+ * 超过已知窗口却落在最宽容量之内的读数恰恰相反：1M 路由上的真实占用本来就会远超 200k，
+ * 之前「超过窗口即丢弃」把这类真实读数全丢了，状态条只剩「上下文用量未知」。这种读数反证
+ * 窗口被猜小了，窗口跟着抬到最宽容量，而不是把读数扔掉。
+ */
+function validateContextUsage(usage: ContextUsage | undefined, contextWindowHint?: number): ContextUsage | undefined {
   if (!usage) return undefined;
-  const contextWindow = usage.contextWindow !== undefined && usage.contextWindow > 0
+  const declaredWindow = usage.contextWindow !== undefined && usage.contextWindow > 0
     ? usage.contextWindow
-    : contextWindowForModel(model);
-  const usedTokens = usage.usedTokens !== undefined && usage.usedTokens <= contextWindow ? usage.usedTokens : undefined;
+    : contextWindowHint ?? DEFAULT_CONTEXT_WINDOW;
+  const usedTokens = usage.usedTokens !== undefined && usage.usedTokens <= LARGE_CONTEXT_WINDOW ? usage.usedTokens : undefined;
+  const contextWindow = usedTokens !== undefined && usedTokens > declaredWindow ? LARGE_CONTEXT_WINDOW : declaredWindow;
   if (usedTokens === undefined) {
     if (usage.usedPercentage === undefined && usage.remainingPercentage === undefined) return undefined;
     return { contextWindow, usedPercentage: usage.usedPercentage, remainingPercentage: usage.remainingPercentage };
@@ -528,21 +576,27 @@ function validateContextUsage(usage: ContextUsage | undefined, model?: string): 
     contextWindow,
     usedPercentage,
     remainingPercentage: usage.remainingPercentage ?? Math.max(0, Math.round((100 - usedPercentage) * 10) / 10),
+    estimated: usage.estimated === true ? true : undefined,
   };
 }
 
 /** 逐字段覆盖：undefined 不能把已经读到的值冲掉，占用量变了旧百分比也必须失效。 */
-function mergeContextUsage(previous: ContextUsage | undefined, incoming: Partial<ContextUsage>, model?: string) {
+function mergeContextUsage(previous: ContextUsage | undefined, incoming: Partial<ContextUsage>, contextWindowHint?: number) {
   const merged: ContextUsage = { ...previous };
   if (incoming.usedTokens !== undefined && incoming.usedTokens !== merged.usedTokens) {
     merged.usedTokens = incoming.usedTokens;
     merged.usedPercentage = undefined;
     merged.remainingPercentage = undefined;
+    // 换成了新的读数之后，之前那次「这是估算值」的判断不再成立，要跟着这次读数走。
+    merged.estimated = incoming.estimated === true ? true : undefined;
+    // 又发了一次请求，窗口必须按当前模型重新定：上一轮为了容纳大读数抬上去的窗口不能粘住，
+    // 否则从 1M 模型切回 200k 模型之后，百分比会一直按 1M 算。
+    merged.contextWindow = incoming.contextWindow ?? contextWindowHint ?? merged.contextWindow;
   }
   if (incoming.contextWindow !== undefined) merged.contextWindow = incoming.contextWindow;
   if (incoming.usedPercentage !== undefined) merged.usedPercentage = incoming.usedPercentage;
   if (incoming.remainingPercentage !== undefined) merged.remainingPercentage = incoming.remainingPercentage;
-  return validateContextUsage(merged, model);
+  return validateContextUsage(merged, contextWindowHint);
 }
 
 /**
@@ -873,14 +927,28 @@ function ContextStatus({ conversation, modelContextWindow, onCompact, disabled }
   const percentage = usage?.usedPercentage ?? (usage?.usedTokens !== undefined && usage.contextWindow
     ? (usage.usedTokens / usage.contextWindow) * 100
     : undefined);
-  const usageText = percentage !== undefined
-    ? `上下文 ${Math.round(percentage)}%`
-    : usage?.usedTokens !== undefined
-      ? `上下文 ${formatTokenCount(usage.usedTokens)}${usage.contextWindow ? `/${formatTokenCount(usage.contextWindow)}` : ""}`
-      : "上下文用量未知";
+  // 一条可信用量都没有时（例如整轮都是 API 错误）至少按正文长度给个估算，别只剩「未知」。
+  const fallbackEstimate = useMemo(
+    () => usage?.usedTokens === undefined ? estimateConversationTokens(conversation.messages) : undefined,
+    [conversation.messages, usage?.usedTokens],
+  );
+  const estimatedTokens = usage?.estimated ? usage.usedTokens : fallbackEstimate;
+  // 估算值不能和权威读数混在一起显示：百分比看着一样精确，但估算偏小，必须自带「约」字。
+  const usageText = estimatedTokens !== undefined
+    ? `上下文 约 ${formatTokenCount(estimatedTokens)}`
+    : percentage !== undefined
+      ? `上下文 ${Math.round(percentage)}%`
+      : usage?.usedTokens !== undefined
+        ? `上下文 ${formatTokenCount(usage.usedTokens)}${usage.contextWindow ? `/${formatTokenCount(usage.contextWindow)}` : ""}`
+        : "上下文用量未知";
+  const estimatedDetail = `${usageText}（按本会话正文长度估算，CLI 没有给出用量）`;
   const usageDetail = usage?.usedTokens !== undefined
-    ? `${usageText}（${formatTokenCount(usage.usedTokens)}/${formatTokenCount(usage.contextWindow ?? DEFAULT_CONTEXT_WINDOW)}）`
-    : usageText;
+    ? usage.estimated
+      ? estimatedDetail
+      : `${usageText}（${formatTokenCount(usage.usedTokens)}/${formatTokenCount(usage.contextWindow ?? DEFAULT_CONTEXT_WINDOW)}）`
+    : estimatedTokens !== undefined
+      ? estimatedDetail
+      : usageText;
   const compactText = latest?.status === "running"
     ? "正在压缩上下文…"
     : latest?.status === "error"
@@ -942,6 +1010,9 @@ export default function App() {
   const projectsRef = useRef(projects);
   const activeConversationIdRef = useRef(activeConversationId);
   const appSettingsRef = useRef(appSettings);
+  // 事件订阅的回调里读不到最新的 modelConfig（它的依赖数组里没有它，为了不打断流式输出也不能
+  // 重订阅），上下文用量的窗口只能从这份 ref 里取。
+  const modelConfigRef = useRef(modelConfig);
   const runMeta = useRef(new Map<string, RunMeta>());
   const processRunIds = useRef(new Map<string, string>());
   const scannedProjects = useRef(new Set<string>());
@@ -971,15 +1042,10 @@ export default function App() {
   // 上下文状态条要显示 1M 容量，就必须拿到这个对话真正在用的实际模型标识；role 名（opus/sonnet）
   // 看不出窗口大小。用户当前选中的角色映射到的模型才是下一次请求要用的那个，resolvedModel 只是
   // 上一轮 CLI 报回来的实际模型，角色已经不在当前路由里时才拿它兜底。
-  const activeModelContextWindow = useMemo(() => {
-    if (!activeConversation) return DEFAULT_CONTEXT_WINDOW;
-    const { selectedModel, resolvedModel } = activeConversation;
-    const byRole = modelConfig.options.find((option) => option.value === selectedModel);
-    if (byRole) return byRole.contextWindow;
-    const byActual = modelConfig.options.find((option) => option.actualModel === resolvedModel);
-    if (byActual) return byActual.contextWindow;
-    return contextWindowForModel(resolvedModel ?? selectedModel);
-  }, [activeConversation, modelConfig]);
+  const activeModelContextWindow = useMemo(
+    () => activeConversation ? contextWindowForConversation(activeConversation, modelConfig) : DEFAULT_CONTEXT_WINDOW,
+    [activeConversation, modelConfig],
+  );
   const pendingPermission = permissionQueue[0];
   const pendingQuestion = questionQueue[0];
 
@@ -1105,6 +1171,10 @@ export default function App() {
   useEffect(() => {
     appSettingsRef.current = appSettings;
   }, [appSettings]);
+
+  useEffect(() => {
+    modelConfigRef.current = modelConfig;
+  }, [modelConfig]);
 
   useEffect(() => window.claudeDesk.onNavigateToConversation((conversationId) => {
     const project = projectsRef.current.find((item) => item.conversations.some((conversation) => conversation.id === conversationId));
@@ -1677,7 +1747,7 @@ export default function App() {
             ...contextUsage,
             ...(occupancyTokens !== undefined ? { usedTokens: occupancyTokens, usedPercentage: undefined, remainingPercentage: undefined } : {}),
             ...(resultContextWindow !== undefined ? { contextWindow: resultContextWindow } : {}),
-          }, conversation.resolvedModel ?? conversation.selectedModel),
+          }, contextWindowForConversation(conversation, modelConfigRef.current)),
         }));
       }
       const compactBoundary = getCompactBoundary(data);
@@ -1692,7 +1762,7 @@ export default function App() {
             contextUsage: mergeContextUsage(
               conversation.contextUsage,
               { usedTokens: compactBoundary.postTokens },
-              conversation.resolvedModel ?? conversation.selectedModel,
+              contextWindowForConversation(conversation, modelConfigRef.current),
             ),
             // 压缩发生在这条消息之后，卡片就渲染在它下面，而不是堆在整个对话的顶部。
             contextCompactions: [...compactions.filter((item) => item.status !== "running"), {

@@ -207,22 +207,29 @@ function normalizeConversation(value: unknown): Conversation | null {
   };
 }
 
+/** 现有最宽的上下文容量：超过它的读数只能是整轮或整个会话的累加值，不可能是真实占用。 */
+const MAX_PLAUSIBLE_CONTEXT_WINDOW = 1_000_000;
+const DEFAULT_CONTEXT_WINDOW = 200_000;
+
 function normalizeContextUsage(value: unknown): ContextUsage | undefined {
   if (!value || typeof value !== "object") return undefined;
   const item = value as Partial<ContextUsage>;
-  const contextWindow = typeof item.contextWindow === "number" && Number.isFinite(item.contextWindow) && item.contextWindow > 0
+  const declaredWindow = typeof item.contextWindow === "number" && Number.isFinite(item.contextWindow) && item.contextWindow > 0
     ? item.contextWindow
     : undefined;
   const rawUsedTokens = typeof item.usedTokens === "number" && Number.isFinite(item.usedTokens) ? Math.max(0, item.usedTokens) : undefined;
-  // 旧版本可能把整轮累加值当成占用量存下来了，超过窗口的读数直接丢弃。
-  const usedTokens = rawUsedTokens !== undefined && (contextWindow === undefined || rawUsedTokens <= contextWindow)
-    ? rawUsedTokens
-    : undefined;
+  // 旧版本可能把整轮累加值当成占用量存下来过，但「超过窗口」不能一律当成那种脏数据：1M 路由上的
+  // 真实占用本来就会远超 200k，之前的做法把这些真实读数连同脏数据一起丢掉了。只有超过现有最宽
+  // 容量的读数才是累加值；其余超过已知窗口的读数反证窗口被猜小了，窗口跟着抬上去而不是丢掉读数。
+  const usedTokens = rawUsedTokens !== undefined && rawUsedTokens <= MAX_PLAUSIBLE_CONTEXT_WINDOW ? rawUsedTokens : undefined;
+  const baseWindow = declaredWindow ?? DEFAULT_CONTEXT_WINDOW;
+  const contextWindow = usedTokens !== undefined && usedTokens > baseWindow ? MAX_PLAUSIBLE_CONTEXT_WINDOW : baseWindow;
   const usage: ContextUsage = {
     usedTokens,
     contextWindow,
     usedPercentage: typeof item.usedPercentage === "number" && Number.isFinite(item.usedPercentage) ? Math.min(100, Math.max(0, item.usedPercentage)) : undefined,
     remainingPercentage: typeof item.remainingPercentage === "number" && Number.isFinite(item.remainingPercentage) ? Math.min(100, Math.max(0, item.remainingPercentage)) : undefined,
+    estimated: usedTokens !== undefined && item.estimated === true ? true : undefined,
   };
   return Object.values(usage).some((entry) => entry !== undefined) ? usage : undefined;
 }

@@ -472,8 +472,13 @@ try {
     throw new Error(`imported CLI response did not show how long it took and when it finished: ${await importedDuration.textContent()}`);
   }
   const importedContextStatus = await page.locator(".context-status").textContent();
-  if (!importedContextStatus?.includes("上下文用量未知") || importedContextStatus.includes("5.0M")) {
+  // 这份会话文件里唯一的用量是计费口径的累加值（5M + 1M + 2M），绝不能当成上下文占用显示；
+  // 但没有可信读数时也不该只剩「未知」，而要按正文长度给出带「约」字的估算值。
+  if (importedContextStatus?.includes("5.0M") || importedContextStatus?.includes("8.0M")) {
     throw new Error(`billing input tokens were incorrectly shown as context usage: ${importedContextStatus}`);
+  }
+  if (!importedContextStatus?.includes("上下文 约")) {
+    throw new Error(`imported session without a usable reading did not fall back to an estimate: ${importedContextStatus}`);
   }
   // 回归：导入的历史回答默认收起，只露出最后那段正文；要看工具调用得自己点开。
   if (await page.locator('.message.assistant [data-timeline-kind="activity"]').count() !== 0) {
@@ -1632,6 +1637,42 @@ try {
   }
   // 子代理那条 95 万 token 的用量不属于主对话占用，真实占用是 30k/200k = 15%。
   await page.waitForFunction(() => document.querySelector(".context-status-text")?.textContent?.includes("上下文 15%"));
+
+  // 回归：1M 路由上一次请求 75 万 token 的真实占用必须显示成百分比。CLI 报回来的实际模型标识不带
+  // [1M]，之前按标识把窗口猜成 200k，超过 200k 的真实读数全被当成累加值丢掉，状态条只剩
+  // 「上下文用量未知」；input 与缓存读也不能重复相加算成 1.5M。
+  await writeTestModels({
+    Sonnet: "ThirdParty-A",
+    Opus: "Router2-Opus[1m]",
+    Fable: "ThirdParty-B",
+    Haiku: "ThirdParty-B",
+  });
+  await page.locator(".model-select .composer-select-trigger").click();
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll(".model-select .composer-select-option small")].some((node) => node.textContent === "Router2-Opus[1m]")
+  ));
+  await page.locator('.model-select .composer-select-option[data-value="opus"]').click();
+  await page.waitForFunction(() => document.querySelector(".context-window-badge")?.textContent === "1M");
+  await page.locator(".composer textarea").fill("上下文窗口读数测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForFunction(() => document.querySelector(".context-status-text")?.textContent?.includes("上下文 75%"));
+  const largeContextStatus = await page.locator(".context-status").textContent();
+  if (largeContextStatus?.includes("1.5M") || largeContextStatus?.includes("未知")) {
+    throw new Error(`a real 1M-route reading was discarded or double counted: ${largeContextStatus}`);
+  }
+  await page.waitForSelector('.message.assistant:last-of-type[data-status="done"]', { timeout: 15_000 });
+  // 切回普通路由：后面的断言依赖 fable 与 200k 窗口，抬上去的窗口也不能粘住下一轮读数。
+  await writeTestModels({
+    Sonnet: "ThirdParty-A",
+    Opus: "ThirdParty-A",
+    Fable: "ThirdParty-B",
+    Haiku: "ThirdParty-B",
+  });
+  await page.locator(".model-select .composer-select-trigger").click();
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll(".model-select .composer-select-option small")].some((node) => node.textContent === "ThirdParty-B")
+  ));
+  await page.locator('.model-select .composer-select-option[data-value="fable"]').click();
 
   await page.locator(".composer textarea").fill("后台托盘测试");
   await page.locator(".composer textarea").press("Enter");

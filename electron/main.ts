@@ -125,6 +125,8 @@ interface ImportedContextUsage {
   contextWindow?: number;
   usedPercentage?: number;
   remainingPercentage?: number;
+  /** 没有可信读数时按正文长度估算出来的占用量，界面要标成估算值而不是权威读数。 */
+  estimated?: boolean;
 }
 
 interface ImportedContextCompaction {
@@ -1011,8 +1013,11 @@ function roleModelOption(
 }
 
 /**
- * 一次请求真正占用的上下文 = input + cache_creation + cache_read。
- * result.usage 是整轮所有请求的累加，modelUsage 更是整个会话的累加，都不能当成占用量。
+ * 一次请求真正占用的上下文。多数路由把未缓存输入和缓存读分开报，三者相加才是占用量；但也有的
+ * 路由把缓存读也计入 input_tokens（实测 input_tokens ≈ cache_creation + cache_read，例如
+ * 791819 ≈ 265261 + 526552），这种情况再相加会把占用量算成两倍，1M 路由上就会冒出 1.58M
+ * 这种不可能的读数，进而被当成脏数据丢掉。result.usage 是整轮累加、modelUsage 是整个会话累加，
+ * 两者都不能当成占用量。
  */
 function assistantOccupancyTokens(record: Record<string, unknown>) {
   if (isSidechainRecord(record)) return undefined;
@@ -1022,17 +1027,25 @@ function assistantOccupancyTokens(record: Record<string, unknown>) {
     : undefined;
   if (!usage) return undefined;
   const amount = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
-  const total = amount(usage.input_tokens) + amount(usage.cache_creation_input_tokens) + amount(usage.cache_read_input_tokens);
+  const input = amount(usage.input_tokens);
+  const cached = amount(usage.cache_creation_input_tokens) + amount(usage.cache_read_input_tokens);
+  const total = input >= cached ? input : input + cached;
   return total > 0 ? total : undefined;
 }
 
-/** 占用量超过窗口一定是把累加值当成了占用量，这种读数必须丢掉而不是显示成 5M。 */
+/**
+ * 超出窗口的读数不能一律丢掉。只有超过现有最宽容量的读数才能确定是把累加值当成了占用量
+ * （会话级累计动辄 5M、8M）；超过已知窗口却落在最宽容量之内的读数恰恰相反——1M 路由上的
+ * 真实占用本来就会远超 200k，之前「超过窗口即丢弃」把这类真实读数全丢了，状态条只剩
+ * 「上下文用量未知」。这种读数反证窗口被猜小了，窗口要跟着抬到最宽容量。
+ */
 function validatedContextUsage(usage: ImportedContextUsage | undefined, model: string | undefined): ImportedContextUsage | undefined {
   if (!usage) return undefined;
-  const contextWindow = usage.contextWindow && usage.contextWindow > 0 ? usage.contextWindow : contextWindowForModel(model);
-  const usedTokens = usage.usedTokens !== undefined && usage.usedTokens >= 0 && usage.usedTokens <= contextWindow
+  const declaredWindow = usage.contextWindow && usage.contextWindow > 0 ? usage.contextWindow : contextWindowForModel(model);
+  const usedTokens = usage.usedTokens !== undefined && usage.usedTokens >= 0 && usage.usedTokens <= LARGE_CONTEXT_WINDOW
     ? usage.usedTokens
     : undefined;
+  const contextWindow = usedTokens !== undefined && usedTokens > declaredWindow ? LARGE_CONTEXT_WINDOW : declaredWindow;
   if (usedTokens === undefined) {
     if (usage.usedPercentage === undefined && usage.remainingPercentage === undefined) return undefined;
     return {
@@ -1047,6 +1060,56 @@ function validatedContextUsage(usage: ImportedContextUsage | undefined, model: s
     contextWindow,
     usedPercentage,
     remainingPercentage: usage.remainingPercentage ?? Math.max(0, Math.round((100 - usedPercentage) * 10) / 10),
+    estimated: usage.estimated === true ? true : undefined,
+  };
+}
+
+/**
+ * 没有任何可信读数时的兜底：按会话正文长度估算占用量。CJK 大致一个字符一个 token，
+ * ASCII 大致四个字符一个 token。估算值偏小（系统提示词与工具定义不在这份正文里），
+ * 所以必须带上 estimated 标记，界面才会说清这是估算。
+ */
+function estimatedTokenCount(text: string) {
+  if (!text) return 0;
+  let cjk = 0;
+  for (const character of text) {
+    if ((character.codePointAt(0) ?? 0) > 0x2e80) cjk += 1;
+  }
+  return Math.round(cjk + (text.length - cjk) / 4);
+}
+
+/** 估算只关心正文规模，工具调用参数与工具结果同样占据上下文，必须一起算进去。 */
+function importedEstimateText(content: unknown) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.flatMap((block): string[] => {
+    if (!block || typeof block !== "object") return [];
+    const item = block as Record<string, unknown>;
+    if (item.type === "text" && typeof item.text === "string") return [item.text];
+    if (item.type === "thinking" && typeof item.thinking === "string") return [item.thinking];
+    if (item.type === "tool_result") return typeof item.content === "string" ? [item.content] : [];
+    if (item.type === "tool_use" && item.input !== undefined) {
+      try {
+        return [JSON.stringify(item.input)];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  }).join("\n");
+}
+
+function estimatedContextUsage(estimatedTokens: number, model: string | undefined): ImportedContextUsage | undefined {
+  if (estimatedTokens <= 0) return undefined;
+  const contextWindow = contextWindowForModel(model);
+  const usedTokens = Math.min(estimatedTokens, contextWindow);
+  const usedPercentage = Math.min(100, Math.round((usedTokens / contextWindow) * 1000) / 10);
+  return {
+    usedTokens,
+    contextWindow,
+    usedPercentage,
+    remainingPercentage: Math.max(0, Math.round((100 - usedPercentage) * 10) / 10),
+    estimated: true,
   };
 }
 
@@ -1140,6 +1203,8 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
   let resolvedModel: string | undefined;
   let permissionMode: PermissionMode = "acceptEdits";
   let contextUsage: ImportedContextUsage | undefined;
+  // 一条可信用量都没有时的兜底估算：只累计上一次压缩之后的正文规模，压缩会重置它。
+  let estimatedTokens = 0;
   const contextCompactions: ImportedContextCompaction[] = [];
   let createdAt = Number.POSITIVE_INFINITY;
   let updatedAt = 0;
@@ -1223,6 +1288,8 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
         usedPercentage: undefined,
         remainingPercentage: undefined,
       };
+      // 压缩之后上下文只剩摘要和后续正文，估算必须从零重新累计。
+      estimatedTokens = 0;
     }
     if (timestamp !== undefined) {
       createdAt = Math.min(createdAt, timestamp);
@@ -1232,6 +1299,11 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
     if (record.isCompactSummary === true) continue;
     // 子代理（Task）的记录属于工具内部过程，不是主对话的消息。
     if (isSidechainRecord(record)) continue;
+    // 估算兜底用的正文累计：用户提示、回答正文、思考过程与工具结果都占用上下文。
+    if (record.type === "user" || record.type === "assistant") {
+      const message = record.message && typeof record.message === "object" ? record.message as Record<string, unknown> : undefined;
+      estimatedTokens += estimatedTokenCount(importedEstimateText(message?.content));
+    }
 
     if (record.type === "user" && record.message && typeof record.message === "object") {
       const message = record.message as Record<string, unknown>;
@@ -1346,7 +1418,9 @@ async function parseClaudeSession(filePath: string, workspace: string, includeMe
     gitBranch,
     resolvedModel,
     permissionMode,
-    contextUsage: validatedContextUsage(contextUsage, resolvedModel),
+    // 有可信读数就用读数；一条都没有时按正文长度估一个值，并标成估算。
+    contextUsage: validatedContextUsage(contextUsage, resolvedModel)
+      ?? estimatedContextUsage(estimatedTokens, resolvedModel),
     contextCompactions: contextCompactions.length ? contextCompactions : undefined,
     ...(includeMessages ? { messages } : {}),
   };
