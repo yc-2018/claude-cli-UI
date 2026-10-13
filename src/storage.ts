@@ -1,7 +1,8 @@
-import type { Activity, ActivityDetail, ActivityDiffLine, Attachment, ChatMessage, Conversation, ContextCompaction, ContextUsage, PermissionMode, Project, ResponseTimelineItem, ThinkingEffort, UserQuestion } from "./types";
+import type { Activity, ActivityDetail, ActivityDiffLine, Attachment, ChatMessage, Conversation, ContextCompaction, ContextUsage, PermissionMode, Project, ResponseTimelineItem, ScheduledPrompt, ThinkingEffort, UserQuestion } from "./types";
 import { normalizeSlashCommands } from "./commands";
 
 export const PROJECTS_STORAGE_KEY = "claude-desk.projects.v2";
+export const SCHEDULED_PROMPTS_STORAGE_KEY = "claude-desk.scheduled-prompts.v1";
 export const LEGACY_TASKS_STORAGE_KEY = "claude-desk.tasks.v1";
 export const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ATTACHMENT_NAME_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:\.[a-z0-9]{1,12})?$/i;
@@ -199,6 +200,17 @@ function normalizeConversation(value: unknown): Conversation | null {
       ? [...new Set(conversation.additionalDirectories.filter((directory): directory is string =>
         typeof directory === "string" && directory.length > 0 && directory.length <= 1_000 && !/[\r\n"]/.test(directory)))].slice(0, 20)
       : [],
+    apiMaxRetries: typeof conversation.apiMaxRetries === "number"
+      && Number.isInteger(conversation.apiMaxRetries)
+      && conversation.apiMaxRetries >= 0
+      && conversation.apiMaxRetries <= 300
+      ? conversation.apiMaxRetries
+      : undefined,
+    // 回退掉的轮次只需要记 uuid；留最近 200 条足够覆盖一个会话里的反复重编辑。
+    droppedPromptUuids: Array.isArray(conversation.droppedPromptUuids)
+      ? [...new Set(conversation.droppedPromptUuids.filter((uuid): uuid is string =>
+        typeof uuid === "string" && SESSION_ID_PATTERN.test(uuid)))].slice(-200)
+      : undefined,
     source: conversation.source === "claude" ? "claude" : undefined,
     historyLoaded: conversation.source === "claude" ? false : undefined,
     permissionMode: modes.includes(conversation.permissionMode as PermissionMode)
@@ -343,8 +355,65 @@ export function parseProjects(value: unknown): Project[] {
     : [];
 }
 
-export function saveProjects(projects: Project[]) {
-  const serializable = projects.map((project) => ({
+export const TIME_OF_DAY_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
+/** 定时发送的任务量不大，留一个上限挡住异常数据把 localStorage 撑爆。 */
+const MAX_SCHEDULED_PROMPTS = 50;
+
+function normalizeScheduledPrompt(value: unknown): ScheduledPrompt | null {
+  if (!value || typeof value !== "object") return null;
+  const item = value as Partial<ScheduledPrompt>;
+  if (
+    typeof item.id !== "string" || !item.id ||
+    typeof item.projectId !== "string" || !item.projectId ||
+    typeof item.conversationId !== "string" || !item.conversationId ||
+    typeof item.prompt !== "string" || !item.prompt.trim() ||
+    typeof item.time !== "string" || !TIME_OF_DAY_PATTERN.test(item.time) ||
+    typeof item.dueAt !== "number" || !Number.isFinite(item.dueAt)
+  ) return null;
+  return {
+    id: item.id,
+    projectId: item.projectId,
+    conversationId: item.conversationId,
+    conversationTitle: typeof item.conversationTitle === "string" && item.conversationTitle ? item.conversationTitle : "对话",
+    prompt: item.prompt.slice(0, 20_000),
+    time: item.time,
+    dueAt: item.dueAt,
+    createdAt: typeof item.createdAt === "number" && Number.isFinite(item.createdAt) ? item.createdAt : Date.now(),
+  };
+}
+
+export function loadScheduledPrompts(): ScheduledPrompt[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(SCHEDULED_PROMPTS_STORAGE_KEY) ?? "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map(normalizeScheduledPrompt)
+      .filter((item): item is ScheduledPrompt => item !== null)
+      .slice(0, MAX_SCHEDULED_PROMPTS);
+  } catch {
+    return [];
+  }
+}
+
+export function saveScheduledPrompts(prompts: ScheduledPrompt[]) {
+  localStorage.setItem(SCHEDULED_PROMPTS_STORAGE_KEY, JSON.stringify(prompts.slice(0, MAX_SCHEDULED_PROMPTS)));
+}
+
+/**
+ * 把 HH:mm 解析成下一次到达的绝对时刻。只有这一分钟整个过完了才排到明天：
+ * 在 14:30:40 配 14:30 的意思是「就这一分钟发」，不是等到明天同一时刻。
+ */
+export function nextDueAt(time: string, from = Date.now()) {
+  const match = TIME_OF_DAY_PATTERN.exec(time);
+  if (!match) return undefined;
+  const [hours, minutes] = time.split(":").map(Number);
+  const due = new Date(from);
+  due.setHours(hours, minutes, 0, 0);
+  if (due.getTime() + 60_000 <= from) due.setDate(due.getDate() + 1);
+  return due.getTime();
+}
+
+export function saveProjects(projects: Project[]) {  const serializable = projects.map((project) => ({
     ...project,
     conversations: project.conversations.map((conversation) => conversation.source === "claude"
       ? { ...conversation, messages: [], historyLoaded: false }

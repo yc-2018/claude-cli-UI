@@ -1,4 +1,4 @@
-import type { ActiveRunStatus, AppendRunRequest, AppSelection, AppSettings, AppUpdateState, Attachment, AttachmentUpload, BranchClaudeSessionResult, ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ClaudeWatchEvent, ControlResponseRequest, ModelConfig, OpenAttachmentResult, PermissionMode, PermissionNotificationRequest, Project, ProjectLinkTarget, ResumeSessionInTerminalRequest, ResumeSessionInTerminalResult, RunRequest, StartRunResult, UpdateActionResult } from "./types";
+import type { ActiveRunStatus, AppendRunRequest, AppSelection, AppSettings, AppUpdateState, Attachment, AttachmentUpload, BranchClaudeSessionResult, ClaudeEvent, ClaudeSessionHistory, ClaudeSessionSummary, ClaudeWatchEvent, ControlResponseRequest, ModelConfig, OpenAttachmentResult, PermissionMode, PermissionNotificationRequest, Project, ProjectLinkTarget, ResumeSessionInTerminalRequest, ResumeSessionInTerminalResult, RunRequest, RunShellTaskResult, SessionRewindPoint, ShellTask, StartRunResult, UpdateActionResult } from "./types";
 
 declare module "*.css";
 
@@ -18,6 +18,7 @@ declare global {
       getClaudeSessionHistories(workspace: string): Promise<ClaudeSessionHistory[]>;
       renameClaudeSession(workspace: string, sessionId: string, title: string): Promise<{ renamed: boolean; error?: string }>;
       branchClaudeSession(workspace: string, sessionId: string, userTurn: number, title: string): Promise<BranchClaudeSessionResult>;
+      getSessionRewindPoint(workspace: string, sessionId: string): Promise<SessionRewindPoint | null>;
       deleteClaudeSession(workspace: string, sessionId: string): Promise<{ deleted: boolean; error?: string }>;
       normalizeClaudeSession(workspace: string, sessionId: string): Promise<boolean>;
       stageAttachments(attachments: AttachmentUpload[]): Promise<Attachment[]>;
@@ -37,6 +38,7 @@ declare global {
       openProjectLink(target: ProjectLinkTarget): Promise<boolean>;
       getAppSettings(): Promise<AppSettings>;
       setAppSettings(settings: AppSettings): Promise<AppSettings>;
+      runShellTask(task: ShellTask): Promise<RunShellTaskResult>;
       focusWindow(): Promise<boolean>;
       notifyCompletion(conversationId: string, title: string): Promise<boolean>;
       notifyPermission(request: PermissionNotificationRequest): Promise<boolean>;

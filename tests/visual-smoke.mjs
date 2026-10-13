@@ -432,7 +432,7 @@ await page.screenshot({ path: resolve(artifacts, "collapsed-project-active-conve
 await page.locator(".project-toggle").click();
 await page.waitForSelector(`[data-conversation-id="${activeConversationBeforeCollapse}"]`);
 
-await page.locator(".settings-trigger").click();
+await page.locator(".settings-trigger[data-panel=\"settings\"]").click();
 await page.waitForSelector(".settings-popover");
 const settingsLayout = await page.evaluate(() => ({
   sidebar: document.querySelector(".sidebar")?.getBoundingClientRect().toJSON(),
@@ -474,7 +474,85 @@ if (updateDialogLayout.left < 0 || updateDialogLayout.top < 0 || updateDialogLay
 }
 await page.screenshot({ path: resolve(artifacts, "update-dialog.png") });
 await page.locator(".update-later-button").click();
-await page.locator(".settings-trigger").click();
+await page.locator(".settings-trigger[data-panel=\"settings\"]").click();
+
+// 底部那一行是设置 / 定时任务 / 答完执行三等分：三个按钮不能重叠、不能溢出侧边栏，面板也要留在侧边栏里。
+const sidebarToolsLayout = await page.evaluate(() => ({
+  sidebar: document.querySelector(".sidebar")?.getBoundingClientRect().toJSON(),
+  tools: [...document.querySelectorAll(".sidebar-tools .settings-trigger")].map((button) => ({
+    panel: button.getAttribute("data-panel"),
+    text: button.textContent?.trim(),
+    rect: button.getBoundingClientRect().toJSON(),
+  })),
+}));
+if (!sidebarToolsLayout.sidebar || sidebarToolsLayout.tools.length !== 3) {
+  throw new Error(`sidebar bottom row did not render three tools: ${JSON.stringify(sidebarToolsLayout)}`);
+}
+if (sidebarToolsLayout.tools.map((tool) => tool.panel).join(",") !== "settings,schedule,completion") {
+  throw new Error(`sidebar bottom row tools were out of order: ${JSON.stringify(sidebarToolsLayout.tools)}`);
+}
+for (let index = 0; index < sidebarToolsLayout.tools.length; index += 1) {
+  const tool = sidebarToolsLayout.tools[index];
+  const previous = sidebarToolsLayout.tools[index - 1];
+  if (
+    tool.rect.width <= 0 ||
+    tool.rect.left < sidebarToolsLayout.sidebar.left - 0.5 ||
+    tool.rect.right > sidebarToolsLayout.sidebar.right + 0.5 ||
+    tool.rect.top !== sidebarToolsLayout.tools[0].rect.top ||
+    (previous && tool.rect.left < previous.rect.right - 0.5)
+  ) throw new Error(`sidebar bottom row tools overlap or overflow: ${JSON.stringify(sidebarToolsLayout)}`);
+}
+// 三等分：桌面宽度下每个按钮的宽度必须接近相等。
+const toolWidths = sidebarToolsLayout.tools.map((tool) => tool.rect.width);
+if (Math.max(...toolWidths) - Math.min(...toolWidths) > 1.5) {
+  throw new Error(`sidebar bottom row was not split into thirds: ${JSON.stringify(toolWidths)}`);
+}
+await page.locator('.settings-trigger[data-panel="schedule"]').click();
+await page.waitForSelector(".settings-popover[aria-label=\"定时任务\"]");
+await page.screenshot({ path: resolve(artifacts, "schedule-task-popover.png") });
+await page.locator('.settings-trigger[data-panel="completion"]').click();
+await page.waitForSelector(".settings-popover[aria-label=\"回答完成后执行\"]");
+const completionLayout = await page.evaluate(() => ({
+  sidebar: document.querySelector(".sidebar")?.getBoundingClientRect().toJSON(),
+  popover: document.querySelector(".settings-popover")?.getBoundingClientRect().toJSON(),
+  examples: [...document.querySelectorAll(".completion-task-examples button")].map((button) => ({
+    text: button.textContent?.trim(),
+    rect: button.getBoundingClientRect().toJSON(),
+  })),
+}));
+if (
+  !completionLayout.sidebar ||
+  !completionLayout.popover ||
+  completionLayout.popover.left < completionLayout.sidebar.left ||
+  completionLayout.popover.right > completionLayout.sidebar.right ||
+  completionLayout.examples.length !== 4 ||
+  completionLayout.examples.some((example) => example.rect.left < completionLayout.popover.left
+    || example.rect.right > completionLayout.popover.right
+    || example.rect.bottom > completionLayout.popover.bottom)
+) throw new Error(`completion task popover escaped the sidebar: ${JSON.stringify(completionLayout)}`);
+await page.screenshot({ path: resolve(artifacts, "completion-task-popover.png") });
+await page.locator('.settings-trigger[data-panel="completion"]').click();
+await page.waitForSelector(".settings-popover", { state: "detached" });
+
+// 定时发送弹层开在发送框上方，不能越出窗口，也不能盖住输入区之外的东西。
+await page.locator(".schedule-send-button").click();
+await page.waitForSelector(".schedule-send-menu");
+const scheduleMenuLayout = await page.evaluate(() => ({
+  viewport: { width: window.innerWidth, height: window.innerHeight },
+  menu: document.querySelector(".schedule-send-menu")?.getBoundingClientRect().toJSON(),
+  composer: document.querySelector(".composer")?.getBoundingClientRect().toJSON(),
+}));
+if (
+  !scheduleMenuLayout.menu ||
+  !scheduleMenuLayout.composer ||
+  scheduleMenuLayout.menu.left < 0 ||
+  scheduleMenuLayout.menu.top < 0 ||
+  scheduleMenuLayout.menu.right > scheduleMenuLayout.viewport.width ||
+  scheduleMenuLayout.menu.bottom > scheduleMenuLayout.composer.bottom
+) throw new Error(`schedule send menu escaped the viewport: ${JSON.stringify(scheduleMenuLayout)}`);
+await page.screenshot({ path: resolve(artifacts, "schedule-send-menu.png") });
+await page.keyboard.press("Escape");
+await page.waitForSelector(".schedule-send-menu", { state: "detached" });
 
 const branchAction = page.locator('[aria-label="从这里分叉"]').first();
 if (await page.locator('[aria-label="从这里分叉"]').count() !== 12) throw new Error("completed assistant message did not expose a branch action");
@@ -763,7 +841,7 @@ if (compactDeleteDialogLayout.left < 0 || compactDeleteDialogLayout.top < 0 || c
 await page.screenshot({ path: resolve(artifacts, "delete-confirm-dialog-compact.png") });
 await page.locator(".delete-confirm-button.secondary").click();
 
-await page.locator(".settings-trigger").click();
+await page.locator(".settings-trigger[data-panel=\"settings\"]").click();
 await page.locator(".setting-update-button").click();
 await page.waitForSelector(".update-dialog");
 if (await page.locator(".update-ignore-button").count() !== 1) throw new Error("compact update dialog hid the per-version suppression action");
@@ -846,15 +924,15 @@ if (
   compactQueueLayout.composer.bottom > compactQueueLayout.viewport.height
 ) throw new Error(`compact prompt queue overflow: ${JSON.stringify(compactQueueLayout)}`);
 await page.screenshot({ path: resolve(artifacts, "prompt-queue-compact.png") });
-// 发送框工具栏：多了附加目录按钮之后，窄窗口下各控件只能收缩截断，绝不能溢出去压住右侧的停止 / 发送按钮。
+// 发送框工具栏：附件、附加目录、模型、思考、权限、重试、定时发送七个控件，窄窗口下只能收缩截断，绝不能溢出去压住右侧的停止 / 发送按钮。
 const compactToolbarLayout = await page.evaluate(() => ({
   actions: document.querySelector(".composer-actions")?.getBoundingClientRect().toJSON(),
   controls: [...document.querySelectorAll(".composer-options > *")]
     .filter((element) => getComputedStyle(element).display !== "none")
     .map((element) => element.getBoundingClientRect().toJSON()),
 }));
-if (!compactToolbarLayout.actions || compactToolbarLayout.controls.length !== 5) {
-  throw new Error(`compact composer toolbar did not render all five controls: ${JSON.stringify(compactToolbarLayout)}`);
+if (!compactToolbarLayout.actions || compactToolbarLayout.controls.length !== 7) {
+  throw new Error(`compact composer toolbar did not render all seven controls: ${JSON.stringify(compactToolbarLayout)}`);
 }
 for (let index = 0; index < compactToolbarLayout.controls.length; index += 1) {
   const control = compactToolbarLayout.controls[index];
@@ -877,6 +955,27 @@ await page.mouse.move(180, narrowHandle.y + 100, { steps: 6 });
 await page.mouse.up();
 await page.waitForFunction(() => Math.abs(document.querySelector(".sidebar").getBoundingClientRect().width - 220) < 1);
 await assertSectionControlsLayout();
+// 最窄侧边栏放不下三个按钮的文字，这时只留图标：仍然不能重叠、不能溢出。
+const narrowToolsLayout = await page.evaluate(() => ({
+  sidebar: document.querySelector(".sidebar")?.getBoundingClientRect().toJSON(),
+  labelsVisible: [...document.querySelectorAll(".sidebar-tools .settings-trigger span")]
+    .some((label) => getComputedStyle(label).display !== "none"),
+  tools: [...document.querySelectorAll(".sidebar-tools .settings-trigger")].map((button) => button.getBoundingClientRect().toJSON()),
+}));
+if (!narrowToolsLayout.sidebar || narrowToolsLayout.tools.length !== 3 || narrowToolsLayout.labelsVisible) {
+  throw new Error(`narrow sidebar did not collapse the bottom row to icons: ${JSON.stringify(narrowToolsLayout)}`);
+}
+for (let index = 0; index < narrowToolsLayout.tools.length; index += 1) {
+  const tool = narrowToolsLayout.tools[index];
+  const previous = narrowToolsLayout.tools[index - 1];
+  if (
+    tool.width <= 0 ||
+    tool.left < narrowToolsLayout.sidebar.left - 0.5 ||
+    tool.right > narrowToolsLayout.sidebar.right + 0.5 ||
+    (previous && tool.left < previous.right - 0.5)
+  ) throw new Error(`narrow sidebar bottom row overlapped: ${JSON.stringify(narrowToolsLayout)}`);
+}
+await page.screenshot({ path: resolve(artifacts, "sidebar-tools-compact.png") });
 await page.getByRole("button", { name: "收起置顶分组的所有项目", exact: true }).click();
 await page.waitForSelector(".project-conversations", { state: "detached" });
 await page.screenshot({ path: resolve(artifacts, "sidebar-fold-controls-compact.png") });

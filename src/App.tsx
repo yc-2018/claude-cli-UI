@@ -7,7 +7,7 @@ import PermissionDialog from "./PermissionDialog";
 import UserQuestionDialog from "./UserQuestionDialog";
 import Sidebar from "./Sidebar";
 import UpdateDialog from "./UpdateDialog";
-import { hasLegacyProjectsToMigrate, loadProjects, makeId, parseProjects, pathName, saveProjects, shorten } from "./storage";
+import { hasLegacyProjectsToMigrate, loadProjects, loadScheduledPrompts, makeId, nextDueAt, parseProjects, pathName, saveProjects, saveScheduledPrompts, shorten } from "./storage";
 import type {
   Activity,
   ActivityDetail,
@@ -33,6 +33,9 @@ import type {
   QueuedPrompt,
   ReorderPosition,
   RunRequest,
+  ScheduledPrompt,
+  SessionRewindPoint,
+  ShellTask,
   StartRunResult,
   TerminalKind,
   ThinkingEffort,
@@ -62,6 +65,8 @@ interface RunMeta {
   pendingThinking: string;
   activeTextBlockId?: string;
   flushTimer?: number;
+  /** 这一轮是带着截断点发出去的，被它顶掉的那一轮的提示 uuid：CLI 拒绝回退时要把它撤回来。 */
+  droppedPromptUuid?: string;
 }
 
 interface PendingPermission {
@@ -137,6 +142,15 @@ const DEFAULT_SIDEBAR_WIDTH = 280;
 const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 520;
 const SIDEBAR_WIDTH_STORAGE_KEY = "claude-desk.sidebar-width.v1";
+/** 定时任务的轮询间隔：只配到分钟，十秒一次已经足够准，又不会白跑。 */
+const SCHEDULE_TICK_MS = 10_000;
+/** 应用没开着时错过的定时任务不再补发：隔了很久才忽然发出去只会让人措手不及。 */
+const STALE_SCHEDULE_GRACE_MS = 5 * 60 * 1000;
+/** 导入的对话要先载入历史才能发送，等不到就作废，别一直占着这个任务。 */
+const MAX_SCHEDULE_ATTEMPTS = 6;
+const MAX_SCHEDULED_PROMPTS = 50;
+/** 收尾命令延后一会儿执行：队列里下一条的启动有空档，刚退出的进程也可能还在收尾。 */
+const COMPLETION_TASK_DELAY_MS = 4_000;
 
 /** 必须和主进程 `claudeSessionsDirectory` 的目录名规则逐字一致，否则 watcher 事件对不上项目。 */
 function sessionDirectoryKey(workspace: string) {
@@ -861,8 +875,46 @@ function getModelArgument(conversation: Conversation, config: ModelConfig) {
   return config.options[0]?.value ?? selected;
 }
 
-function importedConversation(summary: ClaudeSessionSummary): Conversation {
-  return {
+/**
+ * 把被回退掉的那些轮次从导入的历史里摘掉。CLI 的截断式恢复只是把它们移出对话链，记录仍留在
+ * session 文件里，而这边的解析是按文件顺序读的，不摘掉界面上就会并排出现两条「同一轮」。
+ * session 文件只追加，所以被丢掉的提示连着它那半截回答正好是一段连续区间，下一条用户消息就是边界。
+ */
+function pruneDroppedTurns(messages: ChatMessage[], droppedPromptUuids: string[] | undefined) {
+  if (!droppedPromptUuids?.length) return messages;
+  const dropped = new Set(droppedPromptUuids);
+  const kept: ChatMessage[] = [];
+  let skipping = false;
+  for (const message of messages) {
+    if (message.role === "user") skipping = dropped.has(message.id);
+    if (!skipping) kept.push(message);
+  }
+  return kept.length === messages.length ? messages : kept;
+}
+
+/** CLI 是不是拒绝了这次截断式恢复：拒绝意味着那一轮根本没被顶掉。 */
+function rewindWasRejected(stderr: string | undefined) {
+  if (!stderr) return false;
+  return stderr.includes("Resume rejected by --resume-drops-turn") || stderr.includes("No message found with message.uuid");
+}
+
+/**
+ * 截断式恢复被 CLI 拒绝时的解释。CLI 只在要丢掉的那段里混进了别的东西（被并进这一轮的排队
+ * 提示、子任务通知等）时才拒绝，这是在拦住一次会悄悄吞掉别人内容的回退，原文是英文命令行口径，
+ * 这里翻成界面语言并写清下一步怎么做。
+ */
+function describeCliFailure(stderr: string | undefined) {
+  if (!stderr) return stderr;
+  if (stderr.includes("Resume rejected by --resume-drops-turn")) {
+    return "这一轮里还混着别的内容（例如被并进来的排队提示），Claude CLI 拒绝回退它，以免连带丢掉那些内容。再发一次就会按普通方式接在后面。";
+  }
+  if (stderr.includes("No message found with message.uuid")) {
+    return "会话文件里找不到要回退到的那条记录，可能已经被 Claude 改写过。再发一次就会按普通方式接在后面。";
+  }
+  return stderr;
+}
+
+function importedConversation(summary: ClaudeSessionSummary): Conversation {  return {
     id: `claude-${summary.sessionId}`,
     title: summary.title,
     createdAt: summary.createdAt,
@@ -1007,6 +1059,17 @@ export default function App() {
   const [pendingDeletion, setPendingDeletion] = useState<PendingDeletion | null>(null);
   const [deletionBusy, setDeletionBusy] = useState(false);
   const [deletionError, setDeletionError] = useState("");
+  const [scheduledPrompts, setScheduledPrompts] = useState<ScheduledPrompt[]>(() => {
+    const now = Date.now();
+    return loadScheduledPrompts()
+      .filter((item) => item.dueAt > now - STALE_SCHEDULE_GRACE_MS)
+      .sort((left, right) => left.dueAt - right.dueAt);
+  });
+  /**
+   * 已布置的收尾命令。只放在内存里：重启后没有任何对话在跑，存下来的布置会在启动瞬间就执行，
+   * 等于一开机就关机。命令本身另外存进设置，方便下次复用。
+   */
+  const [armedCompletionTask, setArmedCompletionTask] = useState<ShellTask | null>(null);
   const projectsRef = useRef(projects);
   const activeConversationIdRef = useRef(activeConversationId);
   const appSettingsRef = useRef(appSettings);
@@ -1025,6 +1088,8 @@ export default function App() {
   const previousUpdatePhase = useRef(updateState.phase);
   const notifiedPermissionIds = useRef(new Set<string>());
   const cliCommandNoticeTimer = useRef<number | undefined>(undefined);
+  /** 定时任务为了等历史载入重试了多少次，超过上限就作废。 */
+  const scheduleAttempts = useRef(new Map<string, number>());
 
   const activeProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -1048,6 +1113,13 @@ export default function App() {
   );
   const pendingPermission = permissionQueue[0];
   const pendingQuestion = questionQueue[0];
+  const runningConversationIds = useMemo(() => new Set(Object.keys(activeRuns)), [activeRuns]);
+  // 还排着队的提示也算「没答完」：这时执行收尾命令会把后面几条生生掐掉。
+  const queuedPromptCount = useMemo(
+    () => Object.values(promptQueues).reduce((total, queue) => total + queue.length, 0),
+    [promptQueues],
+  );
+  const anyConversationRunning = runningConversationIds.size > 0;
 
   useEffect(() => {
     let canceled = false;
@@ -1280,7 +1352,7 @@ export default function App() {
         const next = {
           ...conversation,
           title: session.customTitle ?? conversation.title,
-          messages: history?.messages ?? conversation.messages,
+          messages: history ? pruneDroppedTurns(history.messages, conversation.droppedPromptUuids) : conversation.messages,
           updatedAt: Math.max(conversation.updatedAt, session.updatedAt),
           gitBranch: session.gitBranch ?? conversation.gitBranch,
           resolvedModel: session.resolvedModel ?? conversation.resolvedModel,
@@ -1557,7 +1629,7 @@ export default function App() {
         updateConversation(conversationId, (conversation) => history
           ? {
             ...conversation,
-            messages: history.messages,
+            messages: pruneDroppedTurns(history.messages, conversation.droppedPromptUuids),
             resolvedModel: history.resolvedModel ?? conversation.resolvedModel,
             permissionMode: history.permissionMode,
             contextUsage: history.contextUsage,
@@ -1979,8 +2051,17 @@ export default function App() {
       setPermissionQueue((current) => current.filter((item) => item.runId !== event.runId));
       flushPendingText(meta);
       if (!meta.completed) {
-        const detail = event.stderr || (event.code === 0 ? "Claude 已结束，但没有返回结果" : `Claude CLI 退出，代码 ${event.code ?? "未知"}`);
+        const detail = describeCliFailure(event.stderr) || (event.code === 0 ? "Claude 已结束，但没有返回结果" : `Claude CLI 退出，代码 ${event.code ?? "未知"}`);
         updateResponse(meta, (message) => ({ ...message, status: "error", activeActivityId: undefined, error: detail, ...finishResponse(message) }));
+        // CLI 拒绝了这次回退，那一轮其实还在对话链上：把「已被顶掉」的记录撤回来，
+        // 否则重新导入历史时会把一条仍然有效的提问从界面上藏掉。
+        if (meta.droppedPromptUuid && rewindWasRejected(event.stderr)) {
+          const droppedUuid = meta.droppedPromptUuid;
+          updateConversation(meta.conversationId, (conversation) => ({
+            ...conversation,
+            droppedPromptUuids: (conversation.droppedPromptUuids ?? []).filter((uuid) => uuid !== droppedUuid),
+          }));
+        }
       }
       setActiveRuns((current) => {
         const next = { ...current };
@@ -2297,7 +2378,7 @@ export default function App() {
     }
   };
 
-  const startPrompt = useCallback(async (conversationId: string, prompt: string, attachments: Attachment[]): Promise<StartOutcome> => {
+  const startPrompt = useCallback(async (conversationId: string, prompt: string, attachments: Attachment[], rewind?: Pick<SessionRewindPoint, "resumeSessionAt" | "resumeDropsTurn">): Promise<StartOutcome> => {
     const project = projectsRef.current.find((item) => item.conversations.some((conversation) => conversation.id === conversationId));
     const conversation = project?.conversations.find((item) => item.id === conversationId);
     if (!project || !conversation || (conversation.source === "claude" && !conversation.historyLoaded)) return "failed";
@@ -2339,6 +2420,7 @@ export default function App() {
       receivedThinking: false,
       pendingText: "",
       pendingThinking: "",
+      droppedPromptUuid: rewind?.resumeDropsTurn,
     });
     setActiveRuns((current) => ({ ...current, [conversationId]: runId }));
     processRunIds.current.set(conversationId, runId);
@@ -2360,6 +2442,9 @@ export default function App() {
       additionalDirectories: conversation.additionalDirectories,
       permissionMode: conversation.permissionMode,
       attachments,
+      apiMaxRetries: conversation.apiMaxRetries,
+      // 停止后重新编辑时带上截断点，让 CLI 把被放弃的那一轮顶掉，而不是在它后面再接一条。
+      ...(conversation.sessionId && rewind ? rewind : {}),
     };
     let started: StartRunResult;
     try {
@@ -2500,6 +2585,105 @@ export default function App() {
     if (!activeConversation) return;
     queuePromptFor(activeConversation.id, prompt, attachments);
   };
+
+  const schedulePrompt = (prompt: string, time: string) => {
+    if (!activeProject || !activeConversation) return "请先选择一个对话";
+    const dueAt = nextDueAt(time);
+    if (dueAt === undefined) return "时间请按 HH:mm 填写";
+    if (scheduledPrompts.length >= MAX_SCHEDULED_PROMPTS) return "定时任务太多了，先取消几个";
+    setScheduledPrompts((current) => [...current, {
+      id: makeId(),
+      projectId: activeProject.id,
+      conversationId: activeConversation.id,
+      conversationTitle: activeConversation.title,
+      prompt,
+      time,
+      dueAt,
+      createdAt: Date.now(),
+    }].sort((a, b) => a.dueAt - b.dueAt));
+    return undefined;
+  };
+
+  const cancelScheduledPrompt = (id: string) => {
+    setScheduledPrompts((current) => current.filter((item) => item.id !== id));
+  };
+
+  const openScheduledPrompt = (item: ScheduledPrompt) => {
+    if (!projects.some((project) => project.id === item.projectId
+      && project.conversations.some((conversation) => conversation.id === item.conversationId))) {
+      window.alert("这个定时任务对应的对话已经不在了");
+      return;
+    }
+    setSelectedProjectId(item.projectId);
+    setActiveConversationId(item.conversationId);
+  };
+
+  const armCompletionTask = (task: ShellTask | null) => {
+    setArmedCompletionTask(task);
+    // 命令本身存进设置：下次布置时不用重新打一遍。
+    if (task) changeAppSettings({ ...appSettingsRef.current, completionTask: task });
+  };
+
+  useEffect(() => {
+    saveScheduledPrompts(scheduledPrompts);
+  }, [scheduledPrompts]);
+
+  // 到点就把定时任务发出去。对话还在跑就排进它的待发送队列，不另起一个进程。
+  useEffect(() => {
+    if (scheduledPrompts.length === 0) return;
+    const fire = () => {
+      const now = Date.now();
+      const due = scheduledPrompts.filter((item) => item.dueAt <= now);
+      if (due.length === 0) return;
+      const fired = new Set<string>();
+      for (const item of due) {
+        const project = projectsRef.current.find((candidate) => candidate.id === item.projectId);
+        const conversation = project?.conversations.find((candidate) => candidate.id === item.conversationId);
+        // 对话已经被删掉了，这个任务没有去处，直接作废。
+        if (!project || !conversation) {
+          fired.add(item.id);
+          continue;
+        }
+        // 导入的对话重启后要先载入历史才能发送，而历史只为当前打开的那个对话加载：
+        // 先跳过去触发加载，下一次轮询再发。等不到就别一直占着，几次之后作废。
+        if (conversation.source === "claude" && !conversation.historyLoaded) {
+          const attempts = (scheduleAttempts.current.get(item.id) ?? 0) + 1;
+          scheduleAttempts.current.set(item.id, attempts);
+          if (attempts <= MAX_SCHEDULE_ATTEMPTS) {
+            setSelectedProjectId(item.projectId);
+            setActiveConversationId(item.conversationId);
+            continue;
+          }
+          fired.add(item.id);
+          continue;
+        }
+        fired.add(item.id);
+        scheduleAttempts.current.delete(item.id);
+        void startPrompt(item.conversationId, item.prompt, []).then((outcome) => {
+          if (outcome !== "started") queuePromptFor(item.conversationId, item.prompt, []);
+        });
+      }
+      if (fired.size > 0) setScheduledPrompts((current) => current.filter((item) => !fired.has(item.id)));
+    };
+    const timer = window.setInterval(fire, SCHEDULE_TICK_MS);
+    fire();
+    return () => window.clearInterval(timer);
+  }, [scheduledPrompts, startPrompt, queuePromptFor]);
+
+  /**
+   * 全部对话都答完了就执行布置好的收尾命令。多等一会儿再执行：队列里下一条的启动有个空档，
+   * 刚退出的进程也还可能在收尾，立刻执行会把它们掐掉。
+   */
+  useEffect(() => {
+    if (!armedCompletionTask || anyConversationRunning || queuedPromptCount > 0) return;
+    const timer = window.setTimeout(() => {
+      setArmedCompletionTask(null);
+      void window.claudeDesk.runShellTask(armedCompletionTask).then((result) => {
+        if (!result.started) window.alert(result.error ?? "无法执行收尾命令");
+      }).catch(() => undefined);
+    }, COMPLETION_TASK_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [armedCompletionTask, anyConversationRunning, queuedPromptCount]);
 
   const guideQueuedPrompt = (promptId: string) => {
     if (!activeConversation) return;
@@ -2653,15 +2837,30 @@ export default function App() {
     const isLastUserMessage = activeConversation.messages.slice(index + 1).every((message) => message.role !== "user");
     if (!isLastUserMessage) return;
     const attachments = target.attachments ?? [];
+    // 这一轮在 CLI 的会话里已经写下来了（停止也会留下半截记录）。先问出它的截断点，
+    // 发送时交给 CLI 的 --resume-session-at / --resume-drops-turn，新的一轮才会顶掉它
+    // 而不是在后面再堆一条——对应 CLI 里 esc esc 选 Restore conversation 的效果。
+    const candidate = activeConversation.sessionId
+      ? await window.claudeDesk.getSessionRewindPoint(activeProject.workspace, activeConversation.sessionId).catch(() => null)
+      : null;
+    // 正文对不上说明会话文件里的最后一轮不是界面上这一条（例如这一轮还没写进去），
+    // 这时宁可照旧追加，也不能让 CLI 去丢一轮别的内容。
+    const rewind = candidate && candidate.prompt.trim() === target.content.trim()
+      ? { resumeSessionAt: candidate.resumeSessionAt, resumeDropsTurn: candidate.resumeDropsTurn }
+      : undefined;
     setPermissionQueue((current) => current.filter((item) => item.conversationId !== activeConversation.id));
     setQuestionQueue((current) => current.filter((item) => item.conversationId !== activeConversation.id));
     updateConversation(activeConversation.id, (conversation) => ({
       ...conversation,
       updatedAt: Date.now(),
       messages: conversation.messages.slice(0, index),
+      // 被顶掉的那一轮仍留在 session 文件里，重新导入历史时要靠这份名单把它从界面上摘掉。
+      droppedPromptUuids: rewind
+        ? [...new Set([...(conversation.droppedPromptUuids ?? []), rewind.resumeDropsTurn])].slice(-200)
+        : conversation.droppedPromptUuids,
     }));
     processRunIds.current.delete(activeConversation.id);
-    await startPrompt(activeConversation.id, content, attachments);
+    await startPrompt(activeConversation.id, content, attachments, rewind);
   };
 
   // 提问/授权事件是按轮次 run id 发出的，回复必须落到进程 run id 上，否则主进程找不到对应进程。
@@ -2999,9 +3198,12 @@ export default function App() {
         appVersion={appVersion}
         collapsed={sidebarCollapsed}
         cliInfo={cliInfo}
-        runningConversationIds={new Set(Object.keys(activeRuns))}
+        runningConversationIds={runningConversationIds}
         appSettings={appSettings}
         updateState={updateState}
+        scheduledPrompts={scheduledPrompts}
+        anyConversationRunning={anyConversationRunning}
+        armedCompletionTask={armedCompletionTask}
         onSelectConversation={selectConversation}
         onNewProject={addProject}
         onNewConversation={addConversation}
@@ -3017,6 +3219,9 @@ export default function App() {
         onToggleConversationPinned={toggleConversationPinned}
         onToggleProjectPinned={toggleProjectPinned}
         onSettingsChange={changeAppSettings}
+        onCancelScheduledPrompt={cancelScheduledPrompt}
+        onOpenScheduledPrompt={openScheduledPrompt}
+        onArmCompletionTask={armCompletionTask}
         onCheckForUpdates={checkForUpdates}
         onToggle={() => setSidebarCollapsed((value) => !value)}
       />
@@ -3149,8 +3354,11 @@ export default function App() {
               queuedPrompts={promptQueues[activeConversation.id] ?? []}
               loadingHistory={activeConversation.source === "claude" && !activeConversation.historyLoaded}
               focusRequest={composerFocusRequest}
+              scheduledPrompts={scheduledPrompts.filter((item) => item.conversationId === activeConversation.id)}
               onSend={sendPrompt}
               onQueue={queuePrompt}
+              onSchedulePrompt={schedulePrompt}
+              onCancelScheduledPrompt={cancelScheduledPrompt}
               onGuideQueuedPrompt={guideQueuedPrompt}
               onStop={stopRun}
               onDeleteQueuedPrompt={deleteQueuedPrompt}
@@ -3172,6 +3380,7 @@ export default function App() {
               onRefreshModels={refreshModels}
               modelsRefreshing={modelsRefreshing}
               onThinkingEffortChange={(thinkingEffort) => updateConversation(activeConversation.id, (conversation) => ({ ...conversation, thinkingEffort }))}
+              onApiMaxRetriesChange={(apiMaxRetries) => updateConversation(activeConversation.id, (conversation) => ({ ...conversation, apiMaxRetries }))}
               onLocalCommand={runLocalCommand}
               onPermissionChange={changePermissionMode}
               onAdditionalDirectoriesChange={(additionalDirectories) => updateConversation(activeConversation.id, (conversation) => ({ ...conversation, additionalDirectories }))}

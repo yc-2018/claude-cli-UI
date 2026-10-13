@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  AlarmClock,
   ChevronDown,
   ChevronRight,
   ChevronsDownUp,
@@ -15,13 +16,22 @@ import {
   Pin,
   PinOff,
   Plus,
+  PowerOff,
   RefreshCw,
   Settings,
   Sparkles,
   Star,
   Trash2,
 } from "lucide-react";
-import type { AppSettings, AppUpdateState, Conversation, Project, ReorderPosition } from "./types";
+import type { AppSettings, AppUpdateState, Conversation, Project, ReorderPosition, ScheduledPrompt, ShellTask } from "./types";
+
+/** 「全部回答完成后执行」的常用收尾动作，省得用户自己去记命令。 */
+const COMPLETION_TASK_EXAMPLES: { label: string; task: ShellTask }[] = [
+  { label: "关机", task: { shell: "cmd", command: "shutdown /s /t 60" } },
+  { label: "休眠", task: { shell: "cmd", command: "shutdown /h" } },
+  { label: "睡眠", task: { shell: "cmd", command: "C:\\Windows\\System32\\rundll32.exe powrprof.dll,SetSuspendState 0,1,0" } },
+  { label: "锁屏", task: { shell: "cmd", command: "rundll32.exe user32.dll,LockWorkStation" } },
+];
 
 interface Props {
   projects: Project[];
@@ -33,6 +43,12 @@ interface Props {
   runningConversationIds: ReadonlySet<string>;
   appSettings: AppSettings;
   updateState: AppUpdateState;
+  /** 全部对话里还没发出去的定时任务。 */
+  scheduledPrompts: ScheduledPrompt[];
+  /** 是否有对话正在回答：没有时不能布置「回答完成后执行」。 */
+  anyConversationRunning: boolean;
+  /** 已经布置好的收尾命令，没布置时为 null。 */
+  armedCompletionTask: ShellTask | null;
   onSelectConversation(id: string): void;
   onNewProject(): void;
   onNewConversation(projectId: string): void;
@@ -48,12 +64,18 @@ interface Props {
   onToggleConversationPinned(projectId: string, conversationId: string): void;
   onToggleProjectPinned(projectId: string): void;
   onSettingsChange(settings: AppSettings): void;
+  onCancelScheduledPrompt(id: string): void;
+  onOpenScheduledPrompt(item: ScheduledPrompt): void;
+  /** 传 null 表示撤掉已布置的收尾命令。 */
+  onArmCompletionTask(task: ShellTask | null): void;
   onCheckForUpdates(): void;
   onToggle(): void;
 }
 
-interface EditingName {
-  kind: "project" | "conversation";
+/** 侧边栏底部那一行三个按钮各自对应的面板。 */
+type BottomPanel = "settings" | "schedule" | "completion" | null;
+
+interface EditingName {  kind: "project" | "conversation";
   id: string;
   // 同一个会话可能在所属文件夹和「置顶」里各渲染一次，重命名输入框只能出现在点了改名的那一份上：
   // 两个 autoFocus 输入框会互相抢焦点，先失焦的那个立刻触发保存，改名框还没输入就消失了。
@@ -116,6 +138,9 @@ export default function Sidebar({
   runningConversationIds,
   appSettings,
   updateState,
+  scheduledPrompts,
+  anyConversationRunning,
+  armedCompletionTask,
   onSelectConversation,
   onNewProject,
   onNewConversation,
@@ -131,6 +156,9 @@ export default function Sidebar({
   onToggleConversationPinned,
   onToggleProjectPinned,
   onSettingsChange,
+  onCancelScheduledPrompt,
+  onOpenScheduledPrompt,
+  onArmCompletionTask,
   onCheckForUpdates,
   onToggle,
 }: Props) {
@@ -142,7 +170,9 @@ export default function Sidebar({
   const [closedSections, setClosedSections] = useState<Set<SectionKey>>(() => new Set());
   const [editingName, setEditingName] = useState<EditingName | null>(null);
   const [refreshingProjects, setRefreshingProjects] = useState<Set<string>>(() => new Set());
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // 底部三个按钮共用一套开合：同时只开一个面板，外部点击和 Esc 的处理也只写一份。
+  const [openPanel, setOpenPanel] = useState<BottomPanel>(null);
+  const [taskDraft, setTaskDraft] = useState<ShellTask>(() => armedCompletionTask ?? appSettings.completionTask ?? { shell: "cmd", command: "" });
   const [draggedItem, setDraggedItem] = useState<DragItem | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
   const [pinDropSection, setPinDropSection] = useState<SectionKey | null>(null);
@@ -151,16 +181,16 @@ export default function Sidebar({
   const settingsRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (!settingsOpen) return;
+    if (!openPanel) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSettingsOpen(false);
+      if (event.key === "Escape") setOpenPanel(null);
     };
-    // 点设置框和设置按钮以外的任何地方都收起来：用 pointerdown 而不是 click，按下就收，底下那一下点击照常生效。
+    // 点面板和底部按钮以外的任何地方都收起来：用 pointerdown 而不是 click，按下就收，底下那一下点击照常生效。
     const closeOnOutsidePointer = (event: PointerEvent) => {
       const target = event.target instanceof Element ? event.target : null;
-      // 盖在上面的模态框（更新提示、权限询问等）由它自己接管这次点击，不该顺手把背后的设置收起来。
+      // 盖在上面的模态框（更新提示、权限询问等）由它自己接管这次点击，不该顺手把背后的面板收起来。
       if (!target || settingsRef.current?.contains(target) || target.closest("[aria-modal]")) return;
-      setSettingsOpen(false);
+      setOpenPanel(null);
     };
     window.addEventListener("keydown", closeOnEscape);
     window.addEventListener("pointerdown", closeOnOutsidePointer, true);
@@ -168,7 +198,7 @@ export default function Sidebar({
       window.removeEventListener("keydown", closeOnEscape);
       window.removeEventListener("pointerdown", closeOnOutsidePointer, true);
     };
-  }, [settingsOpen]);
+  }, [openPanel]);
 
   // 只在切换项目时展开目标，消息或标题更新不能撤销用户刚做的收起操作。
   useEffect(() => {
@@ -431,7 +461,7 @@ export default function Sidebar({
         <button
           className="icon-button"
           onClick={() => {
-            setSettingsOpen(true);
+            setOpenPanel("settings");
             onToggle();
           }}
           title="设置"
@@ -775,7 +805,7 @@ export default function Sidebar({
       </div>
       <div className="sidebar-bottom">
         <div className="settings-anchor" ref={settingsRef}>
-          {settingsOpen ? (
+          {openPanel === "settings" ? (
             <section className="settings-popover" aria-label="设置">
               <div className="settings-heading">设置</div>
               <div className="setting-group">
@@ -841,10 +871,142 @@ export default function Sidebar({
               </div>
             </section>
           ) : null}
-          <button className={`settings-trigger ${settingsOpen ? "active" : ""}`} onClick={() => setSettingsOpen((value) => !value)} type="button">
-            <Settings size={15} />
-            <span>设置</span>
-          </button>
+          {openPanel === "schedule" ? (
+            <section className="settings-popover" aria-label="定时任务">
+              <div className="settings-heading">定时任务</div>
+              {scheduledPrompts.length === 0 ? (
+                <div className="schedule-task-empty">还没有定时任务。在发送框底部的闹钟按钮里配一句话和时间。</div>
+              ) : (
+                <div className="schedule-task-list">
+                  {scheduledPrompts.map((item) => (
+                    <div className="schedule-task-item" key={item.id}>
+                      <button
+                        className="schedule-task-open"
+                        onClick={() => {
+                          onOpenScheduledPrompt(item);
+                          setOpenPanel(null);
+                        }}
+                        title="跳到这个对话"
+                        type="button"
+                      >
+                        <strong>{item.time}</strong>
+                        <span>
+                          <small>{item.conversationTitle}</small>
+                          <em>{item.prompt}</em>
+                        </span>
+                      </button>
+                      <button
+                        aria-label={`取消 ${item.time} 的定时任务`}
+                        className="schedule-task-cancel"
+                        onClick={() => onCancelScheduledPrompt(item.id)}
+                        title="取消"
+                        type="button"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          ) : null}
+          {openPanel === "completion" ? (
+            <section className="settings-popover" aria-label="回答完成后执行">
+              <div className="settings-heading">全部回答完成后执行</div>
+              <div className="completion-task-note">
+                {armedCompletionTask
+                  ? "已布置：等所有对话都答完就执行下面这条命令。"
+                  : anyConversationRunning
+                    ? "等所有对话都答完后执行一条本机命令，适合挂着长回答去睡觉。"
+                    : "现在没有对话在回答，布置了也没有等待的对象，所以暂时不能设置。"}
+              </div>
+              <div className="setting-group">
+                <span className="setting-label">执行方式</span>
+                <div className="segmented-control" role="group" aria-label="执行方式">
+                  <button
+                    className={taskDraft.shell === "cmd" ? "active" : ""}
+                    disabled={!anyConversationRunning || Boolean(armedCompletionTask)}
+                    onClick={() => setTaskDraft((draft) => ({ ...draft, shell: "cmd" }))}
+                    type="button"
+                  >
+                    CMD
+                  </button>
+                  <button
+                    className={taskDraft.shell === "powershell" ? "active" : ""}
+                    disabled={!anyConversationRunning || Boolean(armedCompletionTask)}
+                    onClick={() => setTaskDraft((draft) => ({ ...draft, shell: "powershell" }))}
+                    type="button"
+                  >
+                    PowerShell
+                  </button>
+                </div>
+              </div>
+              <input
+                aria-label="要执行的命令"
+                className="completion-task-input"
+                disabled={!anyConversationRunning || Boolean(armedCompletionTask)}
+                onChange={(event) => setTaskDraft((draft) => ({ ...draft, command: event.target.value }))}
+                placeholder="shutdown /s /t 60"
+                spellCheck={false}
+                type="text"
+                value={armedCompletionTask ? armedCompletionTask.command : taskDraft.command}
+              />
+              <div className="completion-task-examples">
+                {COMPLETION_TASK_EXAMPLES.map((example) => (
+                  <button
+                    disabled={!anyConversationRunning || Boolean(armedCompletionTask)}
+                    key={example.label}
+                    onClick={() => setTaskDraft(example.task)}
+                    title={example.task.command}
+                    type="button"
+                  >
+                    {example.label}
+                  </button>
+                ))}
+              </div>
+              <button
+                className="completion-task-submit"
+                disabled={armedCompletionTask ? false : (!anyConversationRunning || !taskDraft.command.trim())}
+                onClick={() => onArmCompletionTask(armedCompletionTask ? null : { ...taskDraft, command: taskDraft.command.trim() })}
+                type="button"
+              >
+                <PowerOff size={13} />
+                <span>{armedCompletionTask ? "撤销布置" : "答完后执行"}</span>
+              </button>
+            </section>
+          ) : null}
+          <div className="sidebar-tools">
+            <button className={`settings-trigger ${openPanel === "settings" ? "active" : ""}`} data-panel="settings" onClick={() => setOpenPanel((panel) => panel === "settings" ? null : "settings")} type="button">
+              <Settings size={15} />
+              <span>设置</span>
+            </button>
+            <button
+              className={`settings-trigger ${openPanel === "schedule" ? "active" : ""}`}
+              data-panel="schedule"
+              onClick={() => setOpenPanel((panel) => panel === "schedule" ? null : "schedule")}
+              title="查看、取消还没发送的定时任务"
+              type="button"
+            >
+              <AlarmClock size={15} />
+              <span>定时任务</span>
+              {scheduledPrompts.length > 0 ? <em className="sidebar-tool-count">{scheduledPrompts.length}</em> : null}
+            </button>
+            <button
+              className={`settings-trigger ${openPanel === "completion" ? "active" : ""} ${armedCompletionTask ? "armed" : ""}`}
+              data-panel="completion"
+              onClick={() => setOpenPanel((panel) => {
+                if (panel === "completion") return null;
+                // 设置是异步读进来的，开面板时再把上次用过的命令填上，比挂载那一刻去读可靠。
+                setTaskDraft((draft) => draft.command ? draft : (appSettings.completionTask ?? draft));
+                return "completion";
+              })}
+              title="全部对话回答完成时执行一条本机命令"
+              type="button"
+            >
+              <PowerOff size={15} />
+              <span>答完执行</span>
+            </button>
+          </div>
         </div>
         <div className="sidebar-version">claude-cli-UI v{appVersion || "…"}</div>
         <div className="sidebar-footer">

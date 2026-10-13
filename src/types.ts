@@ -8,6 +8,36 @@ export interface AppSettings {
   closeBehavior: "tray" | "quit";
   notifyOnCompletion: boolean;
   ignoredUpdateVersion?: string;
+  /**
+   * 「全部回答完成后执行」上次填过的命令。只记命令本身，不记是否已布置：
+   * 重启后没有任何对话在跑，布置状态要是也存下来就会在启动瞬间直接关机。
+   */
+  completionTask?: ShellTask;
+}
+
+/** 用户自己写的本机命令：关机、睡眠这类收尾动作，交给 cmd 或 PowerShell 执行。 */
+export interface ShellTask {
+  shell: TerminalKind;
+  command: string;
+}
+
+export interface RunShellTaskResult {
+  started: boolean;
+  error?: string;
+}
+
+/** 定时发送：到点把这句话发进指定对话，只配到分钟。 */
+export interface ScheduledPrompt {
+  id: string;
+  projectId: string;
+  conversationId: string;
+  conversationTitle: string;
+  prompt: string;
+  /** 用户填的 HH:mm（本地时间），列表里原样显示。 */
+  time: string;
+  /** HH:mm 解析出的绝对触发时刻：过了今天这个点就算到明天。 */
+  dueAt: number;
+  createdAt: number;
 }
 
 export interface AppSelection {
@@ -234,6 +264,13 @@ export interface Conversation {
   allowedTools?: string[];
   /** 用户通过发送框的附加目录按钮加入的目录，每次启动 CLI 时转成 --add-dir 参数。 */
   additionalDirectories?: string[];
+  /** 本对话的 API 失败重试次数，转成 CLAUDE_CODE_MAX_RETRIES；不填就用 CLI 自己的 10 次。 */
+  apiMaxRetries?: number;
+  /**
+   * 被回退掉的那些轮次的提示 uuid。CLI 的 --resume-drops-turn 只是把它们移出对话链，
+   * 记录本身仍留在 session 文件里；重新导入历史时要靠这份名单把它们从界面上摘掉。
+   */
+  droppedPromptUuids?: string[];
   source?: "claude";
   historyLoaded?: boolean;
   permissionMode: PermissionMode;
@@ -303,6 +340,25 @@ export interface RunRequest {
   additionalDirectories?: string[];
   permissionMode: PermissionMode;
   attachments?: Attachment[];
+  /** 本轮的 API 重试次数上限，传给 CLI 的 CLAUDE_CODE_MAX_RETRIES。 */
+  apiMaxRetries?: number;
+  /**
+   * 截断式恢复：只把 session 读到这条链上记录为止（对应 CLI 的 --resume-session-at），
+   * 用来把停止后重新编辑的那一轮真正顶掉，而不是在原会话后面再堆一条。
+   */
+  resumeSessionAt?: string;
+  /** 配合 resumeSessionAt 声明这次要丢掉的那一轮的提示 uuid（--resume-drops-turn）。 */
+  resumeDropsTurn?: string;
+}
+
+/** 某一轮用户提示在 session 文件里的位置：回退时要同时交给 CLI 的两个 uuid。 */
+export interface SessionRewindPoint {
+  /** 要保留到的那条链上记录（被丢弃轮次的 parentUuid）。 */
+  resumeSessionAt: string;
+  /** 被丢弃的那一轮的提示 uuid。 */
+  resumeDropsTurn: string;
+  /** 这一轮的提示正文，供渲染层核对确实是它要改的那一条。 */
+  prompt: string;
 }
 
 export interface StartRunResult {

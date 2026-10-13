@@ -1,4 +1,5 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
 const args = process.argv.slice(2);
@@ -58,6 +59,9 @@ const processPrompt = (input) => {
     ? "33333333-3333-4333-8333-333333333333"
     : prompt.includes("时间线排序测试")
       ? "66666666-6666-4666-8666-666666666666"
+    // 回退重编辑要独占一个会话：和别的用例共用默认 session id 会让同一个会话挂在两个对话上。
+    : prompt.includes("回退重编辑测试")
+      ? "77777777-7777-4777-8777-777777777777"
     : prompt.includes("后台托盘测试")
       ? "55555555-5555-4555-8555-555555555555"
       : "22222222-2222-4222-8222-222222222222");
@@ -137,8 +141,65 @@ const processPrompt = (input) => {
     }
   }
   const sessionsDirectory = process.env.CLAUDE_DESK_FAKE_SESSIONS_DIR ?? process.env.CLAUDE_DESK_TEST_SESSIONS_DIR;
+  // 把这次运行拿到的重试环境变量和截断式恢复参数落到日志里：重试设置和「停止后重新编辑」据此断言。
+  if (process.env.CLAUDE_DESK_TEST_RUN_LOG) {
+    const argValue = (name) => {
+      const index = args.indexOf(name);
+      return index >= 0 ? args[index + 1] : null;
+    };
+    appendFileSync(process.env.CLAUDE_DESK_TEST_RUN_LOG, `${JSON.stringify({
+      prompt: prompt.trim().slice(0, 200),
+      maxRetries: process.env.CLAUDE_CODE_MAX_RETRIES ?? null,
+      retryWatchdog: process.env.CLAUDE_CODE_RETRY_WATCHDOG ?? null,
+      resumeSessionAt: argValue("--resume-session-at"),
+      resumeDropsTurn: argValue("--resume-drops-turn"),
+    })}\n`, "utf8");
+  }
   // 运行中改名的回归要往真实的 session 文件里补写标题，所以这一轮必须落一份历史。
   const persistTestPrompt = prompt.includes("这是首次会话名称测试内容") || prompt.includes("分支继续测试") || prompt.includes("运行中改名测试");
+  // 截断式恢复要靠 uuid / parentUuid 定位，所以这个场景必须写出真正带链的记录。
+  const persistChainedPrompt = prompt.includes("回退重编辑测试");
+  if (sessionsDirectory && persistChainedPrompt) {
+    mkdirSync(sessionsDirectory, { recursive: true });
+    const sessionFile = resolve(sessionsDirectory, `${sessionId}.jsonl`);
+    let parentUuid = null;
+    if (existsSync(sessionFile)) {
+      for (const line of readFileSync(sessionFile, "utf8").split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        try {
+          const record = JSON.parse(line);
+          if (typeof record?.uuid === "string") parentUuid = record.uuid;
+        } catch {
+          // 跳过写坏的行。
+        }
+      }
+    }
+    const userUuid = randomUUID();
+    const assistantUuid = randomUUID();
+    const records = [
+      {
+        type: "user",
+        uuid: userUuid,
+        parentUuid,
+        timestamp: new Date().toISOString(),
+        cwd: process.cwd(),
+        sessionId,
+        permissionMode: "acceptEdits",
+        promptSource: "sdk",
+        entrypoint: "sdk-cli",
+        message: { role: "user", content: prompt.trim() },
+      },
+      {
+        type: "assistant",
+        uuid: assistantUuid,
+        parentUuid: userUuid,
+        timestamp: new Date().toISOString(),
+        sessionId,
+        message: { role: "assistant", content: [{ type: "text", text: "回退重编辑测试已记录。" }] },
+      },
+    ];
+    appendFileSync(sessionFile, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+  }
   if (sessionsDirectory && persistTestPrompt) {
     mkdirSync(sessionsDirectory, { recursive: true });
     const records = [
@@ -157,8 +218,13 @@ const processPrompt = (input) => {
     ];
     appendFileSync(resolve(sessionsDirectory, `${sessionId}.jsonl`), `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
   }
-  if (prompt.includes("模拟失败")) {
-    process.stderr.write("模拟 CLI 错误");
+  // 复刻 CLI 拒绝截断式恢复的情形：要丢掉的那一段里混进了别的内容时，它就这样退出。
+  if (prompt.includes("回退被拒测试") && args.includes("--resume-drops-turn")) {
+    process.stderr.write("Resume rejected by --resume-drops-turn: discarded range contains content from other turns");
+    setImmediate(() => process.exit(2));
+    return;
+  }
+  if (prompt.includes("模拟失败")) {    process.stderr.write("模拟 CLI 错误");
     setImmediate(() => process.exit(2));
     return;
   }

@@ -1,6 +1,6 @@
 import { _electron as electron } from "playwright";
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { basename, dirname, resolve } from "node:path";
 
@@ -21,6 +21,10 @@ const processExitGate = resolve(profile, "release-process-exit");
 const terminalLog = resolve(profile, "terminal-launches.jsonl");
 const addDirLog = resolve(profile, "add-dir-launches.jsonl");
 const dialogLog = resolve(profile, "directory-dialogs.jsonl");
+const runLog = resolve(profile, "cli-runs.jsonl");
+const shellTaskLog = resolve(profile, "shell-tasks.jsonl");
+/** 收尾命令是等所有回答都结束后再延后执行的，断言「没有多执行一次」时要等过这段时间。 */
+const COMPLETION_TASK_SETTLE_MS = 7_000;
 const packagedExecutable = process.env.CLAUDE_DESK_TEST_EXECUTABLE;
 await mkdir(profile, { recursive: true });
 await mkdir(cliSessions, { recursive: true });
@@ -194,6 +198,8 @@ const launch = () => electron.launch({
     CLAUDE_DESK_TEST_TERMINAL_LOG: terminalLog,
     CLAUDE_DESK_TEST_ADD_DIR_LOG: addDirLog,
     CLAUDE_DESK_TEST_DIALOG_LOG: dialogLog,
+    CLAUDE_DESK_TEST_RUN_LOG: runLog,
+    CLAUDE_DESK_TEST_SHELL_TASK_LOG: shellTaskLog,
     CLAUDE_DESK_DISABLE_NOTIFICATIONS: "1",
     CLAUDE_DESK_TEST_OFFSCREEN: "1",
     CLAUDE_DESK_DISABLE_AUTO_UPDATE_CHECK: "1",
@@ -331,7 +337,7 @@ try {
     throw new Error(`launcher copy does not match the current portable build: ${launcherBytes.length} bytes`);
   }
 
-  await page.locator(".settings-trigger").click();
+  await page.locator(".settings-trigger[data-panel=\"settings\"]").click();
   const traySetting = page.locator(".segmented-control button", { hasText: "托盘后台" });
   const quitSetting = page.locator(".segmented-control button", { hasText: "退出应用" });
   const completionSetting = page.locator(".setting-toggle-row input");
@@ -437,11 +443,11 @@ try {
   // 点设置框以外的地方就收起来，不用再点一次设置按钮。
   await page.locator(".sidebar-version").click();
   await page.waitForSelector(".settings-popover", { state: "detached" });
-  await page.locator(".settings-trigger").click();
+  await page.locator(".settings-trigger[data-panel=\"settings\"]").click();
   await page.waitForSelector(".settings-popover");
-  await page.locator(".settings-trigger").click();
+  await page.locator(".settings-trigger[data-panel=\"settings\"]").click();
   await page.waitForSelector(".settings-popover", { state: "detached" });
-  await page.locator(".settings-trigger").click();
+  await page.locator(".settings-trigger[data-panel=\"settings\"]").click();
   await page.waitForSelector(".settings-popover");
   await page.keyboard.press("Escape");
   await page.waitForSelector(".settings-popover", { state: "detached" });
@@ -1177,6 +1183,207 @@ try {
     throw new Error(`directory picker fell back to the system default folder: ${JSON.stringify(directoryDialogs)}`);
   }
 
+  // 重试次数：界面上选的次数要变成 CLI 的 CLAUDE_CODE_MAX_RETRIES，超过 15 次还要带上看守开关才不会被 CLI 截断。
+  const readRuns = async () => (await readFile(runLog, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  await page.locator(".retry-select .composer-select-trigger").click();
+  await page.locator(".retry-select .composer-select-option", { hasText: "重试 30 次" }).click();
+  await page.waitForFunction(() => document.querySelector(".retry-select .composer-select-value")?.textContent?.includes("重试 30 次"));
+  await page.locator(".composer textarea").fill("重试次数回归测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  const retryRun = (await readRuns()).reverse().find((run) => run.prompt === "重试次数回归测试");
+  if (!retryRun || retryRun.maxRetries !== "30" || retryRun.retryWatchdog !== "1") {
+    throw new Error(`retry count was not passed to the CLI: ${JSON.stringify(retryRun)}`);
+  }
+  // 回到 CLI 默认：不该再往环境里塞任何重试变量。
+  await page.locator(".retry-select .composer-select-trigger").click();
+  await page.locator(".retry-select .composer-select-option", { hasText: "重试 10 次" }).click();
+  await page.locator(".composer textarea").fill("重试默认回归测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  const defaultRetryRun = (await readRuns()).reverse().find((run) => run.prompt === "重试默认回归测试");
+  if (!defaultRetryRun || defaultRetryRun.maxRetries !== null || defaultRetryRun.retryWatchdog !== null) {
+    throw new Error(`default retry count still overrode the CLI env: ${JSON.stringify(defaultRetryRun)}`);
+  }
+
+  // 定时发送：到点由界面自己把这句话发进这个对话，列表里能看能撤。
+  const pad = (value) => String(value).padStart(2, "0");
+  const laterToday = new Date(Date.now() + 90 * 60 * 1000);
+  const laterTime = `${pad(laterToday.getHours())}:${pad(laterToday.getMinutes())}`;
+  await page.locator(".schedule-send-button").click();
+  await page.locator(".schedule-send-time input").fill(laterTime);
+  await page.locator(".schedule-send-prompt").fill("定时发送取消测试");
+  await page.locator(".schedule-send-submit").click();
+  await page.waitForFunction(() => document.querySelector(".schedule-send-count")?.textContent === "1");
+  await page.keyboard.press("Escape");
+  // 侧边栏的定时任务面板要看得到它，并且能导航、能取消。
+  await page.locator('.settings-trigger[data-panel="schedule"]').click();
+  await page.waitForSelector(".schedule-task-item");
+  const scheduledText = await page.locator(".schedule-task-item").first().textContent();
+  if (!scheduledText?.includes(laterTime) || !scheduledText.includes("定时发送取消测试")) {
+    throw new Error(`scheduled prompt was not listed in the sidebar: ${scheduledText}`);
+  }
+  await page.locator(".schedule-task-cancel").first().click();
+  await page.waitForFunction(() => !document.querySelector(".schedule-task-item"));
+  await page.keyboard.press("Escape");
+  if (await page.locator(".schedule-send-count").count()) throw new Error("canceling a scheduled prompt left the composer badge behind");
+  // 当前这一分钟就算到点：排进去之后应该很快真的发出去。
+  const now = new Date();
+  const dueTime = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  await page.locator(".schedule-send-button").click();
+  await page.locator(".schedule-send-time input").fill(dueTime);
+  await page.locator(".schedule-send-prompt").fill("定时发送到点测试");
+  await page.locator(".schedule-send-submit").click();
+  await page.waitForFunction(
+    () => [...document.querySelectorAll(".user-bubble")].some((item) => item.textContent === "定时发送到点测试"),
+    undefined,
+    { timeout: 20_000 },
+  );
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  if (!(await page.locator(".markdown").last().textContent())?.includes("测试通过：定时发送到点测试")) {
+    throw new Error("scheduled prompt was not actually sent to Claude");
+  }
+  if (await page.locator(".schedule-send-count").count()) throw new Error("a fired scheduled prompt stayed in the list");
+
+  // 全部回答完成后执行：只有在有对话正在回答时才能布置，答完之后命令要真的被执行一次。
+  await page.locator('.settings-trigger[data-panel="completion"]').click();
+  if (!(await page.locator(".completion-task-submit").isDisabled())) {
+    throw new Error("completion task could be armed while nothing was answering");
+  }
+  await page.keyboard.press("Escape");
+  await page.locator(".composer textarea").fill("慢任务");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForSelector(".send-button.stop");
+  await page.locator('.settings-trigger[data-panel="completion"]').click();
+  await page.locator(".completion-task-examples button", { hasText: "锁屏" }).click();
+  if (await page.locator(".completion-task-input").inputValue() !== "rundll32.exe user32.dll,LockWorkStation") {
+    throw new Error("completion task example did not fill the command");
+  }
+  await page.locator(".completion-task-input").fill("echo completion-task-fired");
+  await page.locator(".completion-task-submit").click();
+  await page.waitForFunction(() => document.querySelector(".completion-task-submit")?.textContent?.includes("撤销布置"));
+  await page.keyboard.press("Escape");
+  if (!(await page.locator('.settings-trigger[data-panel="completion"]').getAttribute("class"))?.includes("armed")) {
+    throw new Error("armed completion task was not reflected on the sidebar button");
+  }
+  await writeFile(processExitGate, "go", "utf8");
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  await page.waitForFunction(
+    async () => (await window.claudeDesk.getActiveRuns()).length === 0,
+    undefined,
+    { timeout: 20_000 },
+  );
+  const firedTask = await (async () => {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const lines = (await readFile(shellTaskLog, "utf8").catch(() => "")).trim().split("\n").filter(Boolean);
+      const found = lines.map((line) => JSON.parse(line)).find((task) => task.command === "echo completion-task-fired");
+      if (found) return found;
+      await page.waitForTimeout(500);
+    }
+    return null;
+  })();
+  if (!firedTask || firedTask.shell !== "cmd") {
+    throw new Error(`completion task was not executed after every answer finished: ${JSON.stringify(firedTask)}`);
+  }
+  if (await page.locator('.settings-trigger[data-panel="completion"].armed').count()) {
+    throw new Error("completion task stayed armed after it ran");
+  }
+  // 命令只执行一次：布置已经撤掉，后面再跑一轮不该再执行它。
+  await page.locator(".composer textarea").fill("收尾命令只执行一次测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  await page.waitForTimeout(COMPLETION_TASK_SETTLE_MS);
+  const firedCount = (await readFile(shellTaskLog, "utf8").catch(() => "")).trim().split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line)).filter((task) => task.command === "echo completion-task-fired").length;
+  if (firedCount !== 1) throw new Error(`completion task ran ${firedCount} times, expected exactly once`);
+
+  // 停止后重新编辑：新的一轮必须带上截断点，让 CLI 把被放弃的那一轮顶掉（对应 esc esc 里的
+  // Restore conversation），而不是在原会话后面再堆一条。单开一个对话跑，免得和别的用例互相干扰。
+  const conversationBeforeRewind = await page.locator(".task-heading h2").textContent();
+  await page.locator(".project-row").first().hover();
+  await page.locator('.project-action[title="新建对话"]').click();
+  await page.waitForFunction(() => document.querySelector(".conversation-intro") !== null);
+  await page.locator(".composer textarea").fill("回退重编辑测试 一");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  await page.locator(".composer textarea").fill("回退重编辑测试 二");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  // 直接从会话文件里取这两个 uuid：断言的就是「发给 CLI 的截断点正是被放弃那一轮的位置」。
+  const chainRecords = async () => {
+    const files = await readdir(cliSessions);
+    const records = [];
+    for (const file of files.filter((name) => name.endsWith(".jsonl"))) {
+      for (const line of (await readFile(resolve(cliSessions, file), "utf8")).split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        try {
+          records.push(JSON.parse(line));
+        } catch {
+          // 跳过写坏的行。
+        }
+      }
+    }
+    return records;
+  };
+  const droppedTurn = (await chainRecords()).find((record) => record.type === "user" && record.message?.content === "回退重编辑测试 二");
+  if (!droppedTurn?.uuid || !droppedTurn.parentUuid) {
+    throw new Error(`fake CLI did not write a chained session record: ${JSON.stringify(droppedTurn)}`);
+  }
+  const lastUserBubble = page.locator(".message.user").last();
+  await lastUserBubble.hover();
+  await lastUserBubble.locator('[aria-label="编辑并重新发送"]').click();
+  const rewindEditBox = lastUserBubble.locator(".user-bubble.editing textarea");
+  await rewindEditBox.waitFor();
+  await rewindEditBox.fill("回退重编辑测试 三");
+  await rewindEditBox.press("Enter");
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
+  const rewoundRun = (await readRuns()).reverse().find((run) => run.prompt === "回退重编辑测试 三");
+  if (!rewoundRun || rewoundRun.resumeSessionAt !== droppedTurn.parentUuid || rewoundRun.resumeDropsTurn !== droppedTurn.uuid) {
+    throw new Error(`edited turn did not truncate the resumed session: ${JSON.stringify({ rewoundRun, droppedTurn: { uuid: droppedTurn.uuid, parentUuid: droppedTurn.parentUuid } })}`);
+  }
+  // 被顶掉的那一轮仍留在会话文件里（CLI 只是把它移出对话链），但界面上不能再出现第二条。
+  if (await page.locator(".user-bubble", { hasText: "回退重编辑测试 二" }).count()) {
+    throw new Error("the superseded turn stayed visible in the conversation");
+  }
+  await page.waitForFunction(async () => {
+    const projects = await window.claudeDesk.getProjectStore();
+    return Array.isArray(projects) && projects.some((project) => project.conversations.some((conversation) =>
+      Array.isArray(conversation.droppedPromptUuids) && conversation.droppedPromptUuids.length > 0));
+  });
+  // 重新读一遍历史：被放弃的那一轮不能靠文件顺序又冒出来。
+  await refreshProjectSessions(page);
+  await page.waitForTimeout(500);
+  if (await page.locator(".user-bubble", { hasText: "回退重编辑测试 二" }).count()) {
+    throw new Error("re-importing the session resurrected the superseded turn");
+  }
+  // CLI 拒绝回退时（要丢的那段混进了别的内容）：错误要说人话，而且不能把一条仍然有效的提问
+  // 记成「已被顶掉」——否则重新导入历史时它会从界面上凭空消失。
+  const rejectedTurn = (await chainRecords()).find((record) => record.type === "user" && record.message?.content === "回退重编辑测试 三");
+  if (!rejectedTurn?.uuid) throw new Error("fake CLI did not record the edited turn");
+  const rewrittenBubble = page.locator(".message.user").last();
+  await rewrittenBubble.hover();
+  await rewrittenBubble.locator('[aria-label="编辑并重新发送"]').click();
+  const rejectEditBox = rewrittenBubble.locator(".user-bubble.editing textarea");
+  await rejectEditBox.waitFor();
+  await rejectEditBox.fill("回退被拒测试");
+  await rejectEditBox.press("Enter");
+  await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "error");
+  const rejectedError = await page.locator(".message.assistant").last().textContent();
+  if (!rejectedError?.includes("Claude CLI 拒绝回退它") || rejectedError.includes("--resume-drops-turn")) {
+    throw new Error(`rewind refusal was not explained in the UI: ${rejectedError}`);
+  }
+  await page.waitForFunction(async (uuid) => {
+    const projects = await window.claudeDesk.getProjectStore();
+    const conversations = Array.isArray(projects) ? projects.flatMap((project) => project.conversations ?? []) : [];
+    return conversations.every((conversation) => !(conversation.droppedPromptUuids ?? []).includes(uuid));
+  }, rejectedTurn.uuid);
+
+  // 把选中项还回去：后面的用例都接着原来那个对话继续。
+  if (!conversationBeforeRewind) throw new Error("could not remember which conversation was open before the rewind test");  await inFolder(page, ".task-row strong")
+    .filter({ hasText: new RegExp(`^${conversationBeforeRewind.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) })
+    .click();
+  await page.waitForFunction((title) => document.querySelector(".task-heading h2")?.textContent === title, conversationBeforeRewind);
+
   await page.evaluate(() => {
     const container = document.querySelector(".conversation-scroll");
     if (container) container.scrollTop = 0;
@@ -1504,7 +1711,7 @@ try {
 
   await page.locator(".project-row").first().hover();
   await page.locator('.project-action[title="新建对话"]').click();
-  await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 4);
+  await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 5);
   if (await page.locator(".conversation-intro").count() !== 1) throw new Error("new conversation did not open independently");
   // 回归：新建对话必须默认使用完全访问权限，用户不必先改模式就能连续执行命令。
   if (!(await page.locator(".permission-select .composer-select-value").textContent())?.includes("完全访问权限")) {
@@ -1568,10 +1775,10 @@ try {
 
   await page.locator(".composer textarea").fill("/new");
   await page.locator(".composer textarea").press("Enter");
-  await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 5);
+  await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 6);
   await page.locator(".composer textarea").fill("/project");
   await page.locator(".composer textarea").press("Enter");
-  await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 6);
+  await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 7);
   if (await page.locator(".project-group").count() !== 1) throw new Error("same workspace created a duplicate project");
 
   await page.locator(".composer textarea").fill("模拟失败");
@@ -2068,7 +2275,7 @@ try {
   await electronApp.close();
   electronApp = undefined;
   const projectStore = JSON.parse(await readFile(resolve(profile, "projects.json"), "utf8"));
-  if (!Array.isArray(projectStore) || projectStore.length !== 1 || projectStore[0]?.conversations?.length !== 6) {
+  if (!Array.isArray(projectStore) || projectStore.length !== 1 || projectStore[0]?.conversations?.length !== 7) {
     throw new Error("main-process project store was not written");
   }
   const persistedSettings = JSON.parse(await readFile(resolve(profile, "settings.json"), "utf8"));
@@ -2097,12 +2304,12 @@ try {
   }
   await page.waitForTimeout(250);
   if (await page.locator(".update-dialog").count()) throw new Error("ignored update version prompted again after restart");
-  await page.locator(".settings-trigger").click();
+  await page.locator(".settings-trigger[data-panel=\"settings\"]").click();
   await page.locator(".setting-update-button").click();
   await page.waitForSelector(".update-dialog");
   await page.locator(".update-later-button").click();
   await page.waitForSelector(".update-dialog", { state: "detached" });
-  await page.locator(".settings-trigger").click();
+  await page.locator(".settings-trigger[data-panel=\"settings\"]").click();
   useLegacyUpdateManifest = true;
   const newerUpdateState = await page.evaluate(() => window.claudeDesk.checkAppUpdate());
   if (newerUpdateState.phase !== "available" || newerUpdateState.latestVersion !== legacyUpdateVersion) {
@@ -2121,7 +2328,7 @@ try {
   if (localSessionAfterRestart.includes('"entrypoint":"sdk-cli"') || localSessionAfterRestart.includes('"promptSource":"sdk"')) {
     throw new Error("existing local UI session was not migrated for the CLI resume picker");
   }
-  if (await page.locator(".project-group").count() !== 1 || await page.locator(".project-conversations .task-row").count() !== 6) {
+  if (await page.locator(".project-group").count() !== 1 || await page.locator(".project-conversations .task-row").count() !== 7) {
     throw new Error("project/conversation hierarchy did not survive restart");
   }
   if (await page.locator(".project-name strong").textContent() !== "我的 Claude 项目" || await page.locator(".project-name small").textContent() !== workspaceDirectoryName) {
@@ -2194,7 +2401,7 @@ try {
   }
   await inFolder(page, ".task-row.active .task-delete").evaluate((button) => button.click());
   await page.locator(".delete-confirm-button.danger").click();
-  await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 5);
+  await page.waitForFunction(() => document.querySelectorAll(".project-conversations .task-row").length === 6);
   await page.waitForSelector(".project-row.active");
   if (await page.locator(".task-row.active").count() !== 0 || await page.locator(".composer").count() !== 0 || await page.locator(".project-empty-view").count() !== 1) {
     throw new Error("deleting the active conversation did not leave its project selected without opening another conversation");
@@ -2511,7 +2718,7 @@ try {
     };
     const projectList = document.querySelector('[data-section="pinned"]');
     const projectLabel = document.querySelector('[data-section-label="pinned"]');
-    const settingsTrigger = document.querySelector(".settings-trigger");
+    const settingsTrigger = document.querySelector('.settings-trigger[data-panel="settings"]');
     const projectHandle = document.querySelector('.project-group[data-project-id="order-project-a"] .project-drag-handle');
     const conversationList = document.querySelector('.project-group[data-project-id="order-project-a"] .project-conversations');
     const conversationHandle = document.querySelector('.project-group[data-project-id="order-project-a"] [data-conversation-id="order-conversation-a"] .task-drag-handle');
@@ -2626,9 +2833,13 @@ try {
     selectedModel: firstConversation.selectedModel,
     cliModel: firstConversation.resolvedModel,
     projects: 1,
-    conversations: 6,
+    conversations: 7,
     importedCliHistory: true,
     additionalDirectories: true,
+    apiRetryOverride: true,
+    scheduledPrompts: true,
+    completionShellTask: true,
+    truncatingResumeOnEdit: true,
     slashCommands: true,
     legacyMigration: true,
     corruptDataRecovery: true,

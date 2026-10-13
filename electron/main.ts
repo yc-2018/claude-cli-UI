@@ -16,6 +16,12 @@ interface AppSettings {
   closeBehavior: "tray" | "quit";
   notifyOnCompletion: boolean;
   ignoredUpdateVersion?: string;
+  completionTask?: ShellTask;
+}
+
+interface ShellTask {
+  shell: "cmd" | "powershell";
+  command: string;
 }
 
 interface AppSelection {
@@ -36,6 +42,9 @@ interface RunRequest {
   additionalDirectories?: string[];
   permissionMode: PermissionMode;
   attachments?: Attachment[];
+  apiMaxRetries?: number;
+  resumeSessionAt?: string;
+  resumeDropsTurn?: string;
 }
 
 interface AppendRunRequest {
@@ -207,6 +216,14 @@ const IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "imag
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES = 40 * 1024 * 1024;
 const MAX_PROJECT_STORE_BYTES = 50 * 1024 * 1024;
+/**
+ * CLI 自己的重试上限：CLAUDE_CODE_MAX_RETRIES 超过 15 就会被它截回 15，除非同时开着
+ * CLAUDE_CODE_RETRY_WATCHDOG（远端 runner 用的「不放弃」模式，上限 300）。
+ */
+const CLI_RETRY_CLAMP = 15;
+const MAX_API_RETRIES = 300;
+/** 用户命令要原样交给 cmd / PowerShell，长度给足但必须有上限。 */
+const MAX_SHELL_TASK_LENGTH = 2_000;
 /** end_turn 之后等待真正 result 的兜底时长，只在 CLI 完全不再输出时才会触发。 */
 const END_TURN_FALLBACK_DELAY_MS = 1200;
 /** 兜底收尾后允许吞掉迟到 result 的时间窗，超过这个窗口的 result 一定属于新的一轮。 */
@@ -490,6 +507,19 @@ function getClaudeInvocation(args: string[]) {
   return { executable, args: [...prefixArgs, ...args], shell: process.platform === "win32" && executable.toLowerCase().endsWith(".cmd") };
 }
 
+/**
+ * 把对话里设的重试次数翻成 CLI 的环境变量。CLI 默认重试 10 次，CLAUDE_CODE_MAX_RETRIES
+ * 可以改这个数，但超过 15 会被它悄悄截回 15——只有同时开 CLAUDE_CODE_RETRY_WATCHDOG
+ * 才放开（代价是遇到过载也不再放弃、单次等待可长达 6 小时、模型降级回退会被关掉）。
+ */
+function claudeRetryEnv(apiMaxRetries: number | undefined): Record<string, string> {
+  if (apiMaxRetries === undefined) return {};
+  return {
+    CLAUDE_CODE_MAX_RETRIES: String(apiMaxRetries),
+    ...(apiMaxRetries > CLI_RETRY_CLAMP ? { CLAUDE_CODE_RETRY_WATCHDOG: "1" } : {}),
+  };
+}
+
 function isValidRunRequest(value: unknown): value is RunRequest {
   if (!value || typeof value !== "object") return false;
   const request = value as Partial<RunRequest>;
@@ -534,6 +564,21 @@ function isValidRunRequest(value: unknown): value is RunRequest {
     request.attachments.length <= 10 &&
     request.attachments.every(isAttachment)
   );
+  // 重试次数要进 CLI 的环境变量，只收整数；上限留到 CLI 自己的 300，再多它也只会截断。
+  const hasValidApiMaxRetries = request.apiMaxRetries === undefined || (
+    typeof request.apiMaxRetries === "number" &&
+    Number.isInteger(request.apiMaxRetries) &&
+    request.apiMaxRetries >= 0 &&
+    request.apiMaxRetries <= MAX_API_RETRIES
+  );
+  // 截断式恢复的两个 uuid 必须成对出现，缺一个 CLI 会直接拒绝启动。
+  const hasValidRewind = (request.resumeSessionAt === undefined && request.resumeDropsTurn === undefined) || (
+    typeof request.resumeSessionAt === "string" &&
+    SESSION_ID_PATTERN.test(request.resumeSessionAt) &&
+    typeof request.resumeDropsTurn === "string" &&
+    SESSION_ID_PATTERN.test(request.resumeDropsTurn) &&
+    typeof request.sessionId === "string"
+  );
   return (
     typeof request.runId === "string" &&
     request.runId.length > 0 &&
@@ -552,7 +597,9 @@ function isValidRunRequest(value: unknown): value is RunRequest {
     hasValidThinkingEffort &&
     hasValidAllowedTools &&
     hasValidAdditionalDirectories &&
-    hasValidAttachments
+    hasValidAttachments &&
+    hasValidApiMaxRetries &&
+    hasValidRewind
   );
 }
 
@@ -656,10 +703,13 @@ function normalizeAppSettings(value: unknown): AppSettings | null {
       settings.ignoredUpdateVersion.length > 50 ||
       !/^[0-9A-Za-z.+-]+$/.test(settings.ignoredUpdateVersion))
   ) return null;
+  const completionTask = normalizeShellTask(settings.completionTask);
   return {
     closeBehavior: settings.closeBehavior,
     notifyOnCompletion: settings.notifyOnCompletion,
     ...(settings.ignoredUpdateVersion ? { ignoredUpdateVersion: settings.ignoredUpdateVersion } : {}),
+    // 命令本身记下来方便下次复用；非法命令只丢掉这一项，不该让整份设置存不进去。
+    ...(completionTask ? { completionTask } : {}),
   };
 }
 
@@ -1689,8 +1739,14 @@ ipcMain.handle("terminal:resume-session", async (_event, value: unknown) => {
   const child = kind === "cmd"
     // /s 让 cmd 剥掉首尾引号、中间原样执行；配 windowsVerbatimArguments 才能让命令里自带的引号活到 cmd 手里。
     ? spawn("cmd.exe", ["/s", "/k", `"${command}"`], { ...options, windowsVerbatimArguments: true })
-    // -EncodedCommand 收 UTF-16LE 的 base64，彻底绕开多层引号转义。
-    : spawn("powershell.exe", ["-NoExit", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")], options);
+    // PowerShell 必须借 cmd 的 start 开一个新控制台：直接 spawn 时它继承到的是 stdio:"ignore" 的空
+    // 输入句柄，开局就读到 EOF，-NoExit 也留不住，窗口一闪都不闪就退了（cmd 会自己去读 CONIN$，所以没事）。
+    // -EncodedCommand 收 UTF-16LE 的 base64，彻底绕开多层引号转义，base64 里也不会有空格去扰乱 start 的参数切分。
+    : spawn(
+      "cmd.exe",
+      ["/s", "/c", `start "Claude" powershell.exe -NoExit -EncodedCommand ${Buffer.from(command, "utf16le").toString("base64")}`],
+      { ...options, windowsVerbatimArguments: true },
+    );
   // spawn 的失败走 error 事件而不是抛异常，没人听会直接把主进程打挂。
   const failure = await new Promise<string | undefined>((resolve) => {
     child.once("error", (error: Error) => resolve(error.message));
@@ -1701,8 +1757,48 @@ ipcMain.handle("terminal:resume-session", async (_event, value: unknown) => {
   return { opened: true };
 });
 
-ipcMain.on("app:renderer-error", (_event, value: unknown) => {
-  if (typeof value !== "string") return;
+/** 校验「回答完成后执行」的命令：单行、有长度上限、不含控制字符。 */
+function normalizeShellTask(value: unknown): ShellTask | null {
+  if (!value || typeof value !== "object") return null;
+  const task = value as { shell?: unknown; command?: unknown };
+  if (task.shell !== "cmd" && task.shell !== "powershell") return null;
+  if (typeof task.command !== "string") return null;
+  const command = task.command.trim();
+  if (!command || command.length > MAX_SHELL_TASK_LENGTH || /[\u0000-\u0008\u000a-\u001f]/.test(command)) return null;
+  return { shell: task.shell, command };
+}
+
+ipcMain.handle("app:run-shell-task", async (_event, value: unknown) => {
+  const task = normalizeShellTask(value);
+  if (!task) return { started: false, error: "命令无效" };
+  if (process.platform !== "win32") return { started: false, error: "仅支持在 Windows 上执行" };
+  // 测试里绝对不能真的关机：命令只写进日志供断言。
+  const testLog = process.env.CLAUDE_DESK_TEST_SHELL_TASK_LOG;
+  if (testLog) {
+    await appendFile(testLog, `${JSON.stringify(task)}\n`, "utf8").catch(() => undefined);
+    return { started: true };
+  }
+  // 无人看守时执行，不弹窗；两种外壳都经 cmd 启动，detached 才能让命令在应用被关机命令带走后照样跑完。
+  // 直接 spawn powershell.exe 时它在 detached + stdio:"ignore" 下根本不会执行 -EncodedCommand，
+  // 必须让 cmd 当那一层外壳，PowerShell 才拿到正常的标准句柄。
+  const options = { detached: true, stdio: "ignore" as const, windowsHide: true, windowsVerbatimArguments: true };
+  const child = task.shell === "cmd"
+    ? spawn("cmd.exe", ["/s", "/c", `"${task.command}"`], options)
+    : spawn(
+      "cmd.exe",
+      ["/s", "/c", `powershell.exe -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(task.command, "utf16le").toString("base64")}`],
+      options,
+    );
+  const failure = await new Promise<string | undefined>((resolve) => {
+    child.once("error", (error: Error) => resolve(error.message));
+    child.once("spawn", () => resolve(undefined));
+  });
+  if (failure) return { started: false, error: failure };
+  child.unref();
+  return { started: true };
+});
+
+ipcMain.on("app:renderer-error", (_event, value: unknown) => {  if (typeof value !== "string") return;
   const line = `${new Date().toISOString()} ${value.slice(0, 8_000)}\n`;
   void appendFile(join(app.getPath("userData"), "renderer-errors.log"), line, "utf8");
 });
@@ -1931,6 +2027,55 @@ ipcMain.handle("claude:branch-session", async (_event, workspace: unknown, sessi
   return createClaudeSessionBranch(workspace, sessionId, userTurn, title.trim());
 });
 
+/**
+ * 找出会话里最后一轮用户提示的截断点，供「停止后重新编辑」使用：要保留到的那条链上记录就是
+ * 它的 parentUuid，要丢掉的那一轮就是它自己的 uuid。只认最后一轮，不按序号数——会话文件里
+ * 可能已经有被放弃的分支，数出来的序号会和界面上的轮次对不上。提示正文一起带回去，让渲染层
+ * 核对这确实是它要改的那一条；对不上就宁可照旧追加，也不能丢错轮次。
+ * 第一轮没有上一条链上记录，这时返回 null。
+ */
+async function findSessionRewindPoint(workspace: string, sessionId: string) {
+  const sessionFile = join(claudeSessionsDirectory(workspace), `${sessionId}.jsonl`);
+  const raw = await readFile(sessionFile, "utf8").catch(() => undefined);
+  if (raw === undefined) return null;
+  let found: { resumeSessionAt: string; resumeDropsTurn: string; prompt: string } | null = null;
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let record: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (!parsed || typeof parsed !== "object") continue;
+      record = parsed as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    // 子代理的记录属于工具内部过程，不是主对话的轮次。
+    if (isSidechainRecord(record) || !isConversationUserRecord(record)) continue;
+    const uuid = record.uuid;
+    const parentUuid = record.parentUuid;
+    if (typeof uuid !== "string" || !SESSION_ID_PATTERN.test(uuid)) continue;
+    if (typeof parentUuid !== "string" || !SESSION_ID_PATTERN.test(parentUuid)) {
+      // 整个会话的第一轮：没有可保留的上一条记录，截断式恢复用不上。
+      found = null;
+      continue;
+    }
+    const message = record.message as Record<string, unknown>;
+    found = { resumeSessionAt: parentUuid, resumeDropsTurn: uuid, prompt: importedUserText(message.content) };
+  }
+  return found;
+}
+
+ipcMain.handle("claude:session-rewind-point", async (_event, workspace: unknown, sessionId: unknown) => {
+  if (
+    typeof workspace !== "string" ||
+    !existsSync(workspace) ||
+    !statSync(workspace).isDirectory() ||
+    typeof sessionId !== "string" ||
+    !SESSION_ID_PATTERN.test(sessionId)
+  ) return null;
+  return findSessionRewindPoint(workspace, sessionId);
+});
+
 ipcMain.handle("claude:delete-session", async (_event, workspace: unknown, sessionId: unknown) => {
   if (
     typeof workspace !== "string" ||
@@ -2120,6 +2265,12 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     args.push("--permission-mode", request.permissionMode);
   }
   if (request.sessionId) args.push("--resume", request.sessionId);
+  // 停止后重新编辑的那一轮要被真正顶掉：让 CLI 只把会话读到上一轮结尾，并声明这次丢的是哪一轮。
+  // 两个 uuid 都由主进程校验过，且只在确实恢复某个 session 时才有意义。
+  if (request.sessionId && request.resumeSessionAt && request.resumeDropsTurn) {
+    args.push("--resume-session-at", request.resumeSessionAt);
+    args.push("--resume-drops-turn", request.resumeDropsTurn);
+  }
   if (request.sessionName) args.push("--name", request.sessionName);
   if (request.model) args.push("--model", request.model);
   if (request.thinkingEffort) args.push("--effort", request.thinkingEffort);
@@ -2144,7 +2295,7 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
   const invocation = getClaudeInvocation(args);
   const child = spawn(invocation.executable, invocation.args, {
     cwd: request.cwd,
-    env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
+    env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1", ...claudeRetryEnv(request.apiMaxRetries) },
     windowsHide: true,
     shell: invocation.shell,
     stdio: ["pipe", "pipe", "pipe"],

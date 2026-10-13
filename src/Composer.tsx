@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Brain, CircleStop, CornerDownRight, FileText, GripVertical, Paperclip, Pencil, Send, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
+import { Brain, CircleStop, CornerDownRight, FileText, GripVertical, Paperclip, Pencil, RefreshCcwDot, Send, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
 import AdditionalDirectories, { type AdditionalDirectoriesHandle } from "./AdditionalDirectories";
 import AttachmentPreview, { attachmentUrl, openAttachmentFile } from "./AttachmentPreview";
 import ComposerSelect, { type ComposerSelectHandle } from "./ComposerSelect";
+import ScheduleSend from "./ScheduleSend";
 import { LOCAL_SLASH_COMMANDS } from "./commands";
-import type { Attachment, AttachmentUpload, ComposerDraft, Conversation, ModelConfig, PermissionMode, QueuedPrompt, ReorderPosition, SlashCommand, ThinkingEffort } from "./types";
+import type { Attachment, AttachmentUpload, ComposerDraft, Conversation, ModelConfig, PermissionMode, QueuedPrompt, ReorderPosition, ScheduledPrompt, SlashCommand, ThinkingEffort } from "./types";
 
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES = 40 * 1024 * 1024;
@@ -26,6 +27,19 @@ const thinkingEffortOptions: { value: string; label: string; detail?: string }[]
   { value: "max", label: "最大", detail: "最高推理" },
 ];
 
+/**
+ * API 请求失败后的重试次数，转成 CLI 的 CLAUDE_CODE_MAX_RETRIES。CLI 默认 10 次，
+ * 超过 15 次要靠它的重试看守模式才不被截断，代价写在每一项的说明里。
+ */
+const retryOptions: { value: string; label: string; detail?: string }[] = [
+  { value: "default", label: "重试 10 次", detail: "CLI 默认" },
+  { value: "15", label: "重试 15 次", detail: "普通模式上限" },
+  { value: "30", label: "重试 30 次", detail: "过载也不放弃" },
+  { value: "60", label: "重试 60 次", detail: "过载也不放弃" },
+  { value: "150", label: "重试 150 次", detail: "过载也不放弃" },
+  { value: "300", label: "重试 300 次", detail: "过载也不放弃" },
+];
+
 interface Props {
   conversation: Conversation;
   /** 所属项目的工作目录，附加目录选择框以它作为首次打开的起点。 */
@@ -36,8 +50,12 @@ interface Props {
   loadingHistory?: boolean;
   focusRequest?: number;
   draft: ComposerDraft;
+  /** 本对话还没发出去的定时任务。 */
+  scheduledPrompts: ScheduledPrompt[];
   onSend(prompt: string, attachments: Attachment[]): void;
   onQueue(prompt: string, attachments: Attachment[]): void;
+  onSchedulePrompt(prompt: string, time: string): string | undefined;
+  onCancelScheduledPrompt(id: string): void;
   onGuideQueuedPrompt(promptId: string): void;
   onStop(): void;
   onDeleteQueuedPrompt(promptId: string): void;
@@ -48,6 +66,7 @@ interface Props {
   onRefreshModels(): void;
   modelsRefreshing?: boolean;
   onThinkingEffortChange(effort: ThinkingEffort | undefined): void;
+  onApiMaxRetriesChange(retries: number | undefined): void;
   onLocalCommand(command: string): boolean;
   onPermissionChange(mode: PermissionMode): void;
   onAdditionalDirectoriesChange(directories: string[]): void;
@@ -62,9 +81,12 @@ export default function Composer({
   loadingHistory = false,
   focusRequest = 0,
   draft,
+  scheduledPrompts,
   modelsRefreshing = false,
   onSend,
   onQueue,
+  onSchedulePrompt,
+  onCancelScheduledPrompt,
   onGuideQueuedPrompt,
   onStop,
   onDeleteQueuedPrompt,
@@ -74,6 +96,7 @@ export default function Composer({
   onModelChange,
   onRefreshModels,
   onThinkingEffortChange,
+  onApiMaxRetriesChange,
   onLocalCommand,
   onPermissionChange,
   onAdditionalDirectoriesChange,
@@ -94,6 +117,11 @@ export default function Composer({
   const matchedModel = modelConfig.options.find((option) => option.value === conversation.selectedModel)
     ?? modelConfig.options.find((option) => option.actualModel === conversation.selectedModel)
     ?? modelConfig.options[0];
+  const retryValue = conversation.apiMaxRetries === undefined ? "default" : String(conversation.apiMaxRetries);
+  // 旧数据里可能存着不在预设里的次数，补成一项，免得菜单显示的和实际生效的不是一回事。
+  const retryChoices = retryOptions.some((option) => option.value === retryValue)
+    ? retryOptions
+    : [...retryOptions, { value: retryValue, label: `重试 ${retryValue} 次`, detail: "当前设置" }];
   const slashSuggestions = useMemo(() => {
     if (attachments.length > 0 || !prompt.startsWith("/") || /\s/.test(prompt)) return [];
     const external = conversation.slashCommands ?? [];
@@ -466,6 +494,23 @@ export default function Composer({
               options={permissionOptions}
               title="权限模式"
               value={conversation.permissionMode}
+            />
+            <ComposerSelect
+              ariaLabel="选择重试次数"
+              className="retry-select"
+              disabled={loadingHistory}
+              icon={<RefreshCcwDot size={14} />}
+              onChange={(value) => onApiMaxRetriesChange(value === "default" ? undefined : Number(value))}
+              options={retryChoices}
+              title="API 请求失败后的重试次数（对应 CLI 的 CLAUDE_CODE_MAX_RETRIES；超过 15 次会同时开启 CLI 的重试看守模式：遇到过载也不放弃、单次等待最长 6 小时、模型降级回退会被关掉）"
+              value={retryValue}
+            />
+            <ScheduleSend
+              disabled={loadingHistory}
+              draftPrompt={prompt}
+              onCancel={onCancelScheduledPrompt}
+              onSchedule={onSchedulePrompt}
+              pending={scheduledPrompts}
             />
           </div>
           <div className="composer-actions">
