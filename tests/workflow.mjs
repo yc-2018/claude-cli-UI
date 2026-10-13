@@ -1185,13 +1185,26 @@ try {
 
   // 重试次数：界面上选的次数要变成 CLI 的 CLAUDE_CODE_MAX_RETRIES，超过 15 次还要带上看守开关才不会被 CLI 截断。
   const readRuns = async () => (await readFile(runLog, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  /**
+   * 夹具是在收到提示那一刻才写这份日志，而「等最后一条回答变成 done」有可能被上一轮早已结束的
+   * 回答立刻满足（编辑后重发要先去读截断点，中间隔着一次 IPC）。所以一律轮询等这一轮真的进日志，
+   * 而不是只读一次就断言。
+   */
+  const waitForRun = async (prompt) => {
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      const run = (await readRuns()).reverse().find((item) => item.prompt === prompt);
+      if (run) return run;
+      await page.waitForTimeout(250);
+    }
+    return undefined;
+  };
   await page.locator(".retry-select .composer-select-trigger").click();
   await page.locator(".retry-select .composer-select-option", { hasText: "重试 30 次" }).click();
   await page.waitForFunction(() => document.querySelector(".retry-select .composer-select-value")?.textContent?.includes("重试 30 次"));
   await page.locator(".composer textarea").fill("重试次数回归测试");
   await page.locator(".composer textarea").press("Enter");
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
-  const retryRun = (await readRuns()).reverse().find((run) => run.prompt === "重试次数回归测试");
+  const retryRun = await waitForRun("重试次数回归测试");
   if (!retryRun || retryRun.maxRetries !== "30" || retryRun.retryWatchdog !== "1") {
     throw new Error(`retry count was not passed to the CLI: ${JSON.stringify(retryRun)}`);
   }
@@ -1201,7 +1214,7 @@ try {
   await page.locator(".composer textarea").fill("重试默认回归测试");
   await page.locator(".composer textarea").press("Enter");
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
-  const defaultRetryRun = (await readRuns()).reverse().find((run) => run.prompt === "重试默认回归测试");
+  const defaultRetryRun = await waitForRun("重试默认回归测试");
   if (!defaultRetryRun || defaultRetryRun.maxRetries !== null || defaultRetryRun.retryWatchdog !== null) {
     throw new Error(`default retry count still overrode the CLI env: ${JSON.stringify(defaultRetryRun)}`);
   }
@@ -1336,8 +1349,14 @@ try {
   await rewindEditBox.waitFor();
   await rewindEditBox.fill("回退重编辑测试 三");
   await rewindEditBox.press("Enter");
+  // 重发要先读一次截断点再改状态，这段空档里最后一条回答还是上一轮那条（早就 done 了）。
+  // 必须先等气泡换过来，否则「等 done」会立刻通过，日志里这一轮还没开始。
+  await page.waitForFunction(() => {
+    const bubbles = [...document.querySelectorAll(".user-bubble")].map((item) => item.textContent);
+    return bubbles.includes("回退重编辑测试 三") && !bubbles.includes("回退重编辑测试 二");
+  });
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "done");
-  const rewoundRun = (await readRuns()).reverse().find((run) => run.prompt === "回退重编辑测试 三");
+  const rewoundRun = await waitForRun("回退重编辑测试 三");
   if (!rewoundRun || rewoundRun.resumeSessionAt !== droppedTurn.parentUuid || rewoundRun.resumeDropsTurn !== droppedTurn.uuid) {
     throw new Error(`edited turn did not truncate the resumed session: ${JSON.stringify({ rewoundRun, droppedTurn: { uuid: droppedTurn.uuid, parentUuid: droppedTurn.parentUuid } })}`);
   }
@@ -1367,6 +1386,11 @@ try {
   await rejectEditBox.waitFor();
   await rejectEditBox.fill("回退被拒测试");
   await rejectEditBox.press("Enter");
+  // 同样先等气泡换过来：这一轮注定失败，但在它出现之前最后一条回答还是上一轮那条 done。
+  await page.waitForFunction(() => {
+    const bubbles = [...document.querySelectorAll(".user-bubble")].map((item) => item.textContent);
+    return bubbles.includes("回退被拒测试") && !bubbles.includes("回退重编辑测试 三");
+  });
   await page.waitForFunction(() => document.querySelector('.message.assistant:last-of-type')?.getAttribute("data-status") === "error");
   const rejectedError = await page.locator(".message.assistant").last().textContent();
   if (!rejectedError?.includes("Claude CLI 拒绝回退它") || rejectedError.includes("--resume-drops-turn")) {
