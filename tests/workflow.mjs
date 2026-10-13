@@ -1572,10 +1572,22 @@ try {
   if (!(await page.locator(".message.assistant .markdown").last().textContent())?.includes("最终总结已经输出")) {
     throw new Error("assistant end_turn fallback lost the final response text");
   }
-  if (await page.locator('.task-row.active[aria-label="会话正在运行"], .task-row.active .conversation-running-icon').count()) {
-    throw new Error("assistant end_turn fallback left the sidebar running indicator active");
+  // 侧栏转圈和停止按钮都跟着 activeRuns 走，而 activeRuns 只在进程 exit 事件到达时才清空：
+  // main 发 exit 之前还要先等行队列排完、再等 session 规范化的文件 I/O，所以 exit 必然晚于这条
+  // 由 end_turn 兜底合成的 result。读一次就断言会在 CI 磁盘偏慢时误报（已在 v0.1.83 的 main
+  // 推送上失败过一次，同一个提交的 tag 推送却通过）。这里改成轮询等它们清掉，真清不掉仍然报错。
+  try {
+    await page.waitForFunction(() => (
+      document.querySelectorAll('.task-row.active[aria-label="会话正在运行"], .task-row.active .conversation-running-icon').length === 0
+      && document.querySelectorAll(".send-button.stop").length === 0
+    ), undefined, { timeout: 15_000 });
+  } catch {
+    const stuckBusyState = await page.evaluate(() => ({
+      runningIcon: document.querySelectorAll('.task-row.active[aria-label="会话正在运行"], .task-row.active .conversation-running-icon').length,
+      stopButton: document.querySelectorAll(".send-button.stop").length,
+    }));
+    throw new Error(`assistant end_turn fallback left the conversation busy: ${JSON.stringify(stuckBusyState)}`);
   }
-  if (await page.locator(".send-button.stop").count()) throw new Error("assistant end_turn fallback left the stop button visible");
 
   await page.locator(".composer textarea").fill("/edit");
   await page.locator(".composer textarea").press("Enter");
