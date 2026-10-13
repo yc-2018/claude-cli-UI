@@ -58,7 +58,7 @@ await page.reload();
 await page.waitForSelector(".empty-view");
 await page.screenshot({ path: resolve(artifacts, "empty-state.png") });
 
-await page.evaluate((workspace) => {
+await page.evaluate(({ workspace, crowdedWorkspace }) => {
   const now = Date.now();
   const key = "claude-desk.projects.v2";
   const originalSetItem = Storage.prototype.setItem;
@@ -176,6 +176,21 @@ await page.evaluate((workspace) => {
       permissionMode: "plan",
       messages: []
     }]
+  }, {
+    // 对话太多的项目：默认只列 7 条，其余收进「展开」按钮，两种窗口宽度下按钮都不能压住最后一条对话。
+    id: "visual-many-project",
+    name: "crowded-workspace",
+    workspace: crowdedWorkspace,
+    createdAt: now - 4500,
+    updatedAt: now - 4500,
+    conversations: Array.from({ length: 9 }, (item, index) => ({
+      id: "visual-many-conversation-" + (index + 1),
+      title: "批量整理任务 " + (index + 1),
+      createdAt: now - 4500 + index,
+      updatedAt: now - 4500 + index,
+      permissionMode: "acceptEdits",
+      messages: []
+    }))
   }];
   originalSetItem.call(localStorage, key, JSON.stringify(seededProjects));
   window.claudeDesk.saveProjectStore(seededProjects);
@@ -183,7 +198,7 @@ await page.evaluate((workspace) => {
     if (storageKey !== key) originalSetItem.call(this, storageKey, value);
   };
   location.reload();
-}, root);
+}, { workspace: root, crowdedWorkspace: resolve(root, "crowded-workspace") });
 await page.waitForSelector(".composer");
 if (!(await page.locator(".context-status").textContent())?.includes("上下文")) throw new Error("context usage status was not visible in the desktop viewport");
 if (await page.locator('[aria-label="压缩上下文"]').count() !== 1) throw new Error("context compact button was not visible in the desktop viewport");
@@ -270,7 +285,7 @@ if (await page.locator('[data-section="scratch"] .task-row').count()) {
 if (!(await page.locator('[data-section="scratch"] .task-list-empty').count())) {
   throw new Error("scratch section did not show its empty hint before any temporary conversation existed");
 }
-if (await page.locator('[data-section="projects"] .project-group').count() !== 0) {
+if (await page.locator('[data-section="projects"] .project-group[data-project-id="visual-project"]').count() !== 0) {
   throw new Error("pinned project was still duplicated in the projects section");
 }
 // 树形前缀：非末行 ├─、末行 └─，对话一多才看得出层级。
@@ -278,6 +293,53 @@ const treeBranches = await page.locator('[data-section="pinned"] .project-group[
   elements.map((element) => element.textContent).join(",")
 ));
 if (treeBranches !== "├─,└─") throw new Error(`conversation rows did not render tree connectors: ${treeBranches}`);
+// 对话太多的项目默认只列 7 条，其余收进「展开」按钮：一个项目开近百个对话，全铺开就没法用了。
+// 卡片默认是收起的，先展开它；展开后也要把「回到默认条数」这条规则一起钉住。
+const crowdedGroup = page.locator('.project-group[data-project-id="visual-many-project"]');
+const crowdedToggle = crowdedGroup.locator(".conversation-list-toggle");
+const crowdedRowCount = () => crowdedGroup.locator(".task-row").count();
+const assertCrowdedToggleLayout = async () => {
+  const crowdedLayout = await crowdedGroup.evaluate((group) => {
+    const toggle = group.querySelector(".conversation-list-toggle");
+    const rows = [...group.querySelectorAll(".task-row")];
+    return {
+      group: group.getBoundingClientRect().toJSON(),
+      toggle: toggle?.getBoundingClientRect().toJSON(),
+      clipped: toggle ? toggle.scrollWidth > toggle.clientWidth + 1 : true,
+      lastRow: rows.at(-1)?.getBoundingClientRect().toJSON(),
+    };
+  });
+  if (!crowdedLayout.toggle || !crowdedLayout.lastRow ||
+    crowdedLayout.clipped ||
+    crowdedLayout.toggle.width <= 0 || crowdedLayout.toggle.height <= 0 ||
+    crowdedLayout.toggle.left < crowdedLayout.group.left - 0.5 ||
+    crowdedLayout.toggle.right > crowdedLayout.group.right + 0.5 ||
+    crowdedLayout.toggle.top < crowdedLayout.lastRow.bottom - 0.5 ||
+    crowdedLayout.toggle.bottom > crowdedLayout.group.bottom + 0.5) {
+    throw new Error(`展开按钮越出项目卡片、压住最后一条对话或被截断：${JSON.stringify(crowdedLayout)}`);
+  }
+};
+await crowdedGroup.locator(".project-toggle").click();
+await crowdedToggle.waitFor();
+const crowdedDefaultRows = await crowdedRowCount();
+const crowdedDefaultToggleText = await crowdedToggle.textContent();
+if (crowdedDefaultRows !== 7 || crowdedDefaultToggleText !== "展开其余 2 条对话") {
+  throw new Error(`对话过多的项目没有默认只列 7 条：rows=${crowdedDefaultRows} toggle=${JSON.stringify(crowdedDefaultToggleText)}`);
+}
+await assertCrowdedToggleLayout();
+await crowdedToggle.click();
+await page.waitForFunction(() => document.querySelectorAll('.project-group[data-project-id="visual-many-project"] .task-row').length === 9);
+if (await crowdedToggle.textContent() !== "收起对话列表") throw new Error("展开后没有留下收起按钮");
+await assertCrowdedToggleLayout();
+await page.screenshot({ path: resolve(artifacts, "conversation-list-expanded.png") });
+// 收起项目再打开：回到默认的 7 条，而不是接着把上次摊开的列表铺满整屏。
+await crowdedGroup.locator(".project-toggle").click();
+await crowdedGroup.locator(".project-conversations").waitFor({ state: "detached" });
+await crowdedGroup.locator(".project-toggle").click();
+await crowdedToggle.waitFor();
+if (await crowdedRowCount() !== 7 || await crowdedToggle.textContent() !== "展开其余 2 条对话") {
+  throw new Error("重新打开项目后没有回到默认的 7 条");
+}
 await page.locator('[data-section-label="scratch"] .sidebar-section-toggle').click();
 await page.waitForFunction(() => document.querySelectorAll('[data-section="scratch"]').length === 0);
 await page.locator('[data-section-label="scratch"] .sidebar-section-toggle').click();
@@ -420,8 +482,9 @@ await page.waitForFunction(() => document.activeElement?.matches(".composer text
 
 const activeConversationBeforeCollapse = await page.locator(".project-conversations .task-row.active").getAttribute("data-conversation-id");
 await page.locator(".composer textarea").fill("折叠项目时保留的草稿");
-await page.locator(".project-toggle").click();
-await page.waitForSelector(".project-conversations", { state: "detached" });
+const visualProjectGroup = page.locator('.project-group[data-project-id="visual-project"]');
+await visualProjectGroup.locator(".project-toggle").click();
+await visualProjectGroup.locator(".project-conversations").waitFor({ state: "detached" });
 if (
   await page.locator(".composer textarea").inputValue() !== "折叠项目时保留的草稿" ||
   await page.locator(".project-empty-view").count() !== 0
@@ -429,7 +492,7 @@ if (
   throw new Error("collapsing the active project closed its conversation or discarded its draft");
 }
 await page.screenshot({ path: resolve(artifacts, "collapsed-project-active-conversation.png") });
-await page.locator(".project-toggle").click();
+await visualProjectGroup.locator(".project-toggle").click();
 await page.waitForSelector(`[data-conversation-id="${activeConversationBeforeCollapse}"]`);
 
 await page.locator(".settings-trigger[data-panel=\"settings\"]").click();
@@ -728,6 +791,7 @@ const layout = await page.evaluate(() => ({
 
 await page.setViewportSize({ width: 900, height: 640 });
 await assertSectionControlsLayout();
+await assertCrowdedToggleLayout();
 if (await page.locator('[aria-label="压缩上下文"]').count() !== 1) throw new Error("context compact button was not visible in the compact viewport");
 // 进行中的压缩卡片有三行文字（标题、阶段、hint），窄窗口下它们必须依次向下排开而不是互相压住。
 const compactCompactionLayout = await page.locator(".context-compaction.running").evaluate((card) => ({
@@ -776,10 +840,14 @@ const restingProjectActions = await page.locator(".project-row .project-action")
   elements.filter((element) => getComputedStyle(element).display !== "none").length
 ));
 if (restingProjectActions !== 0) throw new Error("project actions were visible before hover");
-if (Number(await page.locator(".project-drag-handle").evaluate((element) => getComputedStyle(element).opacity)) > 0.05) {
-  throw new Error("project drag handle was visible before hover");
+// 夹具里现在有多个项目卡片，拖拽手柄也要逐个检查：任何一个悬停前可见都不行。
+const restingDragHandleOpacity = await page.locator(".project-row .project-drag-handle").evaluateAll((elements) => (
+  elements.map((element) => Number(getComputedStyle(element).opacity))
+));
+if (restingDragHandleOpacity.length === 0 || restingDragHandleOpacity.some((opacity) => opacity > 0.05)) {
+  throw new Error(`project drag handle was visible before hover: ${JSON.stringify(restingDragHandleOpacity)}`);
 }
-await page.locator(".project-row").hover();
+await page.locator(".project-row").first().hover();
 const compactLayout = await page.evaluate(() => ({
   body: { width: document.body.scrollWidth, height: document.body.scrollHeight },
   viewport: { width: window.innerWidth, height: window.innerHeight },
@@ -977,10 +1045,10 @@ for (let index = 0; index < narrowToolsLayout.tools.length; index += 1) {
 }
 await page.screenshot({ path: resolve(artifacts, "sidebar-tools-compact.png") });
 await page.getByRole("button", { name: "收起置顶分组的所有项目", exact: true }).click();
-await page.waitForSelector(".project-conversations", { state: "detached" });
+await page.locator('[data-section="pinned"] .project-conversations').waitFor({ state: "detached" });
 await page.screenshot({ path: resolve(artifacts, "sidebar-fold-controls-compact.png") });
 await page.getByRole("button", { name: "展开置顶分组的所有项目", exact: true }).click();
-await page.waitForSelector(".project-conversations");
+await page.locator('[data-section="pinned"] .project-conversations').first().waitFor();
 
 console.log(JSON.stringify({ errors, modelMenuLayout, permissionMenuLayout, addDirMenuLayout, compactModelMenuLayout, compactAddDirMenuLayout, deleteDialogLayout, compactDeleteDialogLayout, updateDialogLayout, compactUpdateDialogLayout, settingsLayout, layout, compactLayout, compactQueueLayout, longPermissionLayout, userQuestionLayout }, null, 2));
 await electronApp.close();

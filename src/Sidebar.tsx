@@ -3,6 +3,7 @@ import {
   AlarmClock,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   ChevronsDownUp,
   ChevronsUpDown,
   Folder,
@@ -32,6 +33,12 @@ const COMPLETION_TASK_EXAMPLES: { label: string; task: ShellTask }[] = [
   { label: "睡眠", task: { shell: "cmd", command: "C:\\Windows\\System32\\rundll32.exe powrprof.dll,SetSuspendState 0,1,0" } },
   { label: "锁屏", task: { shell: "cmd", command: "rundll32.exe user32.dll,LockWorkStation" } },
 ];
+
+/**
+ * 项目展开时默认只列这么多条对话，其余收进「展开」按钮：一个项目开近百个对话时，
+ * 单是这一个项目就能把侧栏撑满，别的项目要翻很久才找得到。
+ */
+const CONVERSATION_PREVIEW_LIMIT = 7;
 
 interface Props {
   projects: Project[];
@@ -168,6 +175,8 @@ export default function Sidebar({
     projects.filter((project) => project.id !== activeProjectId).map((project) => project.id),
   ));
   const [closedSections, setClosedSections] = useState<Set<SectionKey>>(() => new Set());
+  // 哪些项目把对话列表整个摊开了。收起项目时一并清掉，下次打开仍然是默认的 7 条。
+  const [expandedConversationLists, setExpandedConversationLists] = useState<Set<string>>(() => new Set());
   const [editingName, setEditingName] = useState<EditingName | null>(null);
   const [refreshingProjects, setRefreshingProjects] = useState<Set<string>>(() => new Set());
   // 底部三个按钮共用一套开合：同时只开一个面板，外部点击和 Esc 的处理也只写一份。
@@ -211,13 +220,35 @@ export default function Sidebar({
     });
   }, [activeProjectId]);
 
+  /** 忘掉这些项目摊开的对话列表；没有一个是摊开的时原样返回，省掉一次多余的重渲染。 */
+  const collapseConversationLists = (projectIds: string[]) => {
+    setExpandedConversationLists((current) => {
+      if (!projectIds.some((projectId) => current.has(projectId))) return current;
+      const next = new Set(current);
+      for (const projectId of projectIds) next.delete(projectId);
+      return next;
+    });
+  };
+
+  const toggleConversationList = (projectId: string) => {
+    setExpandedConversationLists((current) => {
+      const next = new Set(current);
+      if (next.has(projectId)) next.delete(projectId);
+      else next.add(projectId);
+      return next;
+    });
+  };
+
   const toggleProject = (projectId: string) => {
+    const closing = !closedProjects.has(projectId);
     setClosedProjects((current) => {
       const next = new Set(current);
       if (next.has(projectId)) next.delete(projectId);
       else next.add(projectId);
       return next;
     });
+    // 收起项目就把这次摊开一起忘掉：重新打开时回到默认条数，而不是接着铺满一屏。
+    if (closing) collapseConversationLists([projectId]);
   };
 
   const setSectionProjectsExpanded = (section: SectionKey, sectionProjects: Project[], expanded: boolean) => {
@@ -236,6 +267,8 @@ export default function Sidebar({
         next.delete(section);
         return next;
       });
+    } else {
+      collapseConversationLists(sectionProjects.map((project) => project.id));
     }
   };
 
@@ -583,6 +616,15 @@ export default function Sidebar({
       ? dropTarget.position
       : null;
     const editing = editingName?.kind === "project" && editingName.id === project.id && editingName.section === section;
+    const conversationsExpanded = expandedConversationLists.has(project.id);
+    // 默认只列前几条；当前打开的对话即使排在后面也必须露出来，否则看不出自己在哪一条上。
+    const visibleConversations = conversationsExpanded ? conversations : (() => {
+      const preview = conversations.slice(0, CONVERSATION_PREVIEW_LIMIT);
+      const active = conversations.find((conversation) => conversation.id === activeConversationId);
+      return active && !preview.some((conversation) => conversation.id === active.id)
+        ? [...preview, active]
+        : preview;
+    })();
     return (
       <section
         className={`project-group ${project.pinned ? "pinned" : ""} ${draggedItem?.kind === "project" && draggedItem.id === project.id && draggedItem.section === section ? "dragging" : ""} ${projectDropPosition ? `drop-${projectDropPosition}` : ""}`}
@@ -676,8 +718,19 @@ export default function Sidebar({
         </div>
         {!closed ? (
           <div className="conversation-rows project-conversations">
-            {conversations.map((conversation, index) =>
-              renderConversationRow(conversation, project.id, section, index === conversations.length - 1, true))}
+            {visibleConversations.map((conversation, index) =>
+              renderConversationRow(conversation, project.id, section, index === visibleConversations.length - 1, true))}
+            {conversations.length > CONVERSATION_PREVIEW_LIMIT ? (
+              <button
+                aria-expanded={conversationsExpanded}
+                className="conversation-list-toggle"
+                onClick={() => toggleConversationList(project.id)}
+                type="button"
+              >
+                {conversationsExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                <span>{conversationsExpanded ? "收起对话列表" : `展开其余 ${conversations.length - visibleConversations.length} 条对话`}</span>
+              </button>
+            ) : null}
             {conversations.length === 0 ? (
               <button className="empty-conversation" onClick={() => onNewConversation(project.id)}>新建对话</button>
             ) : null}

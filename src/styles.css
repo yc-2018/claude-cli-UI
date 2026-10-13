@@ -318,6 +318,26 @@ button, select, textarea { -webkit-app-region: no-drag; }
 
 .empty-conversation:hover { color: #555550; }
 
+/* 一个项目的对话默认只列前 7 条，其余收在这个按钮后面。图标占的是树形前缀那一列，文字与对话标题对齐。 */
+.conversation-list-toggle {
+  display: flex;
+  width: 100%;
+  height: 28px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 5px 0 15px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #94948c;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.conversation-list-toggle:hover { background: var(--hover); color: #555550; }
+.conversation-list-toggle > svg { flex: 0 0 auto; }
+.conversation-list-toggle > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .task-row {
   position: relative;
   display: flex;

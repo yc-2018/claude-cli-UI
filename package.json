@@ -1,6 +1,6 @@
 {
   "name": "claude-cli-ui",
-  "version": "0.1.82",
+  "version": "0.1.83",
   "private": true,
   "description": "A focused desktop interface for Claude CLI",
   "main": "dist-electron/main.js",
@@ -70,7 +70,7 @@
       }
     ],
     "win": {
-      "icon": "build/icon.png",
+      "icon": "build/icon.ico",
       "target": [
         "nsis",
         "portable"

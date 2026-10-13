@@ -184,12 +184,21 @@ await writeTestModels({
   Haiku: "ThirdParty-B",
 });
 
+/**
+ * 重试设置是假 CLI 从进程环境里读的，而这份环境会从测试进程原样继承：开发者自己（或上层
+ * agent 运行时）导出的 CLAUDE_CODE_MAX_RETRIES 会一路漏进假 CLI，把「回到 CLI 默认就不该
+ * 带重试变量」的断言顶掉。测试不能依赖开发者的环境，先把这两个变量摘干净再启动。
+ */
+const launchEnv = { ...process.env };
+delete launchEnv.CLAUDE_CODE_MAX_RETRIES;
+delete launchEnv.CLAUDE_CODE_RETRY_WATCHDOG;
+
 const launch = () => electron.launch({
   ...(packagedExecutable ? { executablePath: packagedExecutable } : {}),
   args: packagedExecutable ? [] : [root],
   cwd: root,
   env: {
-    ...process.env,
+    ...launchEnv,
     CLAUDE_CONFIG_DIR: claudeConfig,
     CLAUDE_DESK_USER_DATA_DIR: profile,
     CLAUDE_DESK_TEST_WORKSPACE: root,
@@ -2852,6 +2861,81 @@ try {
   await electronApp.close();
   electronApp = undefined;
 
+  // 回归：一个项目里对话太多时侧栏默认只列 7 条，其余要点「展开」才出现。一个项目开近百个
+  // 对话，全铺开单是这一个项目就能把侧栏占满，别的项目要翻很久才找得到。
+  const crowdedNow = Date.now();
+  const crowdedProjectId = "crowded-project";
+  const crowdedConversationId = (index) => "crowded-conversation-" + index;
+  await writeFile(resolve(profile, "projects.json"), JSON.stringify([{
+    id: crowdedProjectId,
+    name: "对话很多的项目",
+    workspace: resolve(profile, "crowded-workspace"),
+    createdAt: crowdedNow - 60_000,
+    updatedAt: crowdedNow - 1_000,
+    conversations: Array.from({ length: 10 }, (item, index) => ({
+      id: crowdedConversationId(index + 1),
+      title: "批量任务 " + (index + 1),
+      createdAt: crowdedNow - (10 - index) * 1_000,
+      updatedAt: crowdedNow - (10 - index) * 1_000,
+      messages: [],
+      permissionMode: "acceptEdits",
+    })),
+  }]), "utf8");
+  // 打开的是第 9 个对话：它排在默认 7 条之外，仍然必须留在列表里并标成当前对话。
+  await writeFile(resolve(profile, "selection.json"), JSON.stringify({
+    projectId: crowdedProjectId,
+    conversationId: crowdedConversationId(9),
+  }), "utf8");
+  await rm(resolve(profile, "Local Storage"), { recursive: true, force: true });
+  electronApp = await launch();
+  page = await electronApp.firstWindow();
+  watchErrors(page);
+  const crowdedGroup = page.locator('.project-group[data-project-id="' + crowdedProjectId + '"]');
+  await crowdedGroup.locator(".conversation-list-toggle").waitFor();
+  const crowdedRowIds = () => crowdedGroup.locator(".task-row").evaluateAll((rows) => (
+    rows.map((row) => row.getAttribute("data-conversation-id"))
+  ));
+  const crowdedToggleText = () => crowdedGroup.locator(".conversation-list-toggle").textContent();
+  const expectedDefaultRows = [
+    ...Array.from({ length: 7 }, (item, index) => crowdedConversationId(index + 1)),
+    crowdedConversationId(9),
+  ];
+  const crowdedDefaultRows = await crowdedRowIds();
+  if (crowdedDefaultRows.join(",") !== expectedDefaultRows.join(",") ||
+    await crowdedToggleText() !== "展开其余 2 条对话") {
+    throw new Error("对话过多的项目没有默认只列 7 条并带上当前对话：" + crowdedDefaultRows.join(",") + " / " + await crowdedToggleText());
+  }
+  if (await crowdedGroup.locator(".task-row.active").getAttribute("data-conversation-id") !== crowdedConversationId(9)) {
+    throw new Error("排在默认条数之外的当前对话没有显示为活动行");
+  }
+  // 树形前缀跟着可见条数走：末行必须是 └─，中间几行不能画成末行。
+  const crowdedDefaultBranches = await crowdedGroup.locator(".conversation-rows .tree-branch").evaluateAll((branches) => (
+    branches.map((branch) => branch.textContent).join(",")
+  ));
+  if (crowdedDefaultBranches !== "├─,├─,├─,├─,├─,├─,├─,└─") {
+    throw new Error("默认视图的树形前缀不对：" + crowdedDefaultBranches);
+  }
+  await crowdedGroup.locator(".conversation-list-toggle").click();
+  await page.waitForFunction((projectId) => (
+    document.querySelectorAll('.project-group[data-project-id="' + projectId + '"] .task-row').length === 10
+  ), crowdedProjectId);
+  if (await crowdedToggleText() !== "收起对话列表") {
+    throw new Error("展开后没有留下收起入口：" + await crowdedToggleText());
+  }
+  // 收起项目再打开：回到默认条数，而不是接着铺满一屏。
+  await crowdedGroup.locator(".project-toggle").click();
+  await crowdedGroup.locator(".project-conversations").waitFor({ state: "detached" });
+  await crowdedGroup.locator(".project-toggle").click();
+  await crowdedGroup.locator(".conversation-list-toggle").waitFor();
+  const crowdedReopenedRows = await crowdedRowIds();
+  if (crowdedReopenedRows.join(",") !== expectedDefaultRows.join(",") ||
+    await crowdedToggleText() !== "展开其余 2 条对话") {
+    throw new Error("重新打开项目后没有回到默认条数：" + crowdedReopenedRows.join(","));
+  }
+
+  await electronApp.close();
+  electronApp = undefined;
+
   console.log(JSON.stringify({
     errors,
     selectedModel: firstConversation.selectedModel,
@@ -2868,6 +2952,7 @@ try {
     legacyMigration: true,
     corruptDataRecovery: true,
     reorderingAndPinning: true,
+    conversationListCap: true,
     portableAssetMapping: true,
     legacyGithubAssetFallback: true,
     startMenuLauncherCopy: true,
