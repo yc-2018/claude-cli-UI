@@ -2223,9 +2223,16 @@ ipcMain.handle("projects:load", async () => {
 
 ipcMain.handle("projects:discover", () => discoverClaudeWorkspaces());
 
+/**
+ * 项目库写入是异步的（还带瞬时占用重试），而 projects:save 是即发即忘：两次保存会重叠，共用同一个
+ * 临时文件、各自 rename，旧的一次可能在新的一次之后落盘，把 projects.json 退回上一次的内容。
+ * 串成一条链，保证最后落盘的永远是最新一次保存。
+ */
+let projectStoreWrite: Promise<void> = Promise.resolve();
+
 ipcMain.on("projects:save", (_event, value: unknown) => {
-  // 写入现在是异步的（带瞬时占用重试）：拒绝必须在这里接住，try/catch 抓不到。
-  void saveProjectStore(value).catch((error) => {
+  // 拒绝必须在这里接住（异步拒绝用不了 try/catch），并且要吞掉，否则后面几次保存会一起失败。
+  projectStoreWrite = projectStoreWrite.then(() => saveProjectStore(value)).catch((error) => {
     const detail = error instanceof Error ? error.stack ?? error.message : String(error);
     logRendererEvent(`project save failed: ${detail}`);
   });
