@@ -902,15 +902,28 @@ async function discoverClaudeWorkspaces() {
   return [...workspaces.values()];
 }
 
-function saveProjectStore(value: unknown) {
+/**
+ * 项目库的写入会被防病毒、索引之类的瞬时占用挡下来（Windows 上 rename 覆盖已存在文件时最典型），
+ * 一次失败就等于整次保存丢失：新建的对话、排序、置顶都会悄悄退回上一次的内容。退避着重试几次再放弃。
+ */
+async function saveProjectStore(value: unknown) {
   if (!Array.isArray(value)) return;
   const serialized = JSON.stringify(value);
   if (Buffer.byteLength(serialized, "utf8") > MAX_PROJECT_STORE_BYTES) return;
   const directory = app.getPath("userData");
   const temporaryPath = join(directory, `projects-${process.pid}.tmp`);
-  mkdirSync(directory, { recursive: true });
-  writeFileSync(temporaryPath, serialized, "utf8");
-  renameSync(temporaryPath, projectsStorePath());
+  await mkdir(directory, { recursive: true });
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await writeFile(temporaryPath, serialized, "utf8");
+      await rename(temporaryPath, projectsStorePath());
+      return;
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      if (code === undefined || attempt >= 4) throw error;
+      await new Promise((done) => setTimeout(done, 80 * (attempt + 1)));
+    }
+  }
 }
 
 function attachmentPath(storedName: string) {
@@ -2186,29 +2199,36 @@ ipcMain.handle("claude:normalize-session", async (_event, workspace: unknown, se
 });
 
 ipcMain.handle("projects:load", async () => {
-  try {
-    const value: unknown = JSON.parse(await readFile(projectsStorePath(), "utf8"));
-    return Array.isArray(value) ? value : null;
-  } catch (error) {
-    const code = (error as { code?: string }).code;
-    // 文件还不存在是正常的首次启动；内容坏掉要留下记录，再当成「还没有存储」让渲染层用副本重建。
-    if (code === "ENOENT") return null;
-    logRendererEvent(`project store unreadable (${code ?? (error as Error).name}): ${(error as Error).message}`);
-    if (code === undefined) return null;
-    // 读取本身失败（占用、权限等）：必须把错误抛给渲染层，否则它会拿内存里的旧副本把真数据覆盖掉。
-    throw error;
+  // 刚写好的文件在 Windows 上可能被防病毒、索引之类的瞬时占用：重试几次再下结论。
+  // 一次 EBUSY 就让渲染层整轮关掉保存，会让后面的界面改动全部丢在内存里（CI 上偶发过）。
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const value: unknown = JSON.parse(await readFile(projectsStorePath(), "utf8"));
+      return Array.isArray(value) ? value : null;
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      // 文件还不存在是正常的首次启动；内容坏掉要留下记录，再当成「还没有存储」让渲染层用副本重建。
+      if (code === "ENOENT") return null;
+      if (code !== undefined && attempt < 6) {
+        await new Promise((done) => setTimeout(done, 80));
+        continue;
+      }
+      logRendererEvent(`project store unreadable (${code ?? (error as Error).name}): ${(error as Error).message}`);
+      if (code === undefined) return null;
+      // 读取本身失败（占用、权限等）：必须把错误抛给渲染层，否则它会拿内存里的旧副本把真数据覆盖掉。
+      throw error;
+    }
   }
 });
 
 ipcMain.handle("projects:discover", () => discoverClaudeWorkspaces());
 
 ipcMain.on("projects:save", (_event, value: unknown) => {
-  try {
-    saveProjectStore(value);
-  } catch (error) {
+  // 写入现在是异步的（带瞬时占用重试）：拒绝必须在这里接住，try/catch 抓不到。
+  void saveProjectStore(value).catch((error) => {
     const detail = error instanceof Error ? error.stack ?? error.message : String(error);
-    void appendFile(join(app.getPath("userData"), "renderer-errors.log"), `${new Date().toISOString()} project save failed: ${detail}\n`, "utf8");
-  }
+    logRendererEvent(`project save failed: ${detail}`);
+  });
 });
 
 ipcMain.handle("selection:load", async () => {

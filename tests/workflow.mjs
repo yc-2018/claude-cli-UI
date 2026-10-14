@@ -230,7 +230,8 @@ const launch = () => electron.launch({
  * 需要读主进程状态的条件统一走这里：在测试进程里轮询，页面侧用 evaluate 真正把结果 await 出来。
  */
 const waitForAsyncCondition = async (page, predicate, argument, options = {}) => {
-  const deadline = Date.now() + (options.timeout ?? 15_000);
+  // 默认给到 Playwright 自己的 30s：CI 上两个构建并发时机器很忙，15s 会把偶发的慢写入误判成失败。
+  const deadline = Date.now() + (options.timeout ?? 30_000);
   for (;;) {
     if (await page.evaluate(predicate, argument)) return;
     if (Date.now() > deadline) throw new Error("等待条件超时，断言没有在期限内成立");
