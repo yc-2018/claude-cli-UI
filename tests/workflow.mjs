@@ -907,6 +907,11 @@ try {
   if (!(await page.locator(".user-question-dialog").textContent())?.includes("最终交付几份文稿？")) {
     throw new Error("plan mode did not show the interactive question dialog");
   }
+  // 提问弹窗盖在整个窗口上：必须写明是哪个对话在问，否则用户停在别的对话里时认不出这是谁弹的。
+  const planQuestionSourceTitle = await page.locator(".user-question-dialog .permission-source").getAttribute("data-conversation-title");
+  if (planQuestionSourceTitle !== await page.locator(".task-heading h2").textContent()) {
+    throw new Error(`提问弹窗没有写明来源对话：${planQuestionSourceTitle}`);
+  }
   await page.locator(".user-question-option", { hasText: "按章节拆分" }).click();
   await page.locator(".user-question-dialog .permission-button.primary").click();
   await page.waitForSelector('.message.assistant:last-of-type[data-status="done"]', { timeout: 15_000 });
@@ -1752,6 +1757,19 @@ try {
     throw new Error("background permission notification did not identify the conversation and tool");
   }
   await page.evaluate(() => { delete document.hasFocus; });
+  // 回归：授权弹窗盖在整个窗口上，用户此刻可能已经切到别的对话里，弹窗必须始终写明是哪个对话在请求，
+  // 不能跟着当前选中的对话变。覆盖层挡住了侧栏的命中测试，所以这里直接派发 click。
+  const permissionSource = page.locator(".permission-dialog .permission-source");
+  if (!(await permissionSource.textContent())?.includes("CLI 外部改名")) {
+    throw new Error("授权弹窗没有写明是哪个对话在请求权限");
+  }
+  await inFolder(page, ".task-row strong").filter({ hasText: /^CLI 外部改名 \(2\)$/ }).evaluate((element) => element.click());
+  await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "CLI 外部改名 (2)");
+  if (await permissionSource.getAttribute("data-conversation-title") !== "CLI 外部改名") {
+    throw new Error("切到别的对话后，授权弹窗把来源改成了当前对话");
+  }
+  await inFolder(page, ".task-row strong").filter({ hasText: /^CLI 外部改名$/ }).evaluate((element) => element.click());
+  await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "CLI 外部改名");
   await page.screenshot({ path: resolve(artifacts, "permission-dialog.png") });
   await page.locator(".permission-deny").click();
   await page.waitForSelector(".permission-dialog", { state: "detached" });
@@ -3113,11 +3131,38 @@ try {
   }, mirrorFailureConversationId, { timeout: 10_000 }).catch(() => {
     throw new Error("localStorage 副本写失败时，新建的对话没有写进 projects.json");
   });
+
+  // 回归：每条回答的底部要像 CLI 一样显示这一轮已经产生的输出 token，并且随着回复增长。
+  // message_delta 报的是本次请求的累计值，一轮里多次请求（工具调用之后再起一轮）必须相加，
+  // 收尾时再用 result.usage 的整轮总数校准。这个用例复用上面新建的对话，不新增对话。
+  await page.evaluate(() => {
+    window.__tokenSamples = [];
+    const observer = new MutationObserver(() => {
+      const chip = document.querySelector(".response-duration[data-output-tokens]");
+      const value = Number(chip?.getAttribute("data-output-tokens"));
+      if (Number.isFinite(value) && value > 0) window.__tokenSamples.push(value);
+    });
+    observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["data-output-tokens"] });
+  });
+  await page.locator(".composer textarea").fill("token 计数测试");
+  await page.locator(".composer textarea").press("Enter");
+  await page.waitForSelector('.message.assistant:last-of-type[data-status="done"]', { timeout: 15_000 });
+  const tokenFooter = await page.evaluate(() => {
+    const chip = document.querySelector(".response-duration");
+    return { value: Number(chip?.getAttribute("data-output-tokens")), text: (chip?.textContent ?? "").trim() };
+  });
+  if (tokenFooter.value !== 200) {
+    throw new Error(`收尾时没有用整轮总数校准 token 数：${JSON.stringify(tokenFooter)}`);
+  }
+  if (!tokenFooter.text.includes("↑ 200 tokens")) {
+    throw new Error(`回答底部没有显示 token 数：${JSON.stringify(tokenFooter)}`);
+  }
+  const tokenSamples = await page.evaluate(() => window.__tokenSamples);
+  if (new Set(tokenSamples).size < 2 || tokenSamples[tokenSamples.length - 1] !== 200) {
+    throw new Error(`token 数没有随着回复增长：${JSON.stringify(tokenSamples)}`);
+  }
+
   // 崩溃之后 Playwright 对这个页面的 CDP 调用会异步抛 "Target crashed"，断言只走主进程侧。
-  const storeBeforeCrash = await readFile(resolve(profile, "projects.json"), "utf8")
-    .then((raw) => JSON.parse(raw).flatMap((project) => project.conversations.map((item) => `${item.id.slice(0, 8)}:${item.messages.length}`)))
-    .catch((error) => `store unreadable: ${error.code ?? error.message}`);
-  console.log("DEBUG store-before-crash", JSON.stringify(storeBeforeCrash), "new:", mirrorFailureConversationId?.slice(0, 8));
   const ignoreTargetCrash = (error) => {
     const detail = error?.message ?? String(error);
     if (!detail.includes("Target crashed")) errors.push(detail);

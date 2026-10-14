@@ -65,6 +65,10 @@ interface RunMeta {
   pendingThinking: string;
   activeTextBlockId?: string;
   flushTimer?: number;
+  /** 这一轮已经产生的输出 token：流式增量按请求累计，assistant 记录把已完成请求并进基线。 */
+  outputTokens?: number;
+  outputTokenBaseline?: number;
+  pendingOutputTokens?: number;
   /** 这一轮是带着截断点发出去的，被它顶掉的那一轮的提示 uuid：CLI 拒绝回退时要把它撤回来。 */
   droppedPromptUuid?: string;
 }
@@ -238,6 +242,16 @@ function resolveSelection(projects: Project[], saved: AppSelection | null): AppS
   };
 }
 
+/** 询问弹窗盖在整个窗口上，而提问的那一轮未必是用户此刻看着的对话：弹窗里要写明是谁在问。 */
+function describeDialogSource(projects: Project[], conversationId: string | undefined) {
+  const project = projects.find((item) => item.conversations.some((conversation) => conversation.id === conversationId));
+  const conversation = project?.conversations.find((item) => item.id === conversationId);
+  return {
+    conversationTitle: conversation?.title ?? "未命名对话",
+    projectName: project ? project.customName ?? project.name : undefined,
+  };
+}
+
 function maxSidebarWidth() {
   return Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, window.innerWidth - 420));
 }
@@ -265,6 +279,31 @@ function getThinkingDelta(data: Record<string, unknown>) {
   if (streamEvent.type !== "content_block_delta" || !streamEvent.delta || typeof streamEvent.delta !== "object") return "";
   const delta = streamEvent.delta as Record<string, unknown>;
   return delta.type === "thinking_delta" && typeof delta.thinking === "string" ? delta.thinking : "";
+}
+
+/**
+ * 一次请求已经产出的输出 token。CLI 的 message_delta 报的是本次请求的累计值（不是这一轮的），
+ * 所以轮次内的总量要由调用方把已完成请求的基线加起来。
+ */
+function getStreamOutputTokens(data: Record<string, unknown>) {
+  if (data.type !== "stream_event" || !data.event || typeof data.event !== "object") return undefined;
+  const streamEvent = data.event as Record<string, unknown>;
+  if (streamEvent.type !== "message_delta" || !streamEvent.usage || typeof streamEvent.usage !== "object") return undefined;
+  return numberValue((streamEvent.usage as Record<string, unknown>).output_tokens);
+}
+
+/** 一条 assistant 记录代表一次请求结束，usage.output_tokens 是这次请求的总产出。 */
+function getAssistantOutputTokens(data: Record<string, unknown>) {
+  if (data.type !== "assistant") return undefined;
+  const message = data.message && typeof data.message === "object" ? data.message as Record<string, unknown> : undefined;
+  const usage = message?.usage && typeof message.usage === "object" ? message.usage as Record<string, unknown> : undefined;
+  return usage ? numberValue(usage.output_tokens) : undefined;
+}
+
+/** result.usage 是整轮所有请求的累加，收尾时用它校准，流式期间漏掉的任何一段都能补上。 */
+function getResultOutputTokens(data: Record<string, unknown>) {
+  if (data.type !== "result" || !data.usage || typeof data.usage !== "object") return undefined;
+  return numberValue((data.usage as Record<string, unknown>).output_tokens);
 }
 
 function getStreamBlockStart(data: Record<string, unknown>) {
@@ -1115,6 +1154,8 @@ export default function App() {
   );
   const pendingPermission = permissionQueue[0];
   const pendingQuestion = questionQueue[0];
+  const pendingPermissionSource = describeDialogSource(projects, pendingPermission?.conversationId);
+  const pendingQuestionSource = describeDialogSource(projects, pendingQuestion?.conversationId);
   const runningConversationIds = useMemo(() => new Set(Object.keys(activeRuns)), [activeRuns]);
   // 还排着队的提示也算「没答完」：这时执行收尾命令会把后面几条生生掐掉。
   const queuedPromptCount = useMemo(
@@ -1682,11 +1723,13 @@ export default function App() {
       window.clearTimeout(meta.flushTimer);
       meta.flushTimer = undefined;
     }
-    if (!meta.pendingText && !meta.pendingThinking) return;
+    if (!meta.pendingText && !meta.pendingThinking && meta.pendingOutputTokens === undefined) return;
     const text = meta.pendingText;
     const thinking = meta.pendingThinking;
+    const outputTokens = meta.pendingOutputTokens;
     meta.pendingText = "";
     meta.pendingThinking = "";
+    meta.pendingOutputTokens = undefined;
     const textBlockId = text ? meta.activeTextBlockId ?? (meta.activeTextBlockId = makeId()) : undefined;
     updateResponse(meta, (message) => {
       const withText = text && textBlockId
@@ -1695,6 +1738,7 @@ export default function App() {
       return {
         ...withText,
         thinking: `${withText.thinking ?? ""}${thinking}` || undefined,
+        ...(outputTokens !== undefined ? { outputTokens } : {}),
       };
     });
   }, [updateResponse]);
@@ -1962,10 +2006,23 @@ export default function App() {
         if (meta.flushTimer === undefined) meta.flushTimer = window.setTimeout(() => flushPendingText(meta), 50);
       }
 
+      // token 计数和正文一样走 50ms 合并，避免每个流式片段都触发一次整棵树的更新。
+      const streamOutputTokens = getStreamOutputTokens(data);
+      if (streamOutputTokens !== undefined) {
+        meta.outputTokens = (meta.outputTokenBaseline ?? 0) + streamOutputTokens;
+        meta.pendingOutputTokens = meta.outputTokens;
+        if (meta.flushTimer === undefined) meta.flushTimer = window.setTimeout(() => flushPendingText(meta), 50);
+      }
+
       if (data.type === "assistant") {
         flushPendingText(meta);
         const receivedText = meta.receivedText;
         const receivedThinking = meta.receivedThinking;
+        const assistantOutputTokens = getAssistantOutputTokens(data);
+        if (assistantOutputTokens !== undefined) {
+          meta.outputTokenBaseline = (meta.outputTokenBaseline ?? 0) + assistantOutputTokens;
+          meta.outputTokens = meta.outputTokenBaseline;
+        }
         updateResponse(meta, (message) => {
           let next = message.retry ? { ...message, retry: undefined } : message;
           for (const block of getAssistantContent(data)) {
@@ -1989,6 +2046,9 @@ export default function App() {
               next = { ...next, activeActivityId: activityId };
             }
           }
+          if (assistantOutputTokens !== undefined) {
+            next = { ...next, outputTokens: meta.outputTokenBaseline };
+          }
           return next;
         });
         meta.receivedText = false;
@@ -2010,6 +2070,7 @@ export default function App() {
         const isError = data.is_error === true;
         meta.successful = !isError && permissionRequests.length === 0;
         const resultText = typeof data.result === "string" ? data.result : "";
+        const resultOutputTokens = getResultOutputTokens(data);
         const resultBlockId = makeId();
         // 每一轮都有自己的气泡，这一轮的 result 只收尾自己，不再借别的轮次继续显示“运行中”。
         updateResponse(meta, (message) => ({
@@ -2017,6 +2078,7 @@ export default function App() {
           activeActivityId: undefined,
           status: permissionRequests.length > 0 ? "stopped" : (isError ? "error" : "done"),
           error: isError ? resultText || "Claude 未能完成这次任务" : undefined,
+          ...(resultOutputTokens !== undefined ? { outputTokens: resultOutputTokens } : {}),
           ...finishResponse(message),
         }));
         if (permissionRequests.length > 0) {
@@ -3421,6 +3483,8 @@ export default function App() {
       {pendingQuestion ? (
         <UserQuestionDialog
           questions={pendingQuestion.questions}
+          conversationTitle={pendingQuestionSource.conversationTitle}
+          projectName={pendingQuestionSource.projectName}
           submitting={questionSubmitting}
           onSubmit={(answers) => { void resolveQuestion(answers); }}
           onCancel={() => { void cancelQuestion(); }}
@@ -3429,6 +3493,8 @@ export default function App() {
       {!pendingQuestion && pendingPermission ? (
         <PermissionDialog
           requests={pendingPermission.requests}
+          conversationTitle={pendingPermissionSource.conversationTitle}
+          projectName={pendingPermissionSource.projectName}
           waitingForCli={!pendingPermission.direct && [...runMeta.current.values()].some((meta) => meta.conversationId === pendingPermission.conversationId && !meta.completed)}
           onDeny={() => { void resolvePermission("deny"); }}
           onAllowOnce={() => { void resolvePermission("once"); }}

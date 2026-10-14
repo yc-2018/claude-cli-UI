@@ -1,8 +1,10 @@
-import { Check, ShieldQuestion, X } from "lucide-react";
+import { Check, MessageSquareText, ShieldQuestion, X } from "lucide-react";
 import type { ToolPermissionRequest } from "./types";
 
 interface PermissionDialogProps {
   requests: ToolPermissionRequest[];
+  conversationTitle: string;
+  projectName?: string;
   waitingForCli: boolean;
   onAllowOnce(): void;
   onAllowConversation(): void;
@@ -11,12 +13,16 @@ interface PermissionDialogProps {
 
 export default function PermissionDialog({
   requests,
+  conversationTitle,
+  projectName,
   waitingForCli,
   onAllowOnce,
   onAllowConversation,
   onDeny,
 }: PermissionDialogProps) {
   const toolNames = [...new Set(requests.map((request) => request.toolName))];
+  // 弹窗是整个窗口共用的：请求可能来自后台某个对话，用户此刻正看着别的对话，所以要写明是谁在问。
+  const sourceLabel = projectName ? `${projectName} · ${conversationTitle}` : conversationTitle;
   const formatInput = (request: ToolPermissionRequest) => {
     if (typeof request.toolInput?.command === "string") return request.toolInput.command;
     if (request.toolInput) {
@@ -34,9 +40,13 @@ export default function PermissionDialog({
       <section className="permission-dialog" role="dialog" aria-modal="true" aria-labelledby="permission-title">
         <div className="permission-heading">
           <span className="permission-icon"><ShieldQuestion size={19} /></span>
-          <div>
+          <div className="permission-heading-text">
             <h2 id="permission-title">Claude 请求使用工具</h2>
             <p>确认后，Claude 会自动继续刚才的操作。</p>
+            <p className="permission-source" title={`来自 ${sourceLabel}`} data-conversation-title={conversationTitle}>
+              <MessageSquareText size={12} />
+              <span>来自 {projectName ? `${projectName} · ` : ""}<strong>{conversationTitle}</strong></span>
+            </p>
           </div>
         </div>
 

@@ -143,6 +143,9 @@ function normalizeMessage(value: unknown): ChatMessage | null {
   const responseCompletedAt = typeof message.responseCompletedAt === "number" && Number.isFinite(message.responseCompletedAt) && message.responseCompletedAt > 0
     ? message.responseCompletedAt
     : (responseStartedAt !== undefined && responseDurationMs !== undefined ? responseStartedAt + responseDurationMs : undefined);
+  const outputTokens = typeof message.outputTokens === "number" && Number.isFinite(message.outputTokens) && message.outputTokens >= 0
+    ? Math.floor(message.outputTokens)
+    : undefined;
 
   return {
     id: message.id,
@@ -152,6 +155,7 @@ function normalizeMessage(value: unknown): ChatMessage | null {
     responseStartedAt,
     responseDurationMs,
     responseCompletedAt: wasInterrupted ? undefined : responseCompletedAt,
+    outputTokens,
     createdAt: typeof message.createdAt === "number" ? message.createdAt : Date.now(),
     status: wasInterrupted ? "stopped" : status,
     activities,

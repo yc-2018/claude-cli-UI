@@ -1,17 +1,21 @@
-import { Check, MessageCircleQuestion, X } from "lucide-react";
+import { Check, MessageCircleQuestion, MessageSquareText, X } from "lucide-react";
 import { useState } from "react";
 import type { UserQuestion } from "./types";
 
 interface UserQuestionDialogProps {
   questions: UserQuestion[];
+  conversationTitle: string;
+  projectName?: string;
   submitting: boolean;
   onSubmit(answers: Record<string, string>): void;
   onCancel(): void;
 }
 
-export default function UserQuestionDialog({ questions, submitting, onSubmit, onCancel }: UserQuestionDialogProps) {
+export default function UserQuestionDialog({ questions, conversationTitle, projectName, submitting, onSubmit, onCancel }: UserQuestionDialogProps) {
   const [selections, setSelections] = useState<Record<string, string[]>>({});
   const [otherValues, setOtherValues] = useState<Record<string, string>>({});
+  // 弹窗是整个窗口共用的：提问可能来自后台某个对话，用户此刻正看着别的对话，所以要写明是谁在问。
+  const sourceLabel = projectName ? `${projectName} · ${conversationTitle}` : conversationTitle;
 
   const setSelection = (question: UserQuestion, label: string, checked: boolean) => {
     setSelections((current) => {
@@ -40,9 +44,13 @@ export default function UserQuestionDialog({ questions, submitting, onSubmit, on
       <section className="permission-dialog user-question-dialog" role="dialog" aria-modal="true" aria-labelledby="user-question-title">
         <div className="permission-heading">
           <span className="permission-icon"><MessageCircleQuestion size={19} /></span>
-          <div>
+          <div className="permission-heading-text">
             <h2 id="user-question-title">Claude 需要你的选择</h2>
             <p>回答后，计划会继续执行。</p>
+            <p className="permission-source" title={`来自 ${sourceLabel}`} data-conversation-title={conversationTitle}>
+              <MessageSquareText size={12} />
+              <span>来自 {projectName ? `${projectName} · ` : ""}<strong>{conversationTitle}</strong></span>
+            </p>
           </div>
         </div>
         <div className="user-question-list">

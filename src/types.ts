@@ -176,6 +176,11 @@ export interface ChatMessage {
   responseDurationMs?: number;
   /** 这一轮回答结束的时刻：耗时只说明跑了多久，回看长任务还需要知道它是几点结束的。 */
   responseCompletedAt?: number;
+  /**
+   * 这一轮已经产生的输出 token：流式期间随着回复增长，收尾时用 CLI 报的整轮总数校准。
+   * 界面上显示成 CLI 那样的「↑ 1.2k tokens」。
+   */
+  outputTokens?: number;
   createdAt: number;
   status?: "queued" | "running" | "done" | "error" | "stopped";
   activities?: Activity[];

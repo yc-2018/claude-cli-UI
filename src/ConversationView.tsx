@@ -223,6 +223,13 @@ function formatElapsed(seconds: number) {
   return minutes > 0 ? `${minutes} 分 ${remainingSeconds.toString().padStart(2, "0")} 秒` : `${remainingSeconds} 秒`;
 }
 
+/** CLI 的计数写法：一万以内保留一位小数（1.2k），更大按百万缩写（1.2m），一千以下直接给数。 */
+function formatTokenCount(tokens: number) {
+  if (tokens < 1_000) return String(tokens);
+  if (tokens < 1_000_000) return `${(tokens / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
+}
+
 /** 当天只显示时刻，跨天补上日期，长任务隔夜跑完也能看出是哪天结束的。 */
 function formatCompletedAt(completedAt: number) {
   const completed = new Date(completedAt);
@@ -240,9 +247,10 @@ interface ResponseDurationProps {
   startedAt?: number;
   durationMs?: number;
   completedAt?: number;
+  outputTokens?: number;
 }
 
-function ResponseDuration({ running, startedAt, durationMs, completedAt }: ResponseDurationProps) {
+function ResponseDuration({ running, startedAt, durationMs, completedAt, outputTokens }: ResponseDurationProps) {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -258,10 +266,11 @@ function ResponseDuration({ running, startedAt, durationMs, completedAt }: Respo
   const completedText = running || completedAt === undefined ? undefined : formatCompletedAt(completedAt);
 
   return (
-    <div className="response-duration" data-completed-at={completedAt} data-elapsed-seconds={elapsedSeconds}>
+    <div className="response-duration" data-completed-at={completedAt} data-elapsed-seconds={elapsedSeconds} data-output-tokens={outputTokens}>
       {running ? <span className="mini-spinner" /> : null}
       {running ? "正在回答" : "本次回答耗时"} · {formatElapsed(elapsedSeconds)}
       {completedText ? ` · 完成于 ${completedText}` : ""}
+      {outputTokens !== undefined ? ` · ↑ ${formatTokenCount(outputTokens)} tokens` : ""}
     </div>
   );
 }
@@ -301,6 +310,7 @@ function AssistantResponse({ message }: { message: ChatMessage }) {
       <ResponseDuration
         completedAt={message.responseCompletedAt}
         durationMs={message.responseDurationMs}
+        outputTokens={message.outputTokens}
         running={message.status === "running"}
         startedAt={message.responseStartedAt}
       />

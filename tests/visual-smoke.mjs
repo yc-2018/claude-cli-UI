@@ -98,6 +98,7 @@ await page.evaluate(({ workspace, crowdedWorkspace }) => {
           thinking: "先检查会话恢复状态，再验证令牌刷新顺序。",
           responseStartedAt: now - 9000,
           responseDurationMs: 8000,
+          outputTokens: 1500,
           activities: [
             { id: "t1", name: "Grep", summary: "session status" },
             { id: "t2", name: "Read", summary: "src/auth/session.ts" },
@@ -348,7 +349,7 @@ await page.screenshot({ path: resolve(artifacts, "conversation.png") });
 if (!(await page.locator(".response-duration").textContent())?.includes("本次回答耗时 · 8 秒")) throw new Error("completed response duration was not rendered");
 // 只存了开始时刻和耗时的旧数据也要补出完成时刻，长任务才知道是几点结束的。
 const durationText = (await page.locator(".response-duration").textContent()) ?? "";
-if (!/本次回答耗时 · 8 秒 · 完成于 \d{2}:\d{2}:\d{2}$/.test(durationText.trim())) {
+if (!/本次回答耗时 · 8 秒 · 完成于 \d{2}:\d{2}:\d{2} · ↑ 1\.5k tokens$/.test(durationText.trim())) {
   throw new Error(`completed response did not show when it finished: ${durationText}`);
 }
 if (!(await page.locator(".response-duration").getAttribute("data-completed-at"))) throw new Error("response completion timestamp was not recorded");
@@ -926,6 +927,7 @@ await page.waitForSelector(".permission-dialog");
 const longPermissionLayout = await page.evaluate(() => ({
   viewport: { width: window.innerWidth, height: window.innerHeight },
   dialog: document.querySelector(".permission-dialog")?.getBoundingClientRect().toJSON(),
+  source: document.querySelector(".permission-dialog .permission-source")?.getBoundingClientRect().toJSON(),
   tools: (() => {
     const element = document.querySelector(".permission-tools");
     return element ? { ...element.getBoundingClientRect().toJSON(), clientHeight: element.clientHeight, scrollHeight: element.scrollHeight } : null;
@@ -941,6 +943,29 @@ if (
   longPermissionLayout.actions.bottom > longPermissionLayout.dialog.bottom ||
   longPermissionLayout.tools.scrollHeight <= longPermissionLayout.tools.clientHeight
 ) throw new Error(`long permission dialog did not keep its actions visible: ${JSON.stringify(longPermissionLayout)}`);
+// 来源对话这一行是弹窗里唯一会被长标题撑开的文字：窄窗口下它既不能溢出弹窗，也不能压到工具列表上。
+if (
+  !longPermissionLayout.source ||
+  longPermissionLayout.source.right > longPermissionLayout.dialog.right ||
+  longPermissionLayout.source.bottom > longPermissionLayout.tools.top
+) throw new Error(`permission dialog source row overlapped the tool list: ${JSON.stringify(longPermissionLayout)}`);
+const permissionSourceText = (await page.locator(".permission-dialog .permission-source").textContent())?.trim() ?? "";
+if (!permissionSourceText.startsWith("来自 ") || permissionSourceText.length < 4) {
+  throw new Error(`permission dialog did not name the asking conversation: ${permissionSourceText}`);
+}
+// 项目名和对话名都可能很长：来源行必须靠省略号收住，不能把弹窗撑宽或顶出标题区。
+const longSourceLayout = await page.locator(".permission-dialog .permission-source").evaluate((element) => {
+  const label = element.querySelector("span");
+  const original = label.textContent;
+  label.textContent = `来自 ${"很长的项目目录名".repeat(5)} · ${"很长的对话标题".repeat(12)}`;
+  const dialog = element.closest(".permission-dialog").getBoundingClientRect();
+  const source = element.getBoundingClientRect();
+  label.textContent = original;
+  return { dialogRight: dialog.right, sourceRight: source.right, sourceHeight: source.height };
+});
+if (longSourceLayout.sourceRight > longSourceLayout.dialogRight || longSourceLayout.sourceHeight > 30) {
+  throw new Error(`long conversation name broke the permission dialog source row: ${JSON.stringify(longSourceLayout)}`);
+}
 if (await page.locator(".permission-actions .permission-button").count() !== 3) throw new Error("long permission dialog hid an action button");
 const permissionCommand = await page.locator(".permission-input").first().textContent();
 if (!permissionCommand?.includes("curl -sL -o artifact-0.zip https://example.com/assets/0")) throw new Error("permission dialog did not show the complete command");
@@ -956,6 +981,7 @@ await page.waitForSelector(".user-question-dialog");
 const userQuestionLayout = await page.evaluate(() => ({
   viewport: { width: window.innerWidth, height: window.innerHeight },
   dialog: document.querySelector(".user-question-dialog")?.getBoundingClientRect().toJSON(),
+  source: document.querySelector(".user-question-dialog .permission-source")?.getBoundingClientRect().toJSON(),
   actions: document.querySelector(".user-question-dialog .permission-actions")?.getBoundingClientRect().toJSON(),
 }));
 if (
@@ -963,6 +989,9 @@ if (
   userQuestionLayout.dialog.top < 0 || userQuestionLayout.dialog.bottom > userQuestionLayout.viewport.height ||
   userQuestionLayout.actions.bottom > userQuestionLayout.dialog.bottom
 ) throw new Error(`user question dialog escaped the compact viewport: ${JSON.stringify(userQuestionLayout)}`);
+if (!userQuestionLayout.source || userQuestionLayout.source.right > userQuestionLayout.dialog.right) {
+  throw new Error(`user question dialog source row escaped the dialog: ${JSON.stringify(userQuestionLayout)}`);
+}
 await page.screenshot({ path: resolve(artifacts, "user-question-dialog-compact.png") });
 await page.locator(".user-question-option", { hasText: "按章节拆分" }).click();
 await page.locator(".user-question-dialog .permission-button.primary").click();

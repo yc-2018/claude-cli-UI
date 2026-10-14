@@ -1127,9 +1127,15 @@ button.activity-row:hover, button.activity-row:focus-visible { background: #f1f1
 }
 
 .permission-heading { display: flex; flex: 0 0 auto; align-items: flex-start; gap: 11px; }
+.permission-heading-text { min-width: 0; }
 .permission-icon { display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border-radius: 7px; background: #f1e8df; color: #a6533e; }
 .permission-heading h2 { margin: 1px 0 4px; color: #30302d; font-size: 15px; font-weight: 650; letter-spacing: 0; }
 .permission-heading p { margin: 0; color: #777770; font-size: 12px; line-height: 1.5; }
+.permission-source { display: inline-flex; max-width: 100%; align-items: center; gap: 5px; padding: 3px 7px 3px 6px; border: 1px solid #e3e3dc; border-radius: 5px; background: #f3f3ef; }
+.permission-heading .permission-source { margin-top: 7px; color: #6f6f68; font-size: 11px; }
+.permission-source svg { flex: 0 0 auto; color: #9a9a92; }
+.permission-source span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.permission-source strong { color: #44443f; font-weight: 620; }
 .permission-tools { min-height: 0; margin: 17px 0 14px; overflow-y: auto; overscroll-behavior: contain; border-block: 1px solid #e0e0da; }
 .permission-tool { display: grid; grid-template-columns: 105px minmax(0, 1fr); align-items: start; min-height: 42px; gap: 10px; padding: 9px 2px; }
 .permission-tool + .permission-tool { border-top: 1px solid #e7e7e1; }

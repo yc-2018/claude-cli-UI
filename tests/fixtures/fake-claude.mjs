@@ -64,6 +64,9 @@ const processPrompt = (input) => {
     // 回退重编辑要独占一个会话：和别的用例共用默认 session id 会让同一个会话挂在两个对话上。
     : prompt.includes("回退重编辑测试")
       ? "77777777-7777-4777-8777-777777777777"
+    // token 计数用例独占一个会话：它一轮里要发多次请求，共用默认会话会和别的用例互相干扰。
+    : prompt.includes("token 计数测试")
+      ? "88888888-8888-4888-8888-888888888888"
     : prompt.includes("后台托盘测试")
       ? "55555555-5555-4555-8555-555555555555"
       : "22222222-2222-4222-8222-222222222222");
@@ -617,6 +620,40 @@ const processPrompt = (input) => {
         send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
       }, 1_200);
     }, 350);
+    return;
+  }
+
+  // 每一条回答的 token 计数：message_delta 带本次请求的累计 output_tokens，assistant 记录带
+  // 这次请求的总量，result.usage 是整轮的累加——界面按同样的口径显示，两个请求要能加起来。
+  if (prompt.includes("token 计数测试")) {
+    const first = "先输出一段。";
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    send({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: first } }, session_id: sessionId });
+    send({ type: "stream_event", event: { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 120 } }, session_id: sessionId });
+    send({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "text", text: first }], usage: { input_tokens: 1_000, output_tokens: 120 } },
+      session_id: sessionId,
+    });
+    setTimeout(() => {
+      // 第二个请求的 message_delta 从 0 重新累计，界面要把两段加起来而不是被覆盖。
+      send({ type: "stream_event", event: { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 80 } }, session_id: sessionId });
+      send({
+        type: "assistant",
+        message: { role: "assistant", content: [{ type: "text", text: "再补一段。" }], usage: { input_tokens: 1_100, output_tokens: 80 } },
+        session_id: sessionId,
+      });
+      setTimeout(() => {
+        send({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: "token 计数测试完成。",
+          session_id: sessionId,
+          usage: { input_tokens: 2_100, output_tokens: 200 },
+        });
+      }, 900);
+    }, 600);
     return;
   }
 
