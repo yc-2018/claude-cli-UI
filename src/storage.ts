@@ -413,11 +413,40 @@ export function nextDueAt(time: string, from = Date.now()) {
   return due.getTime();
 }
 
-export function saveProjects(projects: Project[]) {  const serializable = projects.map((project) => ({
+/**
+ * localStorage 只是 projects.json 丢了之后的兜底副本。它是同步写的，整份历史大起来之后
+ * 每存一次都要在渲染进程里搬几十 MB，机器内存吃紧时渲染进程会先被系统杀掉（界面白屏）。
+ * 所以超过这个体量就只留能把会话重新找回来的 metadata，正文交给 projects.json 和 CLI 会话文件。
+ */
+const MAX_MIRRORED_PROJECTS_BYTES = 2 * 1024 * 1024;
+/** 整份镜像一旦超量就不再试了：光是序列化那几十 MB 本身就是要躲开的开销。 */
+let mirrorMessages = true;
+
+function withoutMessages(projects: Project[]) {
+  return projects.map((project) => ({
     ...project,
-    conversations: project.conversations.map((conversation) => conversation.source === "claude"
-      ? { ...conversation, messages: [], historyLoaded: false }
-      : conversation),
+    conversations: project.conversations.map((conversation) => ({
+      ...conversation,
+      messages: [],
+      historyLoaded: conversation.source === "claude" ? false : undefined,
+    })),
   }));
-  localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(serializable));
+}
+
+export function saveProjects(projects: Project[]) {
+  if (mirrorMessages) {
+    const serializable = projects.map((project) => ({
+      ...project,
+      conversations: project.conversations.map((conversation) => conversation.source === "claude"
+        ? { ...conversation, messages: [], historyLoaded: false }
+        : conversation),
+    }));
+    const mirrored = JSON.stringify(serializable);
+    if (mirrored.length <= MAX_MIRRORED_PROJECTS_BYTES) {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, mirrored);
+      return;
+    }
+    mirrorMessages = false;
+  }
+  localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(withoutMessages(projects)));
 }

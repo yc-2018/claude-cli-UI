@@ -1033,6 +1033,8 @@ export default function App() {
   const [preferLegacyProjects] = useState(hasLegacyProjectsToMigrate);
   const [projects, setProjects] = useState<Project[]>(initialProjects);
   const [storageReady, setStorageReady] = useState(false);
+  /** 真正的存储读失败时置位：这一轮只有旧副本在内存里，任何回写都会造成数据丢失。 */
+  const projectStoreUnreadable = useRef(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -1153,43 +1155,51 @@ export default function App() {
       setActiveConversationId(selection.conversationId);
       setStorageReady(true);
       if (stored === null) window.claudeDesk.saveProjectStore(loaded);
-    }).catch(() => {
+    }).catch((error: unknown) => {
+      // 真正的存储读不出来（崩溃重载后撞上占用最典型）：这一轮内存里只有 localStorage 的旧副本，
+      // 再往回写就会把真数据覆盖掉，所以只放界面出来，保存全程关掉。
+      projectStoreUnreadable.current = true;
+      window.claudeDesk.reportError(`project store load failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
       if (!canceled) setStorageReady(true);
     });
     return () => { canceled = true; };
   }, [initialProjects, preferLegacyProjects]);
 
   useEffect(() => {
-    if (!storageReady) return;
+    if (!storageReady || projectStoreUnreadable.current) return;
     window.claudeDesk.saveAppSelection({ projectId: selectedProjectId, conversationId: activeConversationId });
   }, [activeConversationId, selectedProjectId, storageReady]);
+
+  /**
+   * projects.json 才是真正的存储，localStorage 只是它丢了之后的兜底副本：副本写失败
+   * （整份历史大起来之后超配额最常见）不能连带把真正的保存挡掉，否则新建的内容一重启就没了。
+   */
+  const persistProjects = useCallback((value: Project[]) => {
+    if (projectStoreUnreadable.current) return;
+    try {
+      window.claudeDesk.saveProjectStore(value);
+    } catch (error) {
+      console.error("保存项目失败", error);
+    }
+    try {
+      saveProjects(value);
+    } catch (error) {
+      console.error("保存项目副本失败", error);
+    }
+  }, []);
 
   useEffect(() => {
     projectsRef.current = projects;
     if (!storageReady) return;
-    const timer = window.setTimeout(() => {
-      try {
-        saveProjects(projects);
-        window.claudeDesk.saveProjectStore(projects);
-      } catch (error) {
-        console.error("保存项目失败", error);
-      }
-    }, 350);
+    const timer = window.setTimeout(() => persistProjects(projects), 350);
     return () => window.clearTimeout(timer);
-  }, [projects, storageReady]);
+  }, [persistProjects, projects, storageReady]);
 
   useEffect(() => {
-    const persistNow = () => {
-      try {
-        saveProjects(projectsRef.current);
-        window.claudeDesk.saveProjectStore(projectsRef.current);
-      } catch (error) {
-        console.error("保存项目失败", error);
-      }
-    };
+    const persistNow = () => persistProjects(projectsRef.current);
     window.addEventListener("beforeunload", persistNow);
     return () => window.removeEventListener("beforeunload", persistNow);
-  }, []);
+  }, [persistProjects]);
 
   useEffect(() => {
     void window.claudeDesk.getClaudeInfo().then(setCliInfo).catch(() => setCliInfo({ available: false }));

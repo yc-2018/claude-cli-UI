@@ -12,6 +12,8 @@ if (args.includes("--version")) {
 process.stdin.setEncoding("utf8");
 let slowTaskActive = false;
 let processExitGate;
+/** 真实 CLI 可能在 result 之后因为还有后台 shell 任务而一直不退出，这个开关复刻那种赖着不走的进程。 */
+let neverExit = false;
 // 真实 CLI 在工具调用循环中被追加提示时，会把它并进当前这一轮，不再单独回答。
 // 这个开关用来复刻那种“折叠”行为：注入的提示直接被吞掉，一个 result 都不会多发。
 let foldAppendedActive = false;
@@ -258,6 +260,28 @@ const processPrompt = (input) => {
       message: { role: "assistant", content: [{ type: "text", text: response }], stop_reason: "end_turn" },
       session_id: sessionId,
     });
+    return;
+  }
+  // 这一轮正常答完，但进程之后永远不退出（真实 CLI 里是后台 shell 任务还挂着）。
+  if (prompt.includes("不退出回归测试")) {
+    neverExit = true;
+    const response = "这一轮答完了，但进程不会退出。";
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: response }] }, session_id: sessionId });
+    send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
+    return;
+  }
+  // 被 --resume 拉起的 CLI 会先替自己跑一轮（上一个进程留下的后台任务通知），那一轮有自己的
+  // init 和 result，而且 result 里什么正文都没有。我们这一轮的输出要等到它之后才开始。
+  if (prompt.includes("插队轮次回归测试")) {
+    send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    send({ type: "result", subtype: "success", is_error: false, result: "", session_id: sessionId });
+    setTimeout(() => {
+      const response = "插队的那一轮结束之后，这一轮才真正开始输出。";
+      send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+      send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: response }] }, session_id: sessionId });
+      send({ type: "result", subtype: "success", is_error: false, result: response, session_id: sessionId });
+    }, 600);
     return;
   }
   if (prompt.includes("后台提醒测试") || prompt.includes("后台托盘测试")) {
@@ -869,6 +893,11 @@ process.stdin.on("data", (chunk) => {
 });
 process.stdin.on("end", () => {
   if (lineBuffer.trim()) processPrompt(lineBuffer);
+  // 轮次答完了也绝不退出：留一个常驻计时器把事件循环撑住，等主进程的退出看守来收。
+  if (neverExit) {
+    setInterval(() => undefined, 1_000);
+    return;
+  }
   // 把 result 与进程退出分开，由测试释放屏障，稳定复现 CI 上的收尾竞态。
   if (processExitGate) {
     const timer = setInterval(() => {

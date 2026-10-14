@@ -204,6 +204,8 @@ const launch = () => electron.launch({
     CLAUDE_DESK_TEST_WORKSPACE: root,
     CLAUDE_DESK_FAKE_SESSIONS_DIR: cliSessions,
     CLAUDE_DESK_TEST_EXIT_GATE: processExitGate,
+    // 轮次收尾后进程不退的兜底时长调短，否则这条回归要等满 20 秒。
+    CLAUDE_DESK_EXIT_WATCHDOG_MS: "6000",
     CLAUDE_DESK_TEST_TERMINAL_LOG: terminalLog,
     CLAUDE_DESK_TEST_ADD_DIR_LOG: addDirLog,
     CLAUDE_DESK_TEST_DIALOG_LOG: dialogLog,
@@ -223,12 +225,41 @@ const launch = () => electron.launch({
   },
 });
 
+/**
+ * Playwright 的 waitForFunction 会把 async 断言返回的 Promise 直接当成真值，写成 async 就等于不校验。
+ * 需要读主进程状态的条件统一走这里：在测试进程里轮询，页面侧用 evaluate 真正把结果 await 出来。
+ */
+const waitForAsyncCondition = async (page, predicate, argument, options = {}) => {
+  const deadline = Date.now() + (options.timeout ?? 15_000);
+  for (;;) {
+    if (await page.evaluate(predicate, argument)) return;
+    if (Date.now() > deadline) throw new Error("等待条件超时，断言没有在期限内成立");
+    await new Promise((done) => setTimeout(done, 100));
+  }
+};
+
 const errors = [];
+/**
+ * 崩溃恢复那段用例会故意把渲染进程打死、并把 localStorage 副本写坏：Electron 自己的 sandbox
+ * 启动报错和「副本写失败」日志都是这段的预期输出，只在这段里放行。
+ */
+let expectRendererCrashNoise = false;
+const rendererCrashNoise = [
+  /保存项目副本失败/,
+  /sandboxed_renderer\.bundle\.js script failed to run/,
+  /Cannot destructure property 'preloadScripts'/,
+];
+const isExpectedCrashNoise = (detail) => expectRendererCrashNoise && rendererCrashNoise.some((pattern) => pattern.test(detail));
 const watchErrors = (page) => {
   page.on("console", (message) => {
-    if (message.type() === "error") errors.push(message.text());
+    if (message.type() !== "error") return;
+    const text = message.text();
+    if (!isExpectedCrashNoise(text)) errors.push(text);
   });
-  page.on("pageerror", (error) => errors.push(error.stack ?? error.message));
+  page.on("pageerror", (error) => {
+    const detail = error.stack ?? error.message;
+    if (!isExpectedCrashNoise(detail)) errors.push(detail);
+  });
 };
 
 const refreshProjectSessions = async (page) => {
@@ -309,7 +340,7 @@ try {
     throw new Error(`旧进程退出前不应允许新进程并发启动：${JSON.stringify(blockedStart)}`);
   }
   await writeFile(processExitGate, "release", "utf8");
-  await page.waitForFunction(async (runId) => !(await window.claudeDesk.getActiveRuns()).some((run) => run.runId === runId), lifecycleRunId);
+  await waitForAsyncCondition(page, async (runId) => !(await window.claudeDesk.getActiveRuns()).some((run) => run.runId === runId), lifecycleRunId);
   try {
     await page.waitForFunction(() => window.__lifecycleEvents.some((event) => event.type === "exit"), undefined, { timeout: 5_000 });
   } catch {
@@ -321,6 +352,81 @@ try {
   });
   if (lifecycleEvents.length !== 2 || lifecycleEvents[0].dataType !== "result" || lifecycleEvents[1].type !== "exit") {
     throw new Error(`进程退出事件应仅在 result 后出现一次：${JSON.stringify(lifecycleEvents)}`);
+  }
+
+  /** 这两个回归都直接走 IPC：不新建对话，就不会牵动侧栏里那几处写死的对话条数。 */
+  const collectRunEvents = async (request) => {
+    const started = await page.evaluate((value) => {
+      window.__runEvents = [];
+      window.__removeRunListener = window.claudeDesk.onEvent((event) => {
+        if (event.runId !== value.runId) return;
+        window.__runEvents.push({
+          type: event.type,
+          dataType: event.data?.type,
+          subtype: event.data?.subtype,
+          result: typeof event.data?.result === "string" ? event.data.result : undefined,
+          text: event.data?.message?.content?.[0]?.text,
+        });
+      });
+      return window.claudeDesk.startRun(value);
+    }, request);
+    if (!started.started) throw new Error(`${request.prompt} 未能启动假 CLI：${JSON.stringify(started)}`);
+  };
+  const takeRunEvents = () => page.evaluate(() => {
+    window.__removeRunListener();
+    return window.__runEvents;
+  });
+
+  // 回归：CLI 会在我们发的提示之前先替自己跑一轮（被 --resume 拉起时处理上一个进程留下的后台
+  // 任务通知），并单独为那一轮发一个空 result。过去那个 result 一到就把我们这一轮收尾了：气泡
+  // 几秒内变成「已完成、没有输出」，而真正的回答才刚开始跑，之后的全部输出都挂在一个已经结束的
+  // 轮次上，界面完全看不见。
+  const unsolicitedRunId = "unsolicited-result-regression";
+  await collectRunEvents({
+    runId: unsolicitedRunId,
+    conversationId: "unsolicited-result-conversation",
+    cwd: profile,
+    prompt: "插队轮次回归测试",
+    permissionMode: "acceptEdits",
+  });
+  await page.waitForFunction(() => window.__runEvents.some((event) => event.type === "exit"), undefined, { timeout: 20_000 })
+    .catch(() => { throw new Error("插队轮次回归测试的假 CLI 没有退出"); });
+  const unsolicitedEvents = await takeRunEvents();
+  const deliveredResults = unsolicitedEvents.filter((event) => event.dataType === "result");
+  if (deliveredResults.length !== 1 || !deliveredResults[0].result?.includes("这一轮才真正开始输出")) {
+    throw new Error(`插队那一轮的空 result 不该收尾我们这一轮：${JSON.stringify(unsolicitedEvents)}`);
+  }
+  // 真正的回答必须在收尾之前就送到，否则它仍然是「看不见的输出」。
+  const answerIndex = unsolicitedEvents.findIndex((event) => event.text?.includes("这一轮才真正开始输出"));
+  if (answerIndex < 0 || answerIndex > unsolicitedEvents.indexOf(deliveredResults[0])) {
+    throw new Error(`我们这一轮的回答没有在收尾前送到渲染层：${JSON.stringify(unsolicitedEvents)}`);
+  }
+
+  // 回归：轮次答完、stdin 也关了之后，CLI 可能因为还有后台任务而一直不退出。渲染层的忙碌状态
+  // 只能靠进程退出释放，过去对话就永远在转圈、待发送队列也发不出去，而那个进程还在后台改文件。
+  const stuckRunId = "exit-watchdog-regression";
+  await collectRunEvents({
+    runId: stuckRunId,
+    conversationId: "exit-watchdog-conversation",
+    cwd: profile,
+    prompt: "不退出回归测试",
+    permissionMode: "acceptEdits",
+  });
+  await page.waitForFunction(() => window.__runEvents.some((event) => event.dataType === "result"));
+  if (!(await page.evaluate(async (runId) => (await window.claudeDesk.getActiveRuns()).some((run) => run.runId === runId), stuckRunId))) {
+    throw new Error("不退出回归测试的假 CLI 应该在 result 之后仍然活着");
+  }
+  await page.waitForFunction(() => window.__runEvents.some((event) => event.type === "exit"), undefined, { timeout: 30_000 })
+    .catch(() => { throw new Error("轮次收尾后赖着不退的进程没有被退出看守收掉，对话会一直显示在运行") });
+  await page.waitForFunction(
+    async (runId) => !(await window.claudeDesk.getActiveRuns()).some((run) => run.runId === runId),
+    stuckRunId,
+    { timeout: 10_000 },
+  );
+  await takeRunEvents();
+  const watchdogLog = await readFile(resolve(profile, "renderer-errors.log"), "utf8").catch(() => "");
+  if (!/killing claude pid .*轮次已收尾但进程/.test(watchdogLog)) {
+    throw new Error(`退出看守杀掉进程这件事没有被记下来：${watchdogLog.slice(-300)}`);
   }
 
   // 便携版没有安装步骤，开始菜单入口得自己维护。入口只能指向应用自留的固定副本：改成指向
@@ -354,12 +460,12 @@ try {
     throw new Error("background settings did not use the expected defaults");
   }
   await quitSetting.click();
-  await page.waitForFunction(async () => (await window.claudeDesk.getAppSettings()).closeBehavior === "quit");
+  await waitForAsyncCondition(page, async () => (await window.claudeDesk.getAppSettings()).closeBehavior === "quit");
   await traySetting.click();
   await completionSetting.evaluate((input) => input.click());
-  await page.waitForFunction(async () => (await window.claudeDesk.getAppSettings()).notifyOnCompletion === false);
+  await waitForAsyncCondition(page, async () => (await window.claudeDesk.getAppSettings()).notifyOnCompletion === false);
   await completionSetting.evaluate((input) => input.click());
-  await page.waitForFunction(async () => {
+  await waitForAsyncCondition(page, async () => {
     const settings = await window.claudeDesk.getAppSettings();
     return settings.closeBehavior === "tray" && settings.notifyOnCompletion === true;
   });
@@ -380,7 +486,7 @@ try {
   if (await ignoreUpdateButton.count() !== 1) throw new Error("update dialog did not offer per-version suppression");
   await ignoreUpdateButton.click();
   await page.waitForSelector(".update-dialog", { state: "detached" });
-  await page.waitForFunction(async (version) => (await window.claudeDesk.getAppSettings()).ignoredUpdateVersion === version, updateVersion);
+  await waitForAsyncCondition(page, async (version) => (await window.claudeDesk.getAppSettings()).ignoredUpdateVersion === version, updateVersion);
   await updateButton.click();
   await page.waitForSelector(".update-dialog");
   await page.locator(".update-later-button").click();
@@ -941,7 +1047,7 @@ try {
   await page.locator('input[aria-label="对话名称"]').fill("UI 同步会话名");
   await page.locator('input[aria-label="对话名称"]').press("Enter");
   await page.waitForFunction(() => document.querySelector(".task-heading h2")?.textContent === "UI 同步会话名");
-  await page.waitForFunction(async () => {
+  await waitForAsyncCondition(page, async () => {
     const project = JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0];
     return project?.conversations?.some((conversation) => conversation.title === "UI 同步会话名");
   });
@@ -1140,7 +1246,7 @@ try {
     throw new Error(`additional directory was not passed to the CLI as --add-dir: ${JSON.stringify(addDirRun)}`);
   }
   // 附加目录随项目持久化：先等它落进主进程项目库，重新加载后徽标和列表才会从存储里恢复。
-  await page.waitForFunction(async (expected) => {
+  await waitForAsyncCondition(page, async (expected) => {
     const projects = await window.claudeDesk.getProjectStore();
     return Array.isArray(projects) && projects.some((project) => project.conversations.some((conversation) =>
       Array.isArray(conversation.additionalDirectories) && conversation.additionalDirectories.includes(expected)));
@@ -1373,7 +1479,7 @@ try {
   if (await page.locator(".user-bubble", { hasText: "回退重编辑测试 二" }).count()) {
     throw new Error("the superseded turn stayed visible in the conversation");
   }
-  await page.waitForFunction(async () => {
+  await waitForAsyncCondition(page, async () => {
     const projects = await window.claudeDesk.getProjectStore();
     return Array.isArray(projects) && projects.some((project) => project.conversations.some((conversation) =>
       Array.isArray(conversation.droppedPromptUuids) && conversation.droppedPromptUuids.length > 0));
@@ -1405,7 +1511,7 @@ try {
   if (!rejectedError?.includes("Claude CLI 拒绝回退它") || rejectedError.includes("--resume-drops-turn")) {
     throw new Error(`rewind refusal was not explained in the UI: ${rejectedError}`);
   }
-  await page.waitForFunction(async (uuid) => {
+  await waitForAsyncCondition(page, async (uuid) => {
     const projects = await window.claudeDesk.getProjectStore();
     const conversations = Array.isArray(projects) ? projects.flatMap((project) => project.conversations ?? []) : [];
     return conversations.every((conversation) => !(conversation.droppedPromptUuids ?? []).includes(uuid));
@@ -2057,7 +2163,7 @@ try {
     ))
   ) throw new Error(`guided turn rendered in the wrong order: ${JSON.stringify(guidedTurnOrder)}`);
   // 三条追加回答已经完成，但进程仍停在退出屏障；队列必须等真实退出才能继续。
-  await page.waitForFunction(async () => (await window.claudeDesk.getActiveRuns()).some((run) => run.turnRunIds.length === 0));
+  await waitForAsyncCondition(page, async () => (await window.claudeDesk.getActiveRuns()).some((run) => run.turnRunIds.length === 0));
   if (await page.locator(".send-button.stop").count() !== 1 ||
     (await page.locator(".prompt-queue-content strong").allTextContents()).join(",") !== "队列第三条,队列第二条已编辑") {
     throw new Error("进程真正退出之前必须保留忙碌状态和待发送队列");
@@ -2342,7 +2448,7 @@ try {
   watchErrors(page);
   await page.waitForSelector(".project-group");
   useLegacyUpdateManifest = false;
-  await page.waitForFunction(async (version) => (await window.claudeDesk.getAppSettings()).ignoredUpdateVersion === version, updateVersion);
+  await waitForAsyncCondition(page, async (version) => (await window.claudeDesk.getAppSettings()).ignoredUpdateVersion === version, updateVersion);
   const ignoredUpdateState = await page.evaluate(() => window.claudeDesk.checkAppUpdate());
   if (ignoredUpdateState.phase !== "available" || ignoredUpdateState.latestVersion !== updateVersion) {
     throw new Error(`ignored update version was not discovered: ${JSON.stringify(ignoredUpdateState)}`);
@@ -2363,7 +2469,7 @@ try {
   await page.waitForSelector(".update-dialog");
   await page.locator(".update-later-button").click();
   await page.waitForSelector(".update-dialog", { state: "detached" });
-  await page.waitForFunction(async () => {
+  await waitForAsyncCondition(page, async () => {
     const project = JSON.parse(localStorage.getItem("claude-desk.projects.v2") ?? "[]")[0];
     const conversation = project?.conversations?.find((item) => item.sessionId === "22222222-2222-4222-8222-222222222222");
     return Boolean(conversation);
@@ -2451,7 +2557,7 @@ try {
   if (await page.locator(".task-row.active").count() !== 0 || await page.locator(".composer").count() !== 0 || await page.locator(".project-empty-view").count() !== 1) {
     throw new Error("deleting the active conversation did not leave its project selected without opening another conversation");
   }
-  await page.waitForFunction(async () => (await window.claudeDesk.getAppSelection()).conversationId === null);
+  await waitForAsyncCondition(page, async () => (await window.claudeDesk.getAppSelection()).conversationId === null);
 
   await electronApp.close();
   electronApp = await launch();
@@ -2794,7 +2900,7 @@ try {
     throw new Error(`refresh replaced the manual conversation order: ${orderAfterRefresh.join(",")}`);
   }
 
-  await page.waitForFunction(async () => {
+  await waitForAsyncCondition(page, async () => {
     const projects = await window.claudeDesk.getProjectStore();
     if (!Array.isArray(projects)) return false;
     const projectIds = projects.map((project) => project.id).join(",");
@@ -2946,6 +3052,137 @@ try {
   }
 
   await electronApp.close();
+
+  // 回归：渲染进程被 Chromium 或系统杀掉之后（整机内存吃紧时最常见），窗口会一直白着，而主进程和
+  // Claude 子进程都还在跑。界面必须自己重载回来，而且不能把崩溃前的内容弄丢。
+  // 这段用自己播种的存储跑，和前面的用例互不影响。
+  const crashNow = Date.now();
+  await writeFile(resolve(profile, "projects.json"), JSON.stringify([{
+    id: "crash-project",
+    name: "崩溃恢复",
+    workspace: profile,
+    createdAt: crashNow,
+    updatedAt: crashNow,
+    conversations: [{
+      id: "crash-conversation",
+      title: "崩溃恢复对话",
+      createdAt: crashNow,
+      updatedAt: crashNow,
+      messages: [{ id: "crash-message", role: "user", content: "崩溃前的正文", createdAt: crashNow }],
+      permissionMode: "acceptEdits",
+    }],
+  }]), "utf8");
+  await writeFile(resolve(profile, "selection.json"), JSON.stringify({
+    projectId: "crash-project",
+    conversationId: "crash-conversation",
+  }), "utf8");
+  await rm(resolve(profile, "Local Storage"), { recursive: true, force: true });
+  electronApp = await launch();
+  page = await electronApp.firstWindow();
+  watchErrors(page);
+  await page.waitForSelector(".task-row.active");
+
+  // localStorage 里那份只是 projects.json 丢了之后的兜底副本：副本写失败（整份历史大起来之后
+  // 超配额最常见）绝不能连带把真正的存储挡掉，否则新建的对话一重启就没了。
+  // 只对装了标记的那一次加载生效，后面的加载不受影响。
+  expectRendererCrashNoise = true;
+  await page.addInitScript(() => {
+    if (localStorage.getItem("claude-desk-test.fail-project-mirror") !== "1") return;
+    localStorage.removeItem("claude-desk-test.fail-project-mirror");
+    const originalSetItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function setItem(key, value) {
+      if (key === "claude-desk.projects.v2") throw new DOMException("quota exceeded", "QuotaExceededError");
+      originalSetItem.call(this, key, value);
+    };
+  });
+  await page.evaluate(() => localStorage.setItem("claude-desk-test.fail-project-mirror", "1"));
+  await page.reload();
+  await page.waitForSelector(".task-row.active");
+  // 新建对话按钮要悬停才显形，这里只关心它触发的保存，直接派发点击。
+  await page.locator('.project-action[title="新建对话"]').evaluate((button) => button.click());
+  await page.waitForSelector(".conversation-intro");
+  const mirrorFailureConversationId = await page.evaluate(async () => (await window.claudeDesk.getAppSelection()).conversationId);
+  if (!mirrorFailureConversationId || mirrorFailureConversationId === "crash-conversation") {
+    throw new Error(`新建的对话没有成为当前对话：${mirrorFailureConversationId}`);
+  }
+  await waitForAsyncCondition(page, async (expected) => {
+    const projects = await window.claudeDesk.getProjectStore();
+    return Array.isArray(projects)
+      && projects.some((project) => project.conversations.some((conversation) => conversation.id === expected));
+  }, mirrorFailureConversationId, { timeout: 10_000 }).catch(() => {
+    throw new Error("localStorage 副本写失败时，新建的对话没有写进 projects.json");
+  });
+  // 崩溃之后 Playwright 对这个页面的 CDP 调用会异步抛 "Target crashed"，断言只走主进程侧。
+  const storeBeforeCrash = await readFile(resolve(profile, "projects.json"), "utf8")
+    .then((raw) => JSON.parse(raw).flatMap((project) => project.conversations.map((item) => `${item.id.slice(0, 8)}:${item.messages.length}`)))
+    .catch((error) => `store unreadable: ${error.code ?? error.message}`);
+  console.log("DEBUG store-before-crash", JSON.stringify(storeBeforeCrash), "new:", mirrorFailureConversationId?.slice(0, 8));
+  const ignoreTargetCrash = (error) => {
+    const detail = error?.message ?? String(error);
+    if (!detail.includes("Target crashed")) errors.push(detail);
+  };
+  process.on("uncaughtException", ignoreTargetCrash);
+  process.on("unhandledRejection", ignoreTargetCrash);
+  await electronApp.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer();
+  });
+  let recovery = { alive: false, detail: "没有探到任何界面状态" };
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await new Promise((done) => setTimeout(done, 500));
+    const probe = await electronApp.evaluate(async ({ BrowserWindow }) => {
+      const target = BrowserWindow.getAllWindows()[0];
+      if (!target || target.isDestroyed()) return "窗口已经被销毁";
+      if (target.webContents.isCrashed()) return "渲染进程仍然是崩溃状态";
+      return await target.webContents.executeJavaScript(`JSON.stringify({
+        rows: document.querySelectorAll(".task-row").length,
+        active: document.querySelectorAll(".task-row.active").length,
+        fatal: Boolean(document.querySelector(".fatal-error")),
+        loading: Boolean(document.querySelector(".history-loading")),
+        text: (document.body.textContent || "").slice(0, 100),
+      })`).catch((error) => `探测失败：${error.message}`);
+    });
+    const storeNow = await readFile(resolve(profile, "projects.json"), "utf8")
+      .then((raw) => JSON.parse(raw).flatMap((project) => project.conversations.map((item) => `${item.id.slice(0, 8)}:${item.messages.length}`)))
+      .catch((error) => `store unreadable: ${error.code ?? error.message}`);
+    recovery = { alive: false, detail: `${probe} store=${JSON.stringify(storeNow)}` };
+    try {
+      const state = JSON.parse(probe);
+      if (state.active > 0 && !state.fatal) {
+        recovery = { alive: true, detail: probe };
+        break;
+      }
+    } catch {
+      // 还没加载出可解析的状态，继续等。
+    }
+  }
+  process.off("uncaughtException", ignoreTargetCrash);
+  process.off("unhandledRejection", ignoreTargetCrash);
+  if (!recovery.alive) throw new Error(`渲染进程崩溃后界面没有自己恢复，窗口一直是白屏：${recovery.detail}`);
+  const crashLog = await readFile(resolve(profile, "renderer-errors.log"), "utf8").catch(() => "");
+  if (!crashLog.includes("reloading renderer")) {
+    throw new Error(`渲染进程崩溃没有被记录成一次重载：${crashLog.slice(-300)}`);
+  }
+  if (!/renderer crashed \(.*\), system memory free \d+MB of \d+MB/.test(crashLog)) {
+    throw new Error(`崩溃日志里没有记下当时的内存水位：${crashLog.slice(-300)}`);
+  }
+  // 崩溃过的页面不再交给 Playwright 继续操作，换一个干净实例检查恢复流程有没有把数据弄丢。
+  await electronApp.close();
+  electronApp = await launch();
+  page = await electronApp.firstWindow();
+  watchErrors(page);
+  await page.waitForSelector(".task-row.active");
+  const survivors = JSON.parse(await readFile(resolve(profile, "projects.json"), "utf8"))
+    .flatMap((project) => project.conversations);
+  if (
+    survivors.length !== 2 ||
+    !survivors.some((conversation) => conversation.id === mirrorFailureConversationId) ||
+    survivors.find((conversation) => conversation.id === "crash-conversation")?.messages?.[0]?.content !== "崩溃前的正文"
+  ) {
+    throw new Error(`崩溃恢复把存储里的内容弄丢了：${JSON.stringify(survivors.map((item) => ({ id: item.id, messages: item.messages.length })))}`);
+  }
+  expectRendererCrashNoise = false;
+
+  await electronApp.close();
   electronApp = undefined;
 
   console.log(JSON.stringify({
@@ -2963,6 +3200,10 @@ try {
     slashCommands: true,
     legacyMigration: true,
     corruptDataRecovery: true,
+    unsolicitedResultIgnored: true,
+    stuckProcessExitWatchdog: true,
+    projectMirrorFailure: true,
+    rendererCrashRecovery: true,
     reorderingAndPinning: true,
     conversationListCap: true,
     portableAssetMapping: true,

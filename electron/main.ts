@@ -189,6 +189,13 @@ interface ActiveRun {
   handoffAfterToolResult: boolean;
   /** 上一轮被 end_turn 兜底收尾后，只在这个时间点之前允许吞掉一条迟到的 result。 */
   staleResultDeadline: number;
+  /**
+   * 疑似不属于我们这一轮的 result：先扣住不收尾，等后面有没有真正的输出来证明它是别人的。
+   * 到点还没有新输出就按原样收尾，宁可晚几秒，也不能让对话永远挂着。
+   */
+  deferredResult?: { record: Record<string, unknown>; timer: ReturnType<typeof setTimeout> };
+  /** 全部轮次收尾、stdin 也关了之后，等进程自己退出的兜底计时器。 */
+  exitWatchdog?: ReturnType<typeof setTimeout>;
   stopping: boolean;
 }
 
@@ -236,8 +243,29 @@ const STALE_RESULT_CREDIT_MS = 1500;
  * 窗口取得比实测值宽得多：误杀一个正常轮次会同时丢掉提示和回答，代价远大于多等几秒。
  */
 const APPENDED_TURN_SILENCE_MS = 6000;
+/**
+ * CLI 会在我们发的提示之前先替自己跑一轮：实测 2.1.296，被 --resume 拉起的进程会先把上一个
+ * 进程留下的后台任务通知（promptSource: system）当成一轮处理，并单独为它发一个 result。
+ * 那个 result 一到就被当成我们这一轮的收尾，气泡几秒内变成「已完成、没有输出」，而我们的提示
+ * 其实才刚开始跑，之后的全部输出都挂在一个已经收尾的轮次上，界面完全看不见。
+ * 所以这种「成功、没有正文、而且我们这一轮一个字都还没输出过」的 result 先扣住这么久：
+ * 期间只要出现任何输出，就证明它确实是别人的；一直没有就按原样收尾，绝不让对话永远挂着。
+ */
+const UNSOLICITED_RESULT_GRACE_MS = 8000;
+/**
+ * 全部轮次收尾、stdin 也关了之后等进程自己退出的时长。实测 2.1.296：CLI 可能因为还有后台
+ * shell 任务而一直不退，而渲染层的忙碌状态只能靠进程退出释放——对话就永远在转圈、待发送
+ * 队列也发不出去，用户只能看着一个停不下来的任务。超时就连子进程树一起收掉。
+ */
+const EXIT_WATCHDOG_MS = readPositiveEnv("CLAUDE_DESK_EXIT_WATCHDOG_MS", 20_000);
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const LARGE_CONTEXT_WINDOW = 1_000_000;
+
+/** 测试要把这些兜底时长调短，但环境变量里写了垃圾值不能把兜底整个关掉。 */
+function readPositiveEnv(name: string, fallback: number) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
 
 function findConversationRun(conversationId: string) {
   for (const run of activeRuns.values()) {
@@ -320,6 +348,47 @@ if (process.env.CLAUDE_DESK_USER_DATA_DIR) {
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
+/**
+ * 渲染进程被 Chromium 或系统杀掉之后窗口会一直白着，而主进程和 Claude 子进程都还在跑：
+ * 自动把界面重载回来。崩溃循环必须挡住，否则重载完再崩一次会一直刷下去。
+ */
+const MAX_RENDERER_RELOADS = 3;
+const RENDERER_RELOAD_RESET_MS = 10 * 60 * 1_000;
+let rendererReloads = 0;
+let lastRendererReloadAt = 0;
+
+function logRendererEvent(text: string) {
+  void appendFile(join(app.getPath("userData"), "renderer-errors.log"), `${new Date().toISOString()} ${text}\n`, "utf8");
+}
+
+/** 渲染进程最常见的死法是整机内存吃紧时被挑出来杀掉，所以日志里要带上当时的内存水位。 */
+function describeSystemMemory() {
+  try {
+    const memory = process.getSystemMemoryInfo();
+    return `system memory free ${Math.round(memory.free / 1024)}MB of ${Math.round(memory.total / 1024)}MB`;
+  } catch {
+    return "system memory unknown";
+  }
+}
+
+function recoverRenderer(window: BrowserWindow) {
+  if (isQuitting || window.isDestroyed()) return;
+  const now = Date.now();
+  if (now - lastRendererReloadAt > RENDERER_RELOAD_RESET_MS) rendererReloads = 0;
+  if (rendererReloads >= MAX_RENDERER_RELOADS) {
+    logRendererEvent("renderer not reloaded: crashed too many times in a row");
+    return;
+  }
+  rendererReloads += 1;
+  lastRendererReloadAt = now;
+  // 立刻重载很容易撞上同一个坏状态（内存还没让出来），等一下再拉，而且一次比一次等得久。
+  setTimeout(() => {
+    if (isQuitting || window.isDestroyed()) return;
+    logRendererEvent(`reloading renderer (attempt ${rendererReloads})`);
+    window.webContents.reload();
+  }, rendererReloads * 1_000);
+}
+
 function createWindow() {
   // 测试时把窗口挪到屏幕外、而且不抢焦点：Playwright 的操作和截图都走 webContents，窗口不必
   // 摆在人眼前。否则每跑一次测试就抢一次焦点，机器根本没法用。
@@ -362,9 +431,13 @@ function createWindow() {
   });
 
   window.webContents.on("render-process-gone", (_event, details) => {
-    const line = `${new Date().toISOString()} renderer ${details.reason} (${details.exitCode})\n`;
-    void appendFile(join(app.getPath("userData"), "renderer-errors.log"), line, "utf8");
+    logRendererEvent(`renderer ${details.reason} (${details.exitCode}), ${describeSystemMemory()}`);
+    recoverRenderer(window);
   });
+
+  // 整条主线程卡死也是一样的白屏，只是进程还活着：把当时的内存水位记下来，事后能分清是崩了还是卡住了。
+  window.webContents.on("unresponsive", () => logRendererEvent(`renderer unresponsive, ${describeSystemMemory()}`));
+  window.webContents.on("responsive", () => logRendererEvent("renderer responsive again"));
 
   window.on("focus", () => window.flashFrame(false));
   window.on("close", (event) => {
@@ -2116,8 +2189,14 @@ ipcMain.handle("projects:load", async () => {
   try {
     const value: unknown = JSON.parse(await readFile(projectsStorePath(), "utf8"));
     return Array.isArray(value) ? value : null;
-  } catch {
-    return null;
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    // 文件还不存在是正常的首次启动；内容坏掉要留下记录，再当成「还没有存储」让渲染层用副本重建。
+    if (code === "ENOENT") return null;
+    logRendererEvent(`project store unreadable (${code ?? (error as Error).name}): ${(error as Error).message}`);
+    if (code === undefined) return null;
+    // 读取本身失败（占用、权限等）：必须把错误抛给渲染层，否则它会拿内存里的旧副本把真数据覆盖掉。
+    throw error;
   }
 });
 
@@ -2328,6 +2407,29 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     if (activeRun.unansweredTurnFallback) clearTimeout(activeRun.unansweredTurnFallback);
     activeRun.unansweredTurnFallback = undefined;
   };
+  /** 扣住的那个 result 要么被后面的输出证伪（丢掉），要么到点了按原样收尾（apply）。 */
+  const clearDeferredResult = (apply: boolean) => {
+    const deferred = activeRun.deferredResult;
+    if (!deferred) return;
+    clearTimeout(deferred.timer);
+    activeRun.deferredResult = undefined;
+    if (apply) completeCurrentTurn(deferred.record, false);
+  };
+  const clearExitWatchdog = () => {
+    if (activeRun.exitWatchdog) clearTimeout(activeRun.exitWatchdog);
+    activeRun.exitWatchdog = undefined;
+  };
+  /** 轮次都收尾了、stdin 也关了，进程还赖着就只能连子进程树一起收掉，否则对话永远是「在跑」。 */
+  const scheduleExitWatchdog = () => {
+    clearExitWatchdog();
+    activeRun.exitWatchdog = setTimeout(() => {
+      activeRun.exitWatchdog = undefined;
+      // 进程已经退出（close 里删过），或者又有轮次在跑，都不该动它。
+      if (!activeRuns.has(request.runId) || activeRun.unfinishedTurnRunIds.size > 0) return;
+      logRendererEvent(`killing claude pid ${activeRun.child.pid ?? "unknown"}: 轮次已收尾但进程 ${EXIT_WATCHDOG_MS}ms 内没有退出`);
+      killRunTree(activeRun);
+    }, EXIT_WATCHDOG_MS);
+  };
   const completeCurrentTurn = (data: Record<string, unknown>, completedFromEndTurn: boolean, handedOff = false) => {
     clearEndTurnFallback();
     clearUnansweredTurnFallback();
@@ -2347,6 +2449,7 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     } else {
       activeRun.staleResultDeadline = 0;
       activeRun.child.stdin.end();
+      scheduleExitWatchdog();
     }
     if (observedSessionId) {
       void normalizeClaudeDeskSession(request.cwd, observedSessionId, existingSessionPrefix).catch(() => undefined);
@@ -2436,10 +2539,16 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     }
     // CLI 每开始新的一轮都会先发 system/init（实测在上一轮 result 之后约 13ms），
     // 这是“这一轮真的被当成独立轮次在跑”最早、也最可靠的信号。被折叠的追加提示没有它。
-    if (record.type === "system" && record.subtype === "init") clearUnansweredTurnFallback();
+    // 它同时证明刚才扣住的那个空 result 属于上一轮：不必再等模型吐第一个字就能撤掉。
+    if (record.type === "system" && record.subtype === "init") {
+      clearUnansweredTurnFallback();
+      clearDeferredResult(false);
+    }
     if (record.type === "control_request") {
       const requestId = record.request_id;
       if (typeof requestId === "string" && requestId.length > 0 && requestId.length <= 200) {
+        // 这一轮在等用户授权，绝不能让扣住的那个空 result 到点把气泡收掉。
+        clearDeferredResult(false);
         activeRun.pendingControlRequestIds.add(requestId);
         emit(owner, { runId: activeRun.currentTurnRunId, type: "control_request", data: record });
       }
@@ -2453,6 +2562,24 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
       activeRun.staleResultDeadline = 0;
       // 兜底收尾之后紧跟着到达的 result 属于已经结束的那一轮，丢弃它不会让任何一轮丢失结束事件。
       if (stale) return;
+      // 又来一个 result：先前扣住的那个确实属于别人，直接丢掉，用这个收尾。
+      clearDeferredResult(false);
+      const resultText = typeof record.result === "string" ? record.result.trim() : "";
+      const denials = Array.isArray(record.permission_denials) && record.permission_denials.length > 0;
+      // 空的成功 result + 这一轮一个字都没输出过 = 很可能是 CLI 替自己跑的那一轮（后台任务通知
+      // 之类）。先扣住，等后面有没有真正的输出；报错和待授权的 result 一定要当场收尾，否则
+      // 界面会一直等着一个不会再来的结果。
+      if (!activeRun.currentTurnHasOutput && record.is_error !== true && resultText.length === 0 && !denials) {
+        logRendererEvent(`deferring empty result for turn ${activeRun.currentTurnRunId}: 这一轮还没有任何输出`);
+        activeRun.deferredResult = {
+          record,
+          timer: setTimeout(() => {
+            activeRun.deferredResult = undefined;
+            completeCurrentTurn(record, false);
+          }, UNSOLICITED_RESULT_GRACE_MS),
+        };
+        return;
+      }
       completeCurrentTurn(record, false);
       return;
     }
@@ -2460,6 +2587,8 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
       activeRun.currentTurnHasOutput = true;
       activeRun.staleResultDeadline = 0;
       clearUnansweredTurnFallback();
+      // 这一轮真的开始出东西了，说明刚才扣住的那个空 result 是别人的，丢掉。
+      clearDeferredResult(false);
     }
     emit(owner, { runId: activeRun.currentTurnRunId, type: "message", data: record });
     // 这次工具调用的结果仍属于上一轮，发出去之后才交接：再往后的输出模型已经看到追加的提示了。
@@ -2488,6 +2617,8 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
   child.on("error", (error) => {
     clearEndTurnFallback();
     clearUnansweredTurnFallback();
+    clearDeferredResult(false);
+    clearExitWatchdog();
     activeRuns.delete(request.runId);
     for (const turnRunId of activeRun.unfinishedTurnRunIds) emit(owner, { runId: turnRunId, type: "error", message: error.message });
   });
@@ -2498,6 +2629,11 @@ ipcMain.handle("claude:start", async (event, value: unknown) => {
     activeRuns.delete(request.runId);
     // 等最后几行输出处理完，否则 exit 事件会插到还没派发的消息前面。
     await lineQueue.catch(() => undefined);
+    // 进程都退出了，扣住的那个 result 再没有别人可归属：按原样给这一轮收尾，
+    // 否则气泡会被下面的退出分支写成「没有返回结果」的报错。
+    clearDeferredResult(true);
+    // 收尾动作会重新架起退出看守，进程已经没了，这里一并撤掉。
+    clearExitWatchdog();
     if (observedSessionId) {
       try {
         await normalizeClaudeDeskSession(request.cwd, observedSessionId, existingSessionPrefix);
