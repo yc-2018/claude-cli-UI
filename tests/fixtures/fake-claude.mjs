@@ -623,26 +623,38 @@ const processPrompt = (input) => {
     return;
   }
 
-  // 每一条回答的 token 计数：message_delta 带本次请求的累计 output_tokens，assistant 记录带
-  // 这次请求的总量，result.usage 是整轮的累加——界面按同样的口径显示，两个请求要能加起来。
+  // 每一条回答的 token 计数，按真实 CLI 的 wire 形状来：每次请求发 message_start / message_delta /
+  // message_stop，message_delta 带的才是这次请求的终值，而且每次请求都从零重新算；同一次请求里每个
+  // 内容块还各带一条 assistant 记录，它的 usage 只是请求刚开头的快照（个位数），拿它累计会让数字
+  // 在新请求开始时掉回个位数。result.usage 是整轮累加，收尾用它校准。
   if (prompt.includes("token 计数测试")) {
     const first = "先输出一段。";
+    const second = "再补一段。";
     send({ type: "system", subtype: "init", session_id: sessionId, model, slash_commands: ["story", "compact"] });
+    send({ type: "stream_event", event: { type: "message_start", message: { usage: { input_tokens: 1_000, output_tokens: 0 } } }, session_id: sessionId });
+    send({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, session_id: sessionId });
     send({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: first } }, session_id: sessionId });
-    send({ type: "stream_event", event: { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 120 } }, session_id: sessionId });
     send({
       type: "assistant",
-      message: { role: "assistant", content: [{ type: "text", text: first }], usage: { input_tokens: 1_000, output_tokens: 120 } },
+      message: { role: "assistant", content: [{ type: "text", text: first }], usage: { input_tokens: 1_000, output_tokens: 2 } },
       session_id: sessionId,
     });
+    send({ type: "stream_event", event: { type: "content_block_stop", index: 0 }, session_id: sessionId });
+    send({ type: "stream_event", event: { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 120 } }, session_id: sessionId });
+    send({ type: "stream_event", event: { type: "message_stop" }, session_id: sessionId });
     setTimeout(() => {
       // 第二个请求的 message_delta 从 0 重新累计，界面要把两段加起来而不是被覆盖。
-      send({ type: "stream_event", event: { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 80 } }, session_id: sessionId });
+      send({ type: "stream_event", event: { type: "message_start", message: { usage: { input_tokens: 1_100, output_tokens: 0 } } }, session_id: sessionId });
+      send({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, session_id: sessionId });
+      send({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: second } }, session_id: sessionId });
       send({
         type: "assistant",
-        message: { role: "assistant", content: [{ type: "text", text: "再补一段。" }], usage: { input_tokens: 1_100, output_tokens: 80 } },
+        message: { role: "assistant", content: [{ type: "text", text: second }], usage: { input_tokens: 1_100, output_tokens: 1 } },
         session_id: sessionId,
       });
+      send({ type: "stream_event", event: { type: "content_block_stop", index: 0 }, session_id: sessionId });
+      send({ type: "stream_event", event: { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 80 } }, session_id: sessionId });
+      send({ type: "stream_event", event: { type: "message_stop" }, session_id: sessionId });
       setTimeout(() => {
         send({
           type: "result",

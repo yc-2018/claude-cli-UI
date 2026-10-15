@@ -65,9 +65,12 @@ interface RunMeta {
   pendingThinking: string;
   activeTextBlockId?: string;
   flushTimer?: number;
-  /** 这一轮已经产生的输出 token：流式增量按请求累计，assistant 记录把已完成请求并进基线。 */
-  outputTokens?: number;
+  /** 这个气泡在本次 run 之前已经显示过的输出 token：授权后续跑沿用原气泡，数字不能退回去重算。 */
+  outputTokenCarry?: number;
+  /** 本次 run 里已经结束的请求的输出 token 之和。 */
   outputTokenBaseline?: number;
+  /** 当前这次请求最新的 message_delta 读数，请求收尾时并进基线。 */
+  requestOutputTokens?: number;
   pendingOutputTokens?: number;
   /** 这一轮是带着截断点发出去的，被它顶掉的那一轮的提示 uuid：CLI 拒绝回退时要把它撤回来。 */
   droppedPromptUuid?: string;
@@ -104,6 +107,14 @@ interface CliCommandNotice {
   sessionId: string;
   commands: CliCommandEntry[];
   copiedCommand?: string;
+}
+
+/**
+ * 这一轮到此刻的输出 token：原气泡上已有的 + 本次 run 里已结束请求的 + 当前请求的最新读数。
+ * 三段都只会往上加，数字不会随着请求交替而上下跳。
+ */
+function runOutputTokens(meta: RunMeta) {
+  return (meta.outputTokenCarry ?? 0) + (meta.outputTokenBaseline ?? 0) + (meta.requestOutputTokens ?? 0);
 }
 
 function finishResponse(message: ChatMessage, now = Date.now()): Pick<ChatMessage, "responseDurationMs" | "responseCompletedAt" | "retry"> {
@@ -282,8 +293,13 @@ function getThinkingDelta(data: Record<string, unknown>) {
 }
 
 /**
- * 一次请求已经产出的输出 token。CLI 的 message_delta 报的是本次请求的累计值（不是这一轮的），
- * 所以轮次内的总量要由调用方把已完成请求的基线加起来。
+ * 一次请求到此刻的输出 token 累计值。wire 上只有 message_delta 的 usage 是准的：它在请求收尾前
+ * 报出这次请求的最终产出，而且每次请求都从零重新算，所以轮次内的总量要由调用方把已结束请求的
+ * 基线加起来。
+ *
+ * 同一次请求的每个内容块还会各带一条 assistant 记录，但它们的 usage 是请求刚开头的快照（实测
+ * 1、2、24 这种个位数，session 文件里才被改写成最终值），绝不能拿来累计——之前按它累计，数字
+ * 会在每次新请求开始时掉回个位数再冲高，一轮下来忽上忽下。
  */
 function getStreamOutputTokens(data: Record<string, unknown>) {
   if (data.type !== "stream_event" || !data.event || typeof data.event !== "object") return undefined;
@@ -292,15 +308,20 @@ function getStreamOutputTokens(data: Record<string, unknown>) {
   return numberValue((streamEvent.usage as Record<string, unknown>).output_tokens);
 }
 
-/** 一条 assistant 记录代表一次请求结束，usage.output_tokens 是这次请求的总产出。 */
-function getAssistantOutputTokens(data: Record<string, unknown>) {
-  if (data.type !== "assistant") return undefined;
-  const message = data.message && typeof data.message === "object" ? data.message as Record<string, unknown> : undefined;
-  const usage = message?.usage && typeof message.usage === "object" ? message.usage as Record<string, unknown> : undefined;
-  return usage ? numberValue(usage.output_tokens) : undefined;
+/**
+ * 一次请求的起止。message_stop 之后这次请求的 message_delta 读数就定了，把它并进基线，下一次
+ * 请求才能从基线接着往上加。message_start 也一起并一次，用于兜底被打断、没等到 message_stop 的请求。
+ */
+function getStreamMessageBoundary(data: Record<string, unknown>) {
+  if (data.type !== "stream_event" || !data.event || typeof data.event !== "object") return false;
+  const streamEvent = (data.event as Record<string, unknown>).type;
+  return streamEvent === "message_start" || streamEvent === "message_stop";
 }
 
-/** result.usage 是整轮所有请求的累加，收尾时用它校准，流式期间漏掉的任何一段都能补上。 */
+/**
+ * result.usage 是整轮所有请求的累加，收尾时用它校准，流式期间漏掉的任何一段都能补上。
+ * 实测三轮真实 CLI 输出，它都正好等于这一轮每次请求 message_delta 终值之和（422 / 394 / 285）。
+ */
 function getResultOutputTokens(data: Record<string, unknown>) {
   if (data.type !== "result" || !data.usage || typeof data.usage !== "object") return undefined;
   return numberValue((data.usage as Record<string, unknown>).output_tokens);
@@ -2007,10 +2028,16 @@ export default function App() {
       }
 
       // token 计数和正文一样走 50ms 合并，避免每个流式片段都触发一次整棵树的更新。
+      // 一轮里会连发多次请求，每次请求的 message_delta 都从零重新算，所以请求收尾时要先把它的
+      // 终值并进基线，下一次请求的读数再从基线往上叠。
+      if (getStreamMessageBoundary(data)) {
+        meta.outputTokenBaseline = (meta.outputTokenBaseline ?? 0) + (meta.requestOutputTokens ?? 0);
+        meta.requestOutputTokens = undefined;
+      }
       const streamOutputTokens = getStreamOutputTokens(data);
       if (streamOutputTokens !== undefined) {
-        meta.outputTokens = (meta.outputTokenBaseline ?? 0) + streamOutputTokens;
-        meta.pendingOutputTokens = meta.outputTokens;
+        meta.requestOutputTokens = streamOutputTokens;
+        meta.pendingOutputTokens = runOutputTokens(meta);
         if (meta.flushTimer === undefined) meta.flushTimer = window.setTimeout(() => flushPendingText(meta), 50);
       }
 
@@ -2018,11 +2045,6 @@ export default function App() {
         flushPendingText(meta);
         const receivedText = meta.receivedText;
         const receivedThinking = meta.receivedThinking;
-        const assistantOutputTokens = getAssistantOutputTokens(data);
-        if (assistantOutputTokens !== undefined) {
-          meta.outputTokenBaseline = (meta.outputTokenBaseline ?? 0) + assistantOutputTokens;
-          meta.outputTokens = meta.outputTokenBaseline;
-        }
         updateResponse(meta, (message) => {
           let next = message.retry ? { ...message, retry: undefined } : message;
           for (const block of getAssistantContent(data)) {
@@ -2046,9 +2068,6 @@ export default function App() {
               next = { ...next, activeActivityId: activityId };
             }
           }
-          if (assistantOutputTokens !== undefined) {
-            next = { ...next, outputTokens: meta.outputTokenBaseline };
-          }
           return next;
         });
         meta.receivedText = false;
@@ -2070,7 +2089,11 @@ export default function App() {
         const isError = data.is_error === true;
         meta.successful = !isError && permissionRequests.length === 0;
         const resultText = typeof data.result === "string" ? data.result : "";
+        // result.usage 只统计本次 run 发出的请求，授权后续跑是另起的进程，要把原气泡上已有的量加回来。
         const resultOutputTokens = getResultOutputTokens(data);
+        const totalOutputTokens = resultOutputTokens === undefined
+          ? undefined
+          : (meta.outputTokenCarry ?? 0) + resultOutputTokens;
         const resultBlockId = makeId();
         // 每一轮都有自己的气泡，这一轮的 result 只收尾自己，不再借别的轮次继续显示“运行中”。
         updateResponse(meta, (message) => ({
@@ -2078,7 +2101,7 @@ export default function App() {
           activeActivityId: undefined,
           status: permissionRequests.length > 0 ? "stopped" : (isError ? "error" : "done"),
           error: isError ? resultText || "Claude 未能完成这次任务" : undefined,
-          ...(resultOutputTokens !== undefined ? { outputTokens: resultOutputTokens } : {}),
+          ...(totalOutputTokens !== undefined ? { outputTokens: totalOutputTokens } : {}),
           ...finishResponse(message),
         }));
         if (permissionRequests.length > 0) {
@@ -3022,6 +3045,8 @@ export default function App() {
       processRunId: runId,
       responseId: pendingPermission.responseId,
       appendToResponse: true,
+      // 续跑接着用原来那个气泡，token 要从它已经显示的数往上加，否则数字会退回这次续跑的量。
+      outputTokenCarry: conversation.messages.find((item) => item.id === pendingPermission.responseId)?.outputTokens,
       started: true,
       registeredAt: Date.now(),
       completed: false,

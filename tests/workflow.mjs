@@ -3132,9 +3132,11 @@ try {
     throw new Error("localStorage 副本写失败时，新建的对话没有写进 projects.json");
   });
 
-  // 回归：每条回答的底部要像 CLI 一样显示这一轮已经产生的输出 token，并且随着回复增长。
-  // message_delta 报的是本次请求的累计值，一轮里多次请求（工具调用之后再起一轮）必须相加，
-  // 收尾时再用 result.usage 的整轮总数校准。这个用例复用上面新建的对话，不新增对话。
+  // 回归：每条回答的底部要像 CLI 一样显示这一轮已经产生的输出 token，并且只增不减。
+  // 一轮里会连发多次请求，只有 message_delta 的读数是准的（每次请求从零重新算，收尾并进基线）；
+  // 同一次请求里每个内容块带的那条 assistant 记录，usage 是请求刚开头的快照，按它累计会让数字在
+  // 新请求开始时掉回个位数再冲高。收尾时再用 result.usage 的整轮总数校准。
+  // 这个用例复用上面新建的对话，不新增对话。
   await page.evaluate(() => {
     window.__tokenSamples = [];
     const observer = new MutationObserver(() => {
@@ -3160,6 +3162,14 @@ try {
   const tokenSamples = await page.evaluate(() => window.__tokenSamples);
   if (new Set(tokenSamples).size < 2 || tokenSamples[tokenSamples.length - 1] !== 200) {
     throw new Error(`token 数没有随着回复增长：${JSON.stringify(tokenSamples)}`);
+  }
+  const shrinkIndex = tokenSamples.findIndex((value, index) => index > 0 && value < tokenSamples[index - 1]);
+  if (shrinkIndex >= 0) {
+    throw new Error(`token 数在流式期间往下跳了：${JSON.stringify(tokenSamples)}`);
+  }
+  // 第一个请求的终值必须原样出现过：出现 2 或 1 这种块级 assistant 的快照值，说明又在按它累计了。
+  if (!tokenSamples.includes(120)) {
+    throw new Error(`第一个请求的 token 终值没有显示出来：${JSON.stringify(tokenSamples)}`);
   }
 
   // 崩溃之后 Playwright 对这个页面的 CDP 调用会异步抛 "Target crashed"，断言只走主进程侧。
